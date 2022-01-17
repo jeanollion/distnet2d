@@ -249,7 +249,7 @@ class UpSamplingLayer2D(Layer):
                 name=f"Conv{kernel_size}x{kernel_size}",
                 # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
                 use_bias=use_bias,
-                activation=None
+                activation=activation
             )
 
         _available_normalization = {
