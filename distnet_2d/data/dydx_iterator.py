@@ -146,18 +146,19 @@ class DyDxIterator(TrackingIterator):
             edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
         all_channels.insert(0, edm)
         downscale_factor = 1./self.downscale if self.downscale>1 else 0
+        scale = [1, downscale_factor, downscale_factor, 1]
         if self.downscale>>1:
-            dyIm = rescale(dyIm, downscale_factor, anti_aliasing= False, order=0)
-            dxIm = rescale(dxIm, downscale_factor, anti_aliasing= False, order=0)
+            dyIm = rescale(dyIm, scale, anti_aliasing= False, order=0)
+            dxIm = rescale(dxIm, scale, anti_aliasing= False, order=0)
         all_channels.insert(1, dyIm)
         all_channels.insert(2, dxIm)
         if self.return_categories:
             if self.downscale>>1:
-                categories = rescale(categories, downscale_factor, anti_aliasing= False, order=0)
+                categories = rescale(categories, scale, anti_aliasing= False, order=0)
             all_channels.insert(3, categories)
             if return_next:
                 if self.downscale>>1:
-                    categories_next = rescale(categories_next, downscale_factor, anti_aliasing= False, order=0)
+                    categories_next = rescale(categories_next, scale, anti_aliasing= False, order=0)
                 all_channels.insert(4, categories_next)
 
         return all_channels
