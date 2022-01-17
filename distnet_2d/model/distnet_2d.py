@@ -1,5 +1,5 @@
 import tensorflow as tf
-from .layers import ConvNormAct, Bneck, Upsampling2D, StopGradient, Combine
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine
 from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -154,6 +154,7 @@ class DiSTNet2D(Model):
             return edm, dy, dx, cat
 
     def get_model(self, input_shape):
+        self.build((None,)+input_shape)
         x = tf.keras.layers.Input(shape=input_shape)
         return Model(inputs=[x], outputs=self.call(x), name=self.name)
 
@@ -203,7 +204,7 @@ class DecoderLayer(Layer):
         ):
         super().__init__(name=f"{name}_{layer_idx}")
         self.size_factor = size_factor
-        self.up_op = Upsampling2D(filters=filters, kernel_size=size_factor, mode=mode, activation=activation, l2_reg=l2_reg, use_bias=use_bias)
+        self.up_op = UpSamplingLayer2D(filters=filters, kernel_size=size_factor, mode=mode, activation=activation, l2_reg=l2_reg, use_bias=use_bias)
         if skip_combine_mode=="conv":
             self.combine = Combine(filters=filters, l2_reg=l2_reg)
         else:

@@ -1,5 +1,5 @@
 from tensorflow import pad
-from tensorflow.keras.layers import Layer, GlobalAveragePooling2D, Reshape, Conv2D, Multiply, Conv3D
+from tensorflow.keras.layers import Layer, GlobalAveragePooling2D, Reshape, Conv2D, Multiply, Conv3D, UpSampling2D
 from tensorflow.keras import Model
 from ..utils.helpers import ensure_multiplicity, get_nd_gaussian_kernel
 from tensorflow.python.keras.engine.input_spec import InputSpec
@@ -213,7 +213,7 @@ class Downsampling2D(Layer):
     def call(self, input):
         return self.operation(input)
 
-class Upsampling2D(Layer):
+class UpSamplingLayer2D(Layer):
     def __init__(
             self,
             filters: int,
