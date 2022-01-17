@@ -1,5 +1,6 @@
 from tensorflow import pad
 from tensorflow.keras.layers import Layer, GlobalAveragePooling2D, Reshape, Conv2D, Multiply, Conv3D
+from tensorflow.keras import Model
 from ..utils.helpers import ensure_multiplicity, get_nd_gaussian_kernel
 from tensorflow.python.keras.engine.input_spec import InputSpec
 import tensorflow as tf
@@ -233,20 +234,20 @@ class Upsampling2D(Layer):
                 padding='same',
                 activation=None,
                 use_bias=use_bias,
-                kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
+                # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
                 name=f"tConv{kernel_size}x{kernel_size}",
             )
             self.conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
-            self.upsample = UpSampling2D(size=kernel_size, interpolation=interpolation, name = n+"_upsample")
+            self.upsample = UpSampling2D(size=kernel_size, interpolation=interpolation, name = f"Upsample_{interpolation}")
             self.conv = tf.keras.layers.Conv2D(
                 filters=filters,
                 kernel_size=kernel_size,
                 strides=1,
                 padding='same',
                 name=f"Conv{kernel_size}x{kernel_size}",
-                kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
+                # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
                 use_bias=use_bias,
                 activation=None
             )
@@ -306,7 +307,14 @@ class Combine(Layer):
         ):
         super().__init__(name=name)
         self.concat = tf.keras.layers.Concatenate(axis=-1, name = "Concat")
-        self.combine_conv = Conv2D(filters=filters, kernel_size=1, padding='same', activation=activation, use_bias=use_bias, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name="Conv1x1")
+        self.combine_conv = Conv2D(
+            filters=filters,
+            kernel_size=1,
+            padding='same',
+            activation=activation,
+            use_bias=use_bias,
+            # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
+            name="Conv1x1")
 
     def call(self, input):
         x = self.concat(input)
@@ -501,7 +509,7 @@ class Bneck(Layer):
             depthwise_regularizer=tf.keras.regularizers.l2(l2_reg),
             use_bias=False,
         )
-        self.bn = BatchNormalization("Depthwise/BN")
+        self.bn = BatchNormalization("Depthwise/BN") if batch_norm else None
         if self.use_se:
             self.se = SEBottleneck( l2_reg=l2_reg, name="Depthwise/SEBottleneck",)
         _available_activation = {
@@ -522,14 +530,15 @@ class Bneck(Layer):
         )
 
     def build(self, input_shape):
-        self.in_channels = int(input_shape[3])
+        self.in_channels = int(input_shape[-1])
         super().build(input_shape)
 
     def call(self, input):
         x = self.expand(input)
         x = self.pad(x)
         x = self.depthwise(x)
-        x = self.bn(x)
+        if self.bn is not None:
+            x = self.bn(x)
         if self.use_se:
             x = self.se(x)
         x = self.act(x)

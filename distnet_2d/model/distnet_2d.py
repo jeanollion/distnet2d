@@ -153,10 +153,18 @@ class DiSTNet2D(Model):
         else:
             return edm, dy, dx, cat
 
-    def summary(self, input_shape, **kwargs):
+    def get_model(self, input_shape):
         x = tf.keras.layers.Input(shape=input_shape)
-        model = Model(inputs=[x], outputs=self.call(x))
+        return Model(inputs=[x], outputs=self.call(x), name=self.name)
+
+    def summary(self, input_shape, **kwargs):
+        model = self.get_model(input_shape)
         return model.summary(**kwargs)
+
+    def plot_model(self, input_shape, **kwargs):
+        from tensorflow.keras.utils import plot_model
+        model = self.get_model(input_shape)
+        plot_model(model, **kwargs)
 
 class EncoderLayer(Layer):
     def __init__( self, param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1, ):
