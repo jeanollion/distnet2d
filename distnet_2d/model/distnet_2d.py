@@ -1,6 +1,6 @@
 import tensorflow as tf
-from .layers import ConvNormAct, Bneck, Downsampling2D, Upsampling2D, StopGradient, Combine
-from tensorflow.keras.layers import Conv2D
+from .layers import ConvNormAct, Bneck, Upsampling2D, StopGradient, Combine
+from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
 import numpy as np
@@ -54,6 +54,7 @@ class DiSTNet2D(Model):
     def __init__(
             self,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
+            downsampling_mode:str = "stride", #maxpool, stride
             skip_combine_mode:str = "conv", # conv, sum
             first_skip_mode:str = "sg", # sg, omit, None
             encoder_settings:list = ENCODER_SETTINGS,
@@ -77,6 +78,7 @@ class DiSTNet2D(Model):
         self.directional_attention=directional_attention
         self.total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in self.encoder_settings])
         self.l2_reg = l2_reg
+        self.downsampling_mode=downsampling_mode
         self.upsampling_mode=upsampling_mode
         self.skip_combine_mode=skip_combine_mode
         self.first_skip_mode=first_skip_mode
@@ -88,7 +90,7 @@ class DiSTNet2D(Model):
         self.next = input_shape[-1]==3
 
         self.encoder_layers = [
-            EncoderLayer(param_list, layer_idx = l_idx)
+            EncoderLayer(param_list, downsampling_mode=self.downsampling_mode, layer_idx = l_idx)
             for l_idx, param_list in enumerate(self.encoder_settings)
         ]
         self.feature_convs, _, _ = parse_param_list(self.feature_settings, "FeatureSequence")
@@ -157,9 +159,12 @@ class DiSTNet2D(Model):
         return model.summary(**kwargs)
 
 class EncoderLayer(Layer):
-    def __init__( self, param_list, name: str="EncoderLayer", layer_idx:int=1, ):
+    def __init__( self, param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1, ):
         super().__init__(name=f"{name}_{layer_idx}")
-        self.sequence, self.down_op, self.total_contraction = parse_param_list(param_list)
+        maxpool = downsampling_mode=="maxpool"
+        self.sequence, self.down_op, self.total_contraction = parse_param_list(param_list, ignore_stride=maxpool)
+        if maxpool:
+            self.down_op = MaxPool2D(pool_size=self.total_contraction, name=f"Maxpool{self.total_contraction}x{self.total_contraction}")
 
     def compute_output_shape(self, input_shape):
       return (input_shape[0], input_shape[1]//self.total_contraction, input_shape[2]//self.total_contraction, input_shape[3]), input_shape
@@ -221,7 +226,13 @@ class DecoderLayer(Layer):
     def compute_output_shape(self, input_shape):
         return input_shape[0],input_shape[1] * self.size_factor, input_shape[2] * self.size_factor,input_shape[3]
 
-def parse_param_list(param_list, name="Sequence"):
+def parse_param_list(param_list, ignore_stride:bool = False, name="Sequence"):
+    total_contraction = 1
+    if ignore_stride:
+        param_list = [params.copy() for params in param_list]
+        for params in param_list:
+            total_contraction *= params.get("downscale", 1)
+            params["downscale"] = 1
     # split into squence with no stride (for residual) and the rest of the sequence
     i = 0
     if param_list[0].get("downscale", 1)==1:
@@ -235,7 +246,7 @@ def parse_param_list(param_list, name="Sequence"):
             i=1
     else:
         sequence=None
-    total_contraction = 1
+
     if i<len(param_list):
         if i==len(param_list):
             down = parse_params(**param_list[i], name="DownOp")
