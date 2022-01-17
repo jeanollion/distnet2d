@@ -1,0 +1,6 @@
+*.pyc
+test.py
+DiST_Net.egg-info/*
+dist/*
+build/*
+*.tar.gz
