@@ -21,7 +21,7 @@ class DyDxIterator(TrackingIterator):
         extract_tile_function = extract_tile_random_zoom_function(tile_shape=(128, 128), n_tiles=8, zoom_range=[0.6, 1.6], aspect_ratio_range=[0.75, 1.5], random_channel_jitter_shape=[50, 50] ),
         elasticdeform_parameters:dict = {},
         downscale_displacement_and_categories=1,
-        raw_image_data_generator=None,
+        input_image_data_generator=None,
         **kwargs):
         if len(channel_keywords)!=3:
             raise ValueError('keyword should contain 3 elements in this order: grayscale input images, object labels, object previous labels')
@@ -30,6 +30,8 @@ class DyDxIterator(TrackingIterator):
         self.downscale=downscale_displacement_and_categories
         self.erase_edge_cell_size=erase_edge_cell_size
         self.aug_frame_subsampling=aug_frame_subsampling
+        if input_image_data_generator is not None:
+            kwargs["image_data_generators"] = [input_image_data_generator, None, None]
         super().__init__(dataset=dataset,
                     channel_keywords=channel_keywords,
                     input_channels=[0],
@@ -42,7 +44,6 @@ class DyDxIterator(TrackingIterator):
                     convert_masks_to_dtype=False,
                     extract_tile_function=extract_tile_function,
                     elasticdeform_parameters=elasticdeform_parameters,
-                    image_data_generators=[raw_image_data_generator, None, None],
                     **kwargs)
 
     def _get_batch_by_channel(self, index_array, perform_augmentation, input_only=False, perform_elasticdeform=True, perform_tiling=True):
