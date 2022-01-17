@@ -12,61 +12,62 @@ class DiSTNet2D(Model):
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             skip_combine_mode:str = "conv", # conv, sum
             first_skip_mode:str = "sg", # sg, omit, None
-            attention_filters:int = 512,
+            attention_filters:int = 1024,
             output_conv_filters:int=32,
+            output_conv_level = 1,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
         super().__init__(name=name)
+        self.output_conv_level=output_conv_level
         self.down_settings = [
-            # k   exp   out  SE      NL         s
             [ # l1 = 128 -> 64
-                [ 3,  16,   16,  False,   "relu",  1 ],
-                [ 3,  16,   16,  False,   "relu",  2 ],
+                {"filters":16},
+                {"filters":16, "downscale":2}
             ],
             [  # l2 64 -> 32
-                [ 3,  32,   32,  False,  "relu",    1 ],
-                [ 3,  32,   32,  False,  "relu",    2 ],
+                {"filters":32},
+                {"filters":32, "downscale":2}
             ],
             [ # l3: 32->16
-                [ 5,  120,   40,  False,  "relu",    1 ],
-                [ 3,  120,   40,  True,  "hswish",    1 ],
-                [ 3,  240,   80,  True,  "hswish",    2 ],
+                {"filters":40, "expand_filters":120, "kernel_size":5, "SE":False},
+                {"filters":40, "expand_filters":120, "activation":"hswish"},
+                {"filters":80, "expand_filters":240, "activation":"hswish", "downscale":2},
             ],
             [ # l4: 16 -> 8
-                [ 3,  200,   80,  True,   "hswish",  1 ],
-                [ 3,  184,   80,  True,   "hswish",  1 ],
-                [ 3,  184,   80,  True,   "hswish",  1 ],
-                [ 3,  480,   112,  True,   "hswish",  1 ],
-                [ 5,  672,   112,  True,   "hswish",  1 ],
-                [ 3,  672,   160,  True,   "hswish",  2 ]
+                {"filters":80, "expand_filters":200, "activation":"hswish"},
+                {"filters":80, "expand_filters":184, "activation":"hswish"},
+                {"filters":80, "expand_filters":184, "activation":"hswish"},
+                {"filters":112, "expand_filters":480, "activation":"hswish"},
+                {"filters":112, "expand_filters":672, "kernel_size":5, "activation":"hswish"},
+                {"filters":160, "expand_filters":672, "activation":"hswish", "downscale":2}
             ]
 
         ]
         self.feature_settings = [
-            [ 5,  960,   160,  True,   "hswish",  1 ],
-            [ 3,  960,   attention_filters,  True,   "hswish",  1 ]
+            {"filters":160, "expand_filters":960, "activation":"hswish"},
+            {"filters":attention_filters, "expand_filters":max(attention_filters, 960), "activation":"hswish"},
         ]
         self.attention_filters=attention_filters
         self.output_conv_filters = output_conv_filters
         self.up_settings = [
             #f, s
-            [16, 2],
-            [96, 2],
-            [128, 2],
-            [256, 2]
+            {"filters":16 if output_conv_level==1 else 64},
+            {"filters":96},
+            {"filters":128},
+            {"filters":256}
         ]
-        self.down_layers = [
+        self.encoder_layers = [
             EncoderLayer(param_list, layer_idx = l_idx)
             for l_idx, param_list in enumerate(self.down_settings)
         ]
 
         self.feature_convs, _, _ = parse_param_list(self.feature_settings, "FeatureSequence")
 
-        self.total_contraction = np.prod([np.prod([param[-1] for param in param_list]) for param_list in self.down_settings])
+        self.total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in self.down_settings])
         self.attention_skip = Combine(filters=self.attention_filters//2, l2_reg=l2_reg, name="SelfAttentionSkip")
 
-        self.up_layers = [DecoderLayer(filters, size_factor=size_factor, conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else None, activation="relu", l2_reg=l2_reg, use_bias=True, layer_idx=l_idx) for l_idx, (filters, size_factor) in enumerate(self.up_settings)]
+        self.decoder_layers = [DecoderLayer(**parameters, size_factor=self.encoder_layers[l_idx].total_contraction, conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else None, activation="relu", l2_reg=l2_reg, use_bias=True, layer_idx=l_idx) for l_idx, parameters in enumerate(self.up_settings)]
 
         self.conv_d = Conv2D(filters=self.output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
         # up_factor = np.prod([self.down_settings[-1-i] for i in range(1)])
@@ -93,7 +94,7 @@ class DiSTNet2D(Model):
     def call(self, input):
         residuals = []
         downsampled = [input]
-        for l in self.down_layers:
+        for l in self.encoder_layers:
             down, res = l(downsampled[-1])
             downsampled.append(down)
             residuals.append(res)
@@ -104,19 +105,19 @@ class DiSTNet2D(Model):
 
         upsampled = [feature]
         residuals = residuals[::-1]
-        for i, l in enumerate(self.up_layers[::-1]):
+        for i, l in enumerate(self.decoder_layers[::-1]):
             up = l([upsampled[-1], residuals[i]])
             upsampled.append(up)
 
         edm = self.conv_edm(upsampled[-1])
 
-        displacement = self.conv_d(upsampled[-2])
+        displacement = self.conv_d(upsampled[-1-self.output_conv_level])
         dy = self.conv_dy(displacement)
         dx = self.conv_dx(displacement)
         #dy = self.d_up(dy)
         #dx = self.d_up(dx)
 
-        categories = self.conv_cat(upsampled[-2])
+        categories = self.conv_cat(upsampled[-1-self.output_conv_level])
         cat  = self.conv_catcur(categories)
         #cat = self.cat_up(cat)
         if self.next:
@@ -199,42 +200,42 @@ class DecoderLayer(Layer):
 def parse_param_list(param_list, name="Sequence"):
     # split into squence with no stride (for residual) and the rest of the sequence
     i = 0
-    if param_list[0][-1]==1:
-        if len(param_list)>1 and param_list[1][-1] == 1:
+    if param_list[0].get("downscale", 1)==1:
+        if len(param_list)>1 and param_list[1].get("downscale", 1) == 1:
             sequence = tf.keras.Sequential(name = name)
-            while i<len(param_list) and param_list[i][-1] == 1:
-                sequence.add(parse_params(*param_list[i], name = f"{i}"))
+            while i<len(param_list) and param_list[i].get("downscale", 1) == 1:
+                sequence.add(parse_params(**param_list[i], name = f"{i}"))
                 i+=1
         else:
-            sequence = parse_params(*param_list[0], name = "0")
+            sequence = parse_params(**param_list[0], name = "0")
             i=1
     else:
         sequence=None
     total_contraction = 1
     if i<len(param_list):
         if i==len(param_list):
-            down = parse_params(*param_list[i], name="DownOp")
-            total_contraction *= param_list[i][-1]
+            down = parse_params(**param_list[i], name="DownOp")
+            total_contraction *= param_list[i].get("downscale", 1)
         else:
             down = tf.keras.Sequential(name = "DownOp")
             for ii in range(i, len(param_list)):
-                down.add(parse_params(*param_list[i], name = f"{i}"))
-                total_contraction *= param_list[i][-1]
+                down.add(parse_params(**param_list[i], name = f"{i}"))
+                total_contraction *= param_list[i].get("downscale", 1)
     else:
         down = None
     return sequence, down, total_contraction
 
-def parse_params(k, exp_filters, filters, SE, act, size_factor, name):
-    if exp_filters == filters:
-        return Conv2D(filters=filters, kernel_size=k, strides = size_factor, padding='same', activation="relu", name=f"Conv{k}x{k}_{name}")
+def parse_params(filters, kernel_size = 3, expand_filters=0, SE=True, activation="relu", downscale=1, name="0"):
+    if expand_filters <= 0:
+        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, padding='same', activation=activation, name=f"Conv{kernel_size}x{kernel_size}f{filters}_{name}")
     else:
         return Bneck(
             out_channels=filters,
-            exp_channels=exp_filters,
-            kernel_size=k,
-            stride=size_factor,
+            exp_channels=expand_filters,
+            kernel_size=kernel_size,
+            stride=downscale,
             use_se=SE,
-            act_layer=act,
+            act_layer=activation,
             skip=True,
-            name=f"Bneck{k}x{k}_{name}"
+            name=f"Bneck{kernel_size}x{kernel_size}f{expand_filters}-{filters}_{name}"
         )
