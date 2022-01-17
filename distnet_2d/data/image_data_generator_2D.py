@@ -2,7 +2,7 @@ from keras_preprocessing.image import ImageDataGenerator
 #from tensorflow.keras.preprocessing.image import ImageDataGenerator # this version doesn't have interpolation_order
 import numpy as np
 from math import tan, atan, pi, copysign
-import distnet_2d.data.pre_processing as pp
+from . import pre_processing as pp
 from random import getrandbits, uniform, choice
 import copy
 import scipy.ndimage as ndi
