@@ -1,38 +1,46 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Layer, Dense, Reshape, Embedding, Concatenate, Conv2D
 from tensorflow.keras.models import Model
+from .layers import Combine
 import numpy as np
 
-class Directional2DSelfAttention(Model):
-    def __init__(self, d_model, spatial_dim, combine_filters, positional_encoding=True, combine_xy=True, return_attention=False, name="self_attention"):
+class Directional2DSelfAttention(Layer):
+    def __init__(self, positional_encoding:bool=True, combine_xy:bool=True, combine_filters:int=0, filters:int=0, return_attention:bool=False, name:str="DirectionalSelfAttention"):
         '''
-            d_model : number of output channels
+            filters : number of output channels (0: use input channel)
             spatial_dim : spatial dimensions of input tensor (x , y)
             if positional_encoding: depth must correspond to input channel number
             adapted from: https://www.tensorflow.org/tutorials/text/transformer
         '''
         super().__init__(name=name)
-        self.d_model = d_model
-        if isinstance(spatial_dim, (tuple, list)):
-            assert len(spatial_dim) == 2 and spatial_dim[0]==spatial_dim[1], "only available for 2D squared images"
-            self.spatial_dim=spatial_dim[0]
-        else:
-            self.spatial_dim=spatial_dim
-        self.wq = Dense(self.d_model * self.spatial_dim, name=name+"_q")
-        self.wk = Dense(self.d_model * self.spatial_dim, name=name+"_k")
-        self.wv = Dense(self.d_model * self.spatial_dim, name=name+"_w")
+        self.filters = filters
+        self.combine_filters=combine_filters
+        self.combine_xy=combine_xy
         self.positional_encoding=positional_encoding
-        if positional_encoding:
-            self.pos_embedding = Embedding(self.spatial_dim, d_model * self.spatial_dim, name=name+"pos_enc")
-        if combine_xy:
-            assert combine_filters>0
-            self.output_depth=combine_filters
-            self.concat_xy = Concatenate(axis=3, name = name+"_concat_xy")
-            self.combine_xy = Conv2D(kernel_size=1, filters = combine_filters, activation='relu', name=name+"_conmbine_xy")
-        else:
-            self.combine_xy = None
-            self.output_depth = d_model
         self.return_attention=return_attention
+
+    def build(self, input_shape):
+        spatial_dims=input_shape[1:-1]
+        assert len(spatial_dims) == 2 and spatial_dims[0]==spatial_dims[1], "only available for 2D squared images"
+        self.spatial_dim = spatial_dims[0]
+        if self.filters<=0:
+            self.filters = input_shape[-1]//self.spatial_dim
+            print(f"number of filters: {self.filters} input shape: {input_shape[-1]}, spatial_dim: {self.spatial_dim}")
+        if self.combine_filters<=0:
+            self.combine_filters = input_shape[-1]
+        self.wq = Dense(self.filters * self.spatial_dim, name="Q")
+        self.wk = Dense(self.filters * self.spatial_dim, name="K")
+        self.wv = Dense(self.filters * self.spatial_dim, name="W")
+        if self.positional_encoding:
+            self.pos_embedding = Embedding(self.spatial_dim, input_shape[-1], name="PosEnc")
+        if self.combine_xy:
+            assert self.combine_filters>0
+            self.output_depth=self.combine_filters
+            self.combine_xy_op = Combine(filters = self.combine_filters, name="CombineXY")
+        else:
+            self.combine_xy_op = None
+            self.output_depth = self.filters
+        super().build(input_shape)
 
     def call(self, input):
         '''
@@ -40,24 +48,25 @@ class Directional2DSelfAttention(Model):
         '''
         shape = tf.shape(input)
         batch_size = shape[0]
-        depth_dim = shape[3]
-        x = tf.reshape(input, (batch_size, -1, depth_dim * self.spatial_dim))
-        y = tf.reshape(tf.transpose(input, [0, 2, 1, 3]), (batch_size, -1, depth_dim * self.spatial_dim))
-
+        channels = shape[3]
+        x = input # (batch size, spa_dim, spa_dim, channels)
+        y = input
         if self.positional_encoding:
-            x_index = tf.range(self.spatial_dim, dtype=tf.int32)
-            pos_emb = self.pos_embedding(x_index) # (spa_dim, d_model)
-            x = x + pos_emb # broadcast
-            y = y + pos_emb # broadcast
+            spa_index = tf.range(self.spatial_dim, dtype=tf.int32)
+            pos_emb = self.pos_embedding(spa_index) # (spa_dim, channels)
+            x = x + tf.reshape(pos_emb, (1, self.spatial_dim, channels)) # broadcast
+            y = y + tf.reshape(pos_emb, (self.spatial_dim, 1, channels)) # broadcast
+
+        y = tf.reshape(y, (batch_size, -1, channels * self.spatial_dim))
+        x = tf.reshape(tf.transpose(x, [0, 2, 1, 3]), (batch_size, self.spatial_dim, channels * self.spatial_dim))
 
         x, wx = self.compute_attention(x)
-        x = tf.reshape(x, (batch_size, self.spatial_dim, self.spatial_dim, self.d_model) )
+        x = tf.reshape(x, (batch_size, self.spatial_dim, self.spatial_dim, self.filters) )
         x = tf.transpose(x, [0, 2, 1, 3])
         y, wy = self.compute_attention(y)
-        y = tf.reshape(y, (batch_size, self.spatial_dim, self.spatial_dim, self.d_model) )
-        if self.combine_xy is not None:
-            xy = self.concat_xy([y, x])
-            xy = self.combine_xy(xy)
+        y = tf.reshape(y, (batch_size, self.spatial_dim, self.spatial_dim, self.filters) )
+        if self.combine_xy:
+            xy = self.combine_xy_op([y, x])
             if self.return_attention:
                 return xy, wy, wx
             else:
@@ -69,16 +78,16 @@ class Directional2DSelfAttention(Model):
                 return y, x
 
     def compute_attention(self, input):
-        q = self.wq(input)  # (batch_size, spa_dim, d_model * spa_dim)
-        k = self.wk(input)  # (batch_size, spa_dim, d_model * spa_dim)
-        v = self.wv(input)  # (batch_size, spa_dim, d_model * spa_dim)
+        q = self.wq(input)  # (batch_size, spa_dim, self.filters * spa_dim)
+        k = self.wk(input)  # (batch_size, spa_dim, self.filters * spa_dim)
+        v = self.wv(input)  # (batch_size, spa_dim, self.filters * spa_dim)
         # scaled_attention.shape == (batch_size, spa_dims, depth)
         # attention_weights.shape == (batch_size, spa_dims, spa_dims)
         scaled_attention, attention_weights = scaled_dot_product_attention(q, k, v, self.name)
         return scaled_attention, attention_weights
 
     def compute_output_shape(self, input_shape):
-        if self.combine_xy is not None:
+        if self.combine_xy:
             if self.return_attention:
                 return input_shape[:-1]+(self.output_depth,), (input_shape[0],self.spatial_dim,self.spatial_dim), (input_shape[0],self.spatial_dim,self.spatial_dim)
             else:

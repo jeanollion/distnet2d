@@ -4,7 +4,7 @@ from tensorflow.keras.models import Model
 import numpy as np
 
 class SelfAttention(Layer):
-    def __init__(self, positional_encoding=True, filters=0, name="SelfAttention"):
+    def __init__(self, positional_encoding=True, filters=0, return_attention=False, name="SelfAttention"):
         '''
             filters : number of output channels
             if positional_encoding: filters must correspond to input channel number
@@ -13,22 +13,21 @@ class SelfAttention(Layer):
         super().__init__(name=name)
         self.positional_encoding=positional_encoding
         self.filters = filters
+        self.return_attention=return_attention
 
     def build(self, input_shape):
         self.spatial_dims=input_shape[1:-1]
         self.spatial_dim = np.prod(self.spatial_dims)
         if self.filters<=0:
             self.filters = input_shape[-1]
-        self.wq = Dense(self.filters, name="q")
-        self.wk = Dense(self.filters, name="k")
-        self.wv = Dense(self.filters, name="w")
-        if self.positional_encoding:
-            assert self.filters==input_shape[-1], "If positional encoding is enabled, filters should be equal to input channels"
+        self.wq = Dense(self.filters, name="Q")
+        self.wk = Dense(self.filters, name="K")
+        self.wv = Dense(self.filters, name="W")
         if self.positional_encoding=="2D":
-            self.pos_embedding_y = Embedding(self.spatial_dims[0], self.filters, name="pos_enc_y")
-            self.pos_embedding_x = Embedding(self.spatial_dims[1], self.filters, name="pos_enc_x")
+            self.pos_embedding_y = Embedding(self.spatial_dims[0], input_shape[-1], name="PosEncY")
+            self.pos_embedding_x = Embedding(self.spatial_dims[1], input_shape[-1], name="PosEncX")
         elif self.positional_encoding:
-            self.pos_embedding = Embedding(self.spatial_dim, self.filters, name="pos_enc") # TODO test other positional encoding. in particular that encodes X and Y. see : https://github.com/tatp22/multidim-positional-encoding
+            self.pos_embedding = Embedding(self.spatial_dim, input_shape[-1], name="PosEnc") # TODO test other positional encoding. in particular that encodes X and Y. see : https://github.com/tatp22/multidim-positional-encoding
         super().build(input_shape)
 
     def call(self, x):
@@ -71,11 +70,16 @@ class SelfAttention(Layer):
         # attention_weights.shape == (batch_size, spa_dims, spa_dims)
         scaled_attention, attention_weights = scaled_dot_product_attention(q, k, v)
         output = tf.reshape(scaled_attention, (batch_size, self.spatial_dims[0], self.spatial_dims[1], self.filters))
-        tf.identity(attention_weights, name=self.name+"_attention_weights")
-        return output, attention_weights
+        if self.return_attention:
+            return output, attention_weights
+        else:
+            return output
 
     def compute_output_shape(self, input_shape):
-        return input_shape[:-1]+(self.filters,), (input_shape[0],self.spatial_dim,self.spatial_dim)
+        if self.return_attention:
+            return input_shape[:-1]+(self.filters,), (input_shape[0],self.spatial_dim,self.spatial_dim)
+        else:
+            return input_shape[:-1]+(self.filters,)
 
 def scaled_dot_product_attention(q, k, v):
     """Calculate the attention weights.
@@ -103,7 +107,7 @@ def scaled_dot_product_attention(q, k, v):
 
     # softmax is normalized on the last axis (seq_len_k) so that the scores
     # add up to 1.
-    attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)  # (..., seq_len_q, seq_len_k)
+    attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1, name="AttentionWeights")  # (..., seq_len_q, seq_len_k)
 
     output = tf.matmul(attention_weights, v)  # (..., seq_len_q, depth_v)
 

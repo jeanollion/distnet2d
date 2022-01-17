@@ -5,6 +5,50 @@ from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
 import numpy as np
 from .self_attention import SelfAttention
+from .directional_2d_self_attention import Directional2DSelfAttention
+
+ENCODER_SETTINGS = [
+    [ # l1 = 128 -> 64
+        {"filters":16},
+        {"filters":16, "downscale":2}
+    ],
+    [  # l2 64 -> 32
+        {"filters":32},
+        {"filters":32, "downscale":2}
+    ],
+    [ # l3: 32->16
+        {"filters":40, "expand_filters":120, "kernel_size":5, "SE":False},
+        {"filters":40, "expand_filters":120, "activation":"hswish"},
+        {"filters":80, "expand_filters":240, "activation":"hswish", "downscale":2},
+    ],
+    [ # l4: 16 -> 8
+        {"filters":80, "expand_filters":200, "activation":"hswish"},
+        {"filters":80, "expand_filters":184, "activation":"hswish"},
+        {"filters":80, "expand_filters":184, "activation":"hswish"},
+        {"filters":112, "expand_filters":480, "activation":"hswish"},
+        {"filters":112, "expand_filters":672, "kernel_size":5, "activation":"hswish"},
+        {"filters":160, "expand_filters":672, "activation":"hswish", "downscale":2}
+    ]
+]
+FEATURE_SETTINGS = [
+    {"filters":160, "expand_filters":960, "activation":"hswish"},
+    {"filters":1024, "expand_filters":1024, "activation":"hswish"},
+]
+
+DECODER_SETTINGS_DS = [
+    #f, s
+    {"filters":16},
+    {"filters":96},
+    {"filters":128},
+    {"filters":256}
+]
+DECODER_SETTINGS = [
+    #f, s
+    {"filters":64},
+    {"filters":96},
+    {"filters":128},
+    {"filters":256}
+]
 
 class DiSTNet2D(Model):
     def __init__(
@@ -12,81 +56,61 @@ class DiSTNet2D(Model):
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             skip_combine_mode:str = "conv", # conv, sum
             first_skip_mode:str = "sg", # sg, omit, None
-            attention_filters:int = 1024,
+            encoder_settings:list = ENCODER_SETTINGS,
+            feature_settings: list = FEATURE_SETTINGS,
+            decoder_settings: list = None,
             output_conv_filters:int=32,
             output_conv_level = 1,
+            directional_attention = False,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
         super().__init__(name=name)
         self.output_conv_level=output_conv_level
-        self.down_settings = [
-            [ # l1 = 128 -> 64
-                {"filters":16},
-                {"filters":16, "downscale":2}
-            ],
-            [  # l2 64 -> 32
-                {"filters":32},
-                {"filters":32, "downscale":2}
-            ],
-            [ # l3: 32->16
-                {"filters":40, "expand_filters":120, "kernel_size":5, "SE":False},
-                {"filters":40, "expand_filters":120, "activation":"hswish"},
-                {"filters":80, "expand_filters":240, "activation":"hswish", "downscale":2},
-            ],
-            [ # l4: 16 -> 8
-                {"filters":80, "expand_filters":200, "activation":"hswish"},
-                {"filters":80, "expand_filters":184, "activation":"hswish"},
-                {"filters":80, "expand_filters":184, "activation":"hswish"},
-                {"filters":112, "expand_filters":480, "activation":"hswish"},
-                {"filters":112, "expand_filters":672, "kernel_size":5, "activation":"hswish"},
-                {"filters":160, "expand_filters":672, "activation":"hswish", "downscale":2}
-            ]
-
-        ]
-        self.feature_settings = [
-            {"filters":160, "expand_filters":960, "activation":"hswish"},
-            {"filters":attention_filters, "expand_filters":max(attention_filters, 960), "activation":"hswish"},
-        ]
-        self.attention_filters=attention_filters
+        self.encoder_settings = encoder_settings
+        self.feature_settings = feature_settings
+        self.attention_filters=feature_settings[-1].get("filters")
         self.output_conv_filters = output_conv_filters
-        self.up_settings = [
-            #f, s
-            {"filters":16 if output_conv_level==1 else 64},
-            {"filters":96},
-            {"filters":128},
-            {"filters":256}
-        ]
-        self.encoder_layers = [
-            EncoderLayer(param_list, layer_idx = l_idx)
-            for l_idx, param_list in enumerate(self.down_settings)
-        ]
-
-        self.feature_convs, _, _ = parse_param_list(self.feature_settings, "FeatureSequence")
-
-        self.total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in self.down_settings])
-        self.attention_skip = Combine(filters=self.attention_filters//2, l2_reg=l2_reg, name="SelfAttentionSkip")
-
-        self.decoder_layers = [DecoderLayer(**parameters, size_factor=self.encoder_layers[l_idx].total_contraction, conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else None, activation="relu", l2_reg=l2_reg, use_bias=True, layer_idx=l_idx) for l_idx, parameters in enumerate(self.up_settings)]
-
-        self.conv_d = Conv2D(filters=self.output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
-        # up_factor = np.prod([self.down_settings[-1-i] for i in range(1)])
-        #self.d_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"Up_d" ), n)
-        self.conv_cat = Conv2D(filters=self.output_conv_filters, kernel_size=3, padding='same', activation="relu", name="Output3_Category")
-
-
-        self.conv_catcur = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="ConvCatCur")
-
-        #self.cat_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"_Up_cat" ), n)
+        if decoder_settings is None:
+            decoder_settings = DECODER_SETTINGS_DS if output_conv_level==1 else DECODER_SETTINGS
+        self.decoder_settings = decoder_settings
+        self.directional_attention=directional_attention
+        self.total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in self.encoder_settings])
+        self.l2_reg = l2_reg
+        self.upsampling_mode=upsampling_mode
+        self.skip_combine_mode=skip_combine_mode
+        self.first_skip_mode=first_skip_mode
+        assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
 
     def build(self, input_shape):
         spatial_dims = input_shape[1:3]
         assert input_shape[-1] in [2, 3], "channel number should be in [2, 3]"
         self.next = input_shape[-1]==3
-        self.self_attention = SelfAttention(positional_encoding="2D", name="SelfAttention")
+
+        self.encoder_layers = [
+            EncoderLayer(param_list, layer_idx = l_idx)
+            for l_idx, param_list in enumerate(self.encoder_settings)
+        ]
+        self.feature_convs, _, _ = parse_param_list(self.feature_settings, "FeatureSequence")
+        if self.directional_attention:
+            self.self_attention = Directional2DSelfAttention(positional_encoding=True, name="SelfAttention")
+        else:
+            self.self_attention = SelfAttention(positional_encoding="2D", name="SelfAttention")
+        self.attention_skip = Combine(filters=self.attention_filters//2, l2_reg=self.l2_reg, name="SelfAttentionSkip")
+        self.decoder_layers = [DecoderLayer(**parameters, size_factor=self.encoder_layers[l_idx].total_contraction, conv_kernel_size=3, mode=self.upsampling_mode, skip_combine_mode=self.skip_combine_mode, skip_mode=self.first_skip_mode if l_idx==0 else None, activation="relu", l2_reg=self.l2_reg, use_bias=True, layer_idx=l_idx) for l_idx, parameters in enumerate(self.decoder_settings)]
+
+        # outputs
+        self.conv_edm = Conv2D(filters=3 if self.next else 2, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output0_EDM")
+        # displacement
+        self.conv_d = Conv2D(filters=self.output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
         self.conv_dy = Conv2D(filters=2 if self.next else 1, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output1_dy")
         self.conv_dx = Conv2D(filters=2 if self.next else 1, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output2_dx")
-        self.conv_edm = Conv2D(filters=3 if self.next else 2, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output0_EDM")
+        # up_factor = np.prod([self.encoder_settings[-1-i] for i in range(1)])
+        #self.d_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"Up_d" ), n)
+        # categories
+        self.conv_cat = Conv2D(filters=self.output_conv_filters, kernel_size=3, padding='same', activation="relu", name="Output3_Category")
+        self.conv_catcur = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="ConvCatCur")
+        #self.cat_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"_Up_cat" ), n)
         if next:
             self.conv_catnext = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="Output4_CategoryNext")
         super().build(input_shape)
@@ -100,7 +124,7 @@ class DiSTNet2D(Model):
             residuals.append(res)
 
         feature = self.feature_convs(downsampled[-1])
-        attention, _ = self.self_attention(feature)
+        attention = self.self_attention(feature)
         feature = self.attention_skip([attention, feature])
 
         upsampled = [feature]
