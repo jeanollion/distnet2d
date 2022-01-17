@@ -15,7 +15,7 @@ try:
     import dataset_iterator.helpers as dih
 except:
     dih=None
-from .helpers import ensure_multiplicity
+from ..utils.helpers import ensure_multiplicity
 
 def batch_wise_fun(fun):
 	#return lambda batch : np.stack([fun(batch[i]) for i in range(batch.shape[0])], 0)

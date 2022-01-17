@@ -4,7 +4,7 @@ from tensorflow.keras.layers import Conv2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
 import numpy as np
-from .self_attention_layer import SelfAttention
+from .self_attention import SelfAttention
 
 class DiSTNet2D(Model):
     def __init__(
