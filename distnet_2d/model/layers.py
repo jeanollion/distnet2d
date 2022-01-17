@@ -232,7 +232,7 @@ class UpSamplingLayer2D(Layer):
                 kernel_size=kernel_size,
                 strides=kernel_size,
                 padding='same',
-                activation=None,
+                activation=activation,
                 use_bias=use_bias,
                 # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
                 name=f"tConv{kernel_size}x{kernel_size}",
@@ -301,7 +301,7 @@ class Combine(Layer):
             self,
             filters: int,
             activation: str="relu",
-            l2_reg: float=1e-5,
+            #l2_reg: float=1e-5,
             use_bias:bool = True,
             name: str="Combine",
         ):
@@ -437,7 +437,7 @@ class ConvNormAct(Layer):
             kernel_size=kernel_size,
             strides=stride,
             name=f"Conv{kernel_size}x{kernel_size}",
-            kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
+            kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None,
             use_bias=use_bias,
         )
 

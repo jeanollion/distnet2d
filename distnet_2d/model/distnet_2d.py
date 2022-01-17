@@ -98,8 +98,8 @@ class DiSTNet2D(Model):
             self.self_attention = Directional2DSelfAttention(positional_encoding=True, name="SelfAttention")
         else:
             self.self_attention = SelfAttention(positional_encoding="2D", name="SelfAttention")
-        self.attention_skip = Combine(filters=self.attention_filters//2, l2_reg=self.l2_reg, name="SelfAttentionSkip")
-        self.decoder_layers = [DecoderLayer(**parameters, size_factor=self.encoder_layers[l_idx].total_contraction, conv_kernel_size=3, mode=self.upsampling_mode, skip_combine_mode=self.skip_combine_mode, skip_mode=self.first_skip_mode if l_idx==0 else None, activation="relu", l2_reg=self.l2_reg, use_bias=True, layer_idx=l_idx) for l_idx, parameters in enumerate(self.decoder_settings)]
+        self.attention_skip = Combine(filters=self.attention_filters//2, name="SelfAttentionSkip")
+        self.decoder_layers = [DecoderLayer(**parameters, size_factor=self.encoder_layers[l_idx].total_contraction, conv_kernel_size=3, mode=self.upsampling_mode, skip_combine_mode=self.skip_combine_mode, skip_mode=self.first_skip_mode if l_idx==0 else None, activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(self.decoder_settings)]
 
         # outputs
         self.conv_edm = Conv2D(filters=3 if self.next else 2, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output0_EDM")
@@ -138,8 +138,8 @@ class DiSTNet2D(Model):
         edm = self.conv_edm(upsampled[-1])
 
         displacement = self.conv_d(upsampled[-1-self.output_conv_level])
-        dy = self.conv_dy(displacement)
-        dx = self.conv_dx(displacement)
+        dy = self.conv_dy(displacement) # TODO test MB CONV with SE
+        dx = self.conv_dx(displacement) # TODO test MB CONV with SE
         #dy = self.d_up(dy)
         #dx = self.d_up(dx)
 
@@ -183,7 +183,6 @@ class EncoderLayer(Layer):
             res = input
         else:
             res = self.sequence(input)
-
         down = self.down_op(res)
         return down, res
 
@@ -197,29 +196,47 @@ class DecoderLayer(Layer):
             skip_combine_mode = "conv", # conv, sum
             skip_mode = "sg", # sg, omit, None
             activation: str="relu",
-            l2_reg: float=1e-5,
-            use_bias:bool = True,
+            #l2_reg: float=1e-5,
+            #use_bias:bool = True,
             name: str="DecoderLayer",
             layer_idx:int=1,
         ):
         super().__init__(name=f"{name}_{layer_idx}")
+        self.mode=mode
         self.size_factor = size_factor
-        self.up_op = UpSamplingLayer2D(filters=filters, kernel_size=size_factor, mode=mode, activation=activation, l2_reg=l2_reg, use_bias=use_bias)
-        if skip_combine_mode=="conv":
-            self.combine = Combine(filters=filters, l2_reg=l2_reg)
+        self.skip_combine_mode=skip_combine_mode
+        self.skip_mode = skip_mode
+        self.activation=activation
+        self.filters=filters
+        self.conv_kernel_size=conv_kernel_size
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"size_factor": self.size_factor})
+        config.update({"skip_combine_mode": self.skip_combine_mode})
+        config.update({"skip_mode": self.skip_mode})
+        config.update({"activation": self.activation})
+        config.update({"filters": self.filters})
+        config.update({"mode": self.mode})
+        config.update({"conv_kernel_size": self.conv_kernel_size})
+        return config
+
+    def build(self, input_shape):
+        self.up_op = UpSamplingLayer2D(filters=self.filters, kernel_size=self.size_factor, mode=self.mode, activation=self.activation, use_bias=True) # l2_reg=l2_reg
+        if self.skip_combine_mode=="conv":
+            self.combine = Combine(filters=self.filters) #, l2_reg=l2_reg
         else:
             self.combine = None
-        self.skip_mode = skip_mode
-        if skip_mode=="sg":
+        if self.skip_mode=="sg":
             self.stop_grad = StopGradient()
-        self.conv = Conv2D(filters=filters, kernel_size=conv_kernel_size, padding='same', activation="relu")
+        self.conv = Conv2D(filters=self.filters, kernel_size=self.conv_kernel_size, padding='same', activation="relu")
 
     def compute_output_shape(self, input_shape):
       return (input_shape[0], input_shape[1]*self.size_factor, input_shape[2]*self.size_factor, input_shape[3])
 
     def call(self, input):
-        input, res = input
-        up = self.up_op(input)
+        down, res = input
+        up = self.up_op(down)
         if not "omit"!=self.skip_mode:
             if self.stop_grad is not None:
                 res = self.stop_grad(res)
