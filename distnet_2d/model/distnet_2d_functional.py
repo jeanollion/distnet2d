@@ -54,12 +54,12 @@ def get_distnet_2d(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             downsampling_mode:str = "stride", #maxpool, stride
             skip_combine_mode:str = "conv", # conv, sum
-            first_skip_mode:str = "sg", # sg, omit, None
+            first_skip_mode:str = None, # sg, omit, None
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = None,
             output_conv_filters:int=32,
-            output_conv_level = 1,
+            output_conv_level = 0,
             directional_attention = False,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
@@ -146,7 +146,7 @@ def get_distnet_2d(input_shape,
             outputs =  edm, dy, dx, cat, cat_next
         else:
             outputs = edm, dy, dx, cat
-        return Model([input], outputs)
+        return Model([input], outputs, name=name)
 
 def encoder_op(param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
