@@ -480,57 +480,73 @@ class Bneck(Layer):
             name:str = "Bneck"
     ):
         super().__init__(name=name)
-        self.skip = skip
-        self.out_channels = out_channels
+        self.out_channels=out_channels
+        self.exp_channels=exp_channels
+        self.kernel_size=kernel_size
         self.stride = stride
         self.use_se = use_se
+        self.act_layer=act_layer
+        self.l2_reg=l2_reg
+        self.batch_norm=batch_norm
+        self.skip = skip
 
+        def get_config(self):
+            config = super().get_config()
+            config.update({"out_channels": self.out_channels})
+            config.update({"exp_channels": self.exp_channels})
+            config.update({"kernel_size": self.kernel_size})
+            config.update({"stride": self.stride})
+            config.update({"use_se": self.use_se})
+            config.update({"act_layer": self.act_layer})
+            config.update({"l2_reg": self.l2_reg})
+            config.update({"batch_norm": self.batch_norm})
+            config.update({"skip": self.skip})
+            return config
+
+    def build(self, input_shape):
+        self.in_channels = int(input_shape[-1])
         # Expand
         self.expand = ConvNormAct(
-            exp_channels,
+            self.exp_channels,
             kernel_size=1,
-            norm_layer="bn" if batch_norm else None,
-            act_layer=act_layer,
+            norm_layer="bn" if self.batch_norm else None,
+            act_layer=self.act_layer,
             use_bias=False,
-            l2_reg=l2_reg,
+            l2_reg=self.l2_reg,
             name="Expand",
         )
-
         # Depthwise
-        dw_padding = (kernel_size - 1) // 2
+        dw_padding = (self.kernel_size - 1) // 2
         self.pad = tf.keras.layers.ZeroPadding2D(
             padding=dw_padding,
             name=f"Depthwise/Padding{dw_padding}x{dw_padding}",
         )
         self.depthwise = tf.keras.layers.DepthwiseConv2D(
-            kernel_size=kernel_size,
-            strides=stride,
-            name=f"Depthwise/DWConv{kernel_size}x{kernel_size}",
-            depthwise_regularizer=tf.keras.regularizers.l2(l2_reg),
+            kernel_size=self.kernel_size,
+            strides=self.stride,
+            name=f"Depthwise/DWConv{self.kernel_size}x{self.kernel_size}",
+            depthwise_regularizer=tf.keras.regularizers.l2(self.l2_reg),
             use_bias=False,
         )
-        self.bn = BatchNormalization("Depthwise/BN") if batch_norm else None
+        self.bn = BatchNormalization("Depthwise/BN") if self.batch_norm else None
         if self.use_se:
-            self.se = SEBottleneck( l2_reg=l2_reg, name="Depthwise/SEBottleneck",)
+            self.se = SEBottleneck( l2_reg=self.l2_reg, name="Depthwise/SEBottleneck",)
         _available_activation = {
             "relu": tf.keras.layers.ReLU(name="Depthwise/ReLU"),
             "hswish": HardSwish(name="Depthwise/HardSwish"),
         }
-        self.act = get_layer(act_layer, _available_activation, Identity())
+        self.act = get_layer(self.act_layer, _available_activation, Identity())
 
         # Project
         self.project = ConvNormAct(
-            out_channels,
+            self.out_channels,
             kernel_size=1,
-            norm_layer="bn" if batch_norm else None,
+            norm_layer="bn" if self.batch_norm else None,
             act_layer=None,
             use_bias=False,
-            l2_reg=l2_reg,
+            l2_reg=self.l2_reg,
             name="Project",
         )
-
-    def build(self, input_shape):
-        self.in_channels = int(input_shape[-1])
         super().build(input_shape)
 
     def call(self, input):
@@ -548,7 +564,6 @@ class Bneck(Layer):
             return input + x
         else:
             return x
-
 
 class SEBottleneck(Layer):
     def __init__(
