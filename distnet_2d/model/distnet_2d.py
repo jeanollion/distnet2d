@@ -155,8 +155,46 @@ class DiSTNet2D(Model):
 
     def get_model(self, input_shape):
         self.build((None,)+input_shape)
-        x = tf.keras.layers.Input(shape=input_shape)
-        return Model(inputs=[x], outputs=self.call(x), name=self.name)
+        input = tf.keras.layers.Input(shape=input_shape)
+        residuals = []
+        downsampled = [input]
+        for l in self.encoder_layers:
+            l.build(downsampled[-1].shape)
+            down, res = l.call(downsampled[-1])
+            downsampled.append(down)
+            residuals.append(res)
+
+        self.feature_convs.build(downsampled[-1].shape)
+        feature = self.feature_convs.call(downsampled[-1])
+        self.self_attention.build(feature.shape)
+        attention = self.self_attention(feature)
+        feature = self.attention_skip.call([attention, feature])
+
+        upsampled = [feature]
+        residuals = residuals[::-1]
+        for i, l in enumerate(self.decoder_layers[::-1]):
+            l.build([upsampled[-1].shape, residuals[i].shape])
+            up = l.call([upsampled[-1], residuals[i]])
+            upsampled.append(up)
+
+        edm = self.conv_edm(upsampled[-1])
+
+        displacement = self.conv_d(upsampled[-1-self.output_conv_level])
+        dy = self.conv_dy(displacement) # TODO test MB CONV with SE
+        dx = self.conv_dx(displacement) # TODO test MB CONV with SE
+        #dy = self.d_up(dy)
+        #dx = self.d_up(dx)
+
+        categories = self.conv_cat(upsampled[-1-self.output_conv_level])
+        cat  = self.conv_catcur(categories)
+        #cat = self.cat_up(cat)
+        if self.next:
+            cat_next  = self.conv_catnext(categories)
+            #cat_next = self.cat_up(cat_next)
+            outputs = edm, dy, dx, cat, cat_next
+        else:
+            outputs = edm, dy, dx, cat
+        return Model([input], outputs)
 
     def summary(self, input_shape, **kwargs):
         model = self.get_model(input_shape)
@@ -237,7 +275,7 @@ class DecoderLayer(Layer):
     def call(self, input):
         down, res = input
         up = self.up_op(down)
-        if not "omit"!=self.skip_mode:
+        if "omit"!=self.skip_mode:
             if self.stop_grad is not None:
                 res = self.stop_grad(res)
             if self.combine is not None:
