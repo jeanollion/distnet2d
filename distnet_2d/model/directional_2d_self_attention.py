@@ -57,7 +57,7 @@ class Directional2DSelfAttention(Layer):
             x = x + tf.reshape(pos_emb, (1, self.spatial_dim, channels)) # broadcast
             y = y + tf.reshape(pos_emb, (self.spatial_dim, 1, channels)) # broadcast
 
-        y = tf.reshape(y, (batch_size, -1, channels * self.spatial_dim))
+        y = tf.reshape(y, (batch_size, self.spatial_dim, channels * self.spatial_dim))
         x = tf.reshape(tf.transpose(x, [0, 2, 1, 3]), (batch_size, self.spatial_dim, channels * self.spatial_dim))
 
         x, wx = self.compute_attention(x)
