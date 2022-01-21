@@ -24,15 +24,15 @@ class Directional2DSelfAttention(Layer):
         assert len(spatial_dims) == 2 and spatial_dims[0]==spatial_dims[1], "only available for 2D squared images"
         self.spatial_dim = spatial_dims[0]
         if self.filters<=0:
-            self.filters = input_shape[-1]//self.spatial_dim
-            print(f"number of filters: {self.filters} input shape: {input_shape[-1]}, spatial_dim: {self.spatial_dim}")
+            self.filters = input_shape[-1]
+            #print(f"number of filters: {self.filters} input shape: {input_shape[-1]}, spatial_dim: {self.spatial_dim}")
         if self.combine_filters<=0:
             self.combine_filters = input_shape[-1]
         self.wq = Dense(self.filters * self.spatial_dim, name="Q")
         self.wk = Dense(self.filters * self.spatial_dim, name="K")
         self.wv = Dense(self.filters * self.spatial_dim, name="W")
         if self.positional_encoding:
-            self.pos_embedding = Embedding(self.spatial_dim, input_shape[-1], name="PosEnc")
+            self.pos_embedding = Embedding(self.spatial_dim, self.filters, name="PosEnc")
         if self.combine_xy:
             assert self.combine_filters>0
             self.output_depth=self.combine_filters
@@ -54,11 +54,11 @@ class Directional2DSelfAttention(Layer):
         if self.positional_encoding:
             spa_index = tf.range(self.spatial_dim, dtype=tf.int32)
             pos_emb = self.pos_embedding(spa_index) # (spa_dim, channels)
-            x = x + tf.reshape(pos_emb, (1, self.spatial_dim, channels)) # broadcast
-            y = y + tf.reshape(pos_emb, (self.spatial_dim, 1, channels)) # broadcast
+            x = x + tf.reshape(pos_emb, (1, self.spatial_dim, self.filters)) # broadcast
+            y = y + tf.reshape(pos_emb, (self.spatial_dim, 1, self.filters)) # broadcast
 
-        y = tf.reshape(y, (batch_size, self.spatial_dim, channels * self.spatial_dim))
-        x = tf.reshape(tf.transpose(x, [0, 2, 1, 3]), (batch_size, self.spatial_dim, channels * self.spatial_dim))
+        y = tf.reshape(y, (batch_size, self.spatial_dim, self.filters * self.spatial_dim))
+        x = tf.reshape(tf.transpose(x, [0, 2, 1, 3]), (batch_size, self.spatial_dim, self.filters * self.spatial_dim))
 
         x, wx = self.compute_attention(x)
         x = tf.reshape(x, (batch_size, self.spatial_dim, self.spatial_dim, self.filters) )
