@@ -50,183 +50,125 @@ DECODER_SETTINGS = [
     {"filters":256}
 ]
 
-class DiSTNet2D(Model):
-    def __init__(
-            self,
+def get_distnet_2d(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             downsampling_mode:str = "stride", #maxpool, stride
             skip_combine_mode:str = "conv", # conv, sum
-            first_skip_mode:str = "sg", # sg, omit, None
+            first_skip_mode:str = None, # sg, omit, None
+            skip_stop_gradient:bool = False,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = None,
             output_conv_filters:int=32,
-            output_conv_level = 1,
+            output_conv_level = 0,
             directional_attention = False,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
-        super().__init__(name=name)
-        self.output_conv_level=output_conv_level
-        self.encoder_settings = encoder_settings
-        self.feature_settings = feature_settings
-        self.attention_filters=feature_settings[-1].get("filters")
-        self.output_conv_filters = output_conv_filters
+        attention_filters=feature_settings[-1].get("filters")
         if decoder_settings is None:
             decoder_settings = DECODER_SETTINGS_DS if output_conv_level==1 else DECODER_SETTINGS
-        self.decoder_settings = decoder_settings
-        self.directional_attention=directional_attention
-        self.total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in self.encoder_settings])
-        self.l2_reg = l2_reg
-        self.downsampling_mode=downsampling_mode
-        self.upsampling_mode=upsampling_mode
-        self.skip_combine_mode=skip_combine_mode
-        self.first_skip_mode=first_skip_mode
+        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
 
-    def build(self, input_shape):
-        spatial_dims = input_shape[1:3]
+        spatial_dims = input_shape[:-1]
         assert input_shape[-1] in [2, 3], "channel number should be in [2, 3]"
-        self.next = input_shape[-1]==3
+        next = input_shape[-1]==3
 
-        self.encoder_layers = [
-            EncoderLayer(param_list, downsampling_mode=self.downsampling_mode, layer_idx = l_idx)
-            for l_idx, param_list in enumerate(self.encoder_settings)
-        ]
-        self.feature_convs, _, _ = parse_param_list(self.feature_settings, "FeatureSequence")
-        if self.directional_attention:
-            self.self_attention = Directional2DSelfAttention(positional_encoding=True, name="SelfAttention")
+        # define enconder operations
+        encoder_layers = []
+        contraction_per_layer = []
+        for l_idx, param_list in enumerate(encoder_settings):
+            op, contraction = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
+            encoder_layers.append(op)
+            contraction_per_layer.append(contraction)
+
+        # define feature operations
+        feature_convs, _, _ = parse_param_list(feature_settings, "FeatureSequence")
+        if directional_attention:
+            self_attention = Directional2DSelfAttention(positional_encoding=True, name="SelfAttention")
         else:
-            self.self_attention = SelfAttention(positional_encoding="2D", name="SelfAttention")
-        self.attention_skip = Combine(filters=self.attention_filters//2, name="SelfAttentionSkip")
-        self.decoder_layers = [DecoderLayer(**parameters, size_factor=self.encoder_layers[l_idx].total_contraction, conv_kernel_size=3, mode=self.upsampling_mode, skip_combine_mode=self.skip_combine_mode, skip_mode=self.first_skip_mode if l_idx==0 else None, activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(self.decoder_settings)]
+            self_attention = SelfAttention(positional_encoding="2D", name="SelfAttention")
+        attention_skip_op = lambda x : combine_block(x, filters=attention_filters//2, parent_name="FeatureSequence")
 
-        # outputs
-        self.conv_edm = Conv2D(filters=3 if self.next else 2, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output0_EDM")
-        # displacement
-        self.conv_d = Conv2D(filters=self.output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
-        self.conv_dy = Conv2D(filters=2 if self.next else 1, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output1_dy")
-        self.conv_dx = Conv2D(filters=2 if self.next else 1, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output2_dx")
+        # define decoder operations
+        decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else ("sg" if skip_stop_gradient else None), activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
+
+        # defin output operations
+        conv_edm = Conv2D(filters=3 if next else 2, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output0_EDM")
+        ## displacement
+        conv_d = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
+        conv_dy = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output1_dy")
+        conv_dx = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output2_dx")
         # up_factor = np.prod([self.encoder_settings[-1-i] for i in range(1)])
         #self.d_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"Up_d" ), n)
         # categories
-        self.conv_cat = Conv2D(filters=self.output_conv_filters, kernel_size=3, padding='same', activation="relu", name="Output3_Category")
-        self.conv_catcur = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="ConvCatCur")
+        conv_cat = Conv2D(filters=output_conv_filters, kernel_size=3, padding='same', activation="relu", name="Output3_Category")
+        conv_catcur = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="ConvCatCur")
         #self.cat_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"_Up_cat" ), n)
         if next:
-            self.conv_catnext = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="Output4_CategoryNext")
-        super().build(input_shape)
+            conv_catnext = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="Output4_CategoryNext")
 
-    def call(self, input):
+        # Create GRAPH
+        input = tf.keras.layers.Input(shape=input_shape)
         residuals = []
         downsampled = [input]
-        for l in self.encoder_layers:
+        for l in encoder_layers:
             down, res = l(downsampled[-1])
             downsampled.append(down)
             residuals.append(res)
 
-        feature = self.feature_convs(downsampled[-1])
-        attention = self.self_attention(feature)
-        feature = self.attention_skip([attention, feature])
+        feature = downsampled[-1]
+        for op in feature_convs:
+            feature = op(feature)
+        attention = self_attention(feature)
+        feature = attention_skip_op([attention, feature])
 
         upsampled = [feature]
         residuals = residuals[::-1]
-        for i, l in enumerate(self.decoder_layers[::-1]):
+        for i, l in enumerate(decoder_layers[::-1]):
             up = l([upsampled[-1], residuals[i]])
             upsampled.append(up)
 
-        edm = self.conv_edm(upsampled[-1])
+        edm = conv_edm(upsampled[-1])
 
-        displacement = self.conv_d(upsampled[-1-self.output_conv_level])
-        dy = self.conv_dy(displacement) # TODO test MB CONV with SE
-        dx = self.conv_dx(displacement) # TODO test MB CONV with SE
+        displacement = conv_d(upsampled[-1-output_conv_level])
+        dy = conv_dy(displacement) # TODO test MB CONV with SE
+        dx = conv_dx(displacement) # TODO test MB CONV with SE
         #dy = self.d_up(dy)
         #dx = self.d_up(dx)
 
-        categories = self.conv_cat(upsampled[-1-self.output_conv_level])
-        cat  = self.conv_catcur(categories)
+        categories = conv_cat(upsampled[-1-output_conv_level])
+        cat  = conv_catcur(categories)
         #cat = self.cat_up(cat)
-        if self.next:
-            cat_next  = self.conv_catnext(categories)
+        if next:
+            cat_next  = conv_catnext(categories)
             #cat_next = self.cat_up(cat_next)
-            return edm, dy, dx, cat, cat_next
-        else:
-            return edm, dy, dx, cat
-
-    def get_model(self, input_shape):
-        self.build((None,)+input_shape)
-        input = tf.keras.layers.Input(shape=input_shape)
-        residuals = []
-        downsampled = [input]
-        for l in self.encoder_layers:
-            l.build(downsampled[-1].shape)
-            down, res = l.call(downsampled[-1])
-            downsampled.append(down)
-            residuals.append(res)
-
-        self.feature_convs.build(downsampled[-1].shape)
-        feature = self.feature_convs.call(downsampled[-1])
-        self.self_attention.build(feature.shape)
-        attention = self.self_attention(feature)
-        feature = self.attention_skip.call([attention, feature])
-
-        upsampled = [feature]
-        residuals = residuals[::-1]
-        for i, l in enumerate(self.decoder_layers[::-1]):
-            l.build([upsampled[-1].shape, residuals[i].shape])
-            up = l.call([upsampled[-1], residuals[i]])
-            upsampled.append(up)
-
-        edm = self.conv_edm(upsampled[-1])
-
-        displacement = self.conv_d(upsampled[-1-self.output_conv_level])
-        dy = self.conv_dy(displacement) # TODO test MB CONV with SE
-        dx = self.conv_dx(displacement) # TODO test MB CONV with SE
-        #dy = self.d_up(dy)
-        #dx = self.d_up(dx)
-
-        categories = self.conv_cat(upsampled[-1-self.output_conv_level])
-        cat  = self.conv_catcur(categories)
-        #cat = self.cat_up(cat)
-        if self.next:
-            cat_next  = self.conv_catnext(categories)
-            #cat_next = self.cat_up(cat_next)
-            outputs = edm, dy, dx, cat, cat_next
+            outputs =  edm, dy, dx, cat, cat_next
         else:
             outputs = edm, dy, dx, cat
-        return Model([input], outputs)
+        return Model([input], outputs, name=name)
 
-    def summary(self, input_shape, **kwargs):
-        model = self.get_model(input_shape)
-        return model.summary(**kwargs)
+def encoder_op(param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1):
+    name=f"{name}{layer_idx}"
+    maxpool = downsampling_mode=="maxpool"
+    sequence, down_sequence, total_contraction = parse_param_list(param_list, name, ignore_stride=maxpool)
+    assert total_contraction>1, "invalid parameters: no contraction specified"
+    if maxpool:
+        down_sequence = [MaxPool2D(pool_size=total_contraction, name=f"{name}/Maxpool{total_contraction}x{total_contraction}")]
 
-    def plot_model(self, input_shape, **kwargs):
-        from tensorflow.keras.utils import plot_model
-        model = self.get_model(input_shape)
-        plot_model(model, **kwargs)
-
-class EncoderLayer(Layer):
-    def __init__( self, param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1, ):
-        super().__init__(name=f"{name}_{layer_idx}")
-        maxpool = downsampling_mode=="maxpool"
-        self.sequence, self.down_op, self.total_contraction = parse_param_list(param_list, ignore_stride=maxpool)
-        if maxpool:
-            self.down_op = MaxPool2D(pool_size=self.total_contraction, name=f"Maxpool{self.total_contraction}x{self.total_contraction}")
-
-    def compute_output_shape(self, input_shape):
-      return (input_shape[0], input_shape[1]//self.total_contraction, input_shape[2]//self.total_contraction, input_shape[3]), input_shape
-
-    def call(self, input):
-        if self.sequence is None:
-            res = input
-        else:
-            res = self.sequence(input)
-        down = self.down_op(res)
+    def op(input):
+        res = input
+        if sequence is not None:
+            for l in sequence:
+                res=l(res)
+        down = res
+        for l in down_sequence:
+            down = l(res)
         return down, res
+    return op, total_contraction
 
-class DecoderLayer(Layer):
-    def __init__(
-            self,
+def decoder_op(
             filters: int,
             size_factor: int=2,
             conv_kernel_size:int=3,
@@ -239,58 +181,105 @@ class DecoderLayer(Layer):
             name: str="DecoderLayer",
             layer_idx:int=1,
         ):
-        super().__init__(name=f"{name}_{layer_idx}")
-        self.mode=mode
-        self.size_factor = size_factor
-        self.skip_combine_mode=skip_combine_mode
-        self.skip_mode = skip_mode
-        self.activation=activation
-        self.filters=filters
-        self.conv_kernel_size=conv_kernel_size
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"size_factor": self.size_factor})
-        config.update({"skip_combine_mode": self.skip_combine_mode})
-        config.update({"skip_mode": self.skip_mode})
-        config.update({"activation": self.activation})
-        config.update({"filters": self.filters})
-        config.update({"mode": self.mode})
-        config.update({"conv_kernel_size": self.conv_kernel_size})
-        return config
-
-    def build(self, input_shape):
-        self.up_op = UpSamplingLayer2D(filters=self.filters, kernel_size=self.size_factor, mode=self.mode, activation=self.activation, use_bias=True) # l2_reg=l2_reg
-        if self.skip_combine_mode=="conv":
-            self.combine = Combine(filters=self.filters) #, l2_reg=l2_reg
+        name=f"{name}{layer_idx}"
+        up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, kernel_size=size_factor, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
+        if skip_combine_mode=="conv":
+            combine = lambda x : combine_block(x, parent_name = name, filters=filters) #, l2_reg=l2_reg
         else:
-            self.combine = None
-        if self.skip_mode=="sg":
-            self.stop_grad = StopGradient()
-        self.conv = Conv2D(filters=self.filters, kernel_size=self.conv_kernel_size, padding='same', activation="relu")
-
-    def compute_output_shape(self, input_shape):
-      return (input_shape[0], input_shape[1]*self.size_factor, input_shape[2]*self.size_factor, input_shape[3])
-
-    def call(self, input):
-        down, res = input
-        up = self.up_op(down)
-        if "omit"!=self.skip_mode:
-            if self.stop_grad is not None:
-                res = self.stop_grad(res)
-            if self.combine is not None:
-                x = self.combine([up, res])
+            combine = None
+        if skip_mode=="sg":
+            stop_grad = lambda x : stop_gradient(x, parent_name=name)
+        conv = Conv2D(filters=filters, kernel_size=conv_kernel_size, padding='same', activation="relu", name=f"{name}/Conv{conv_kernel_size}x{conv_kernel_size}")
+        def op(input):
+            down, res = input
+            up = up_op(down)
+            if "omit"!=skip_mode:
+                if skip_mode=="sg":
+                    res = stop_grad(res)
+                if combine is not None:
+                    x = combine([up, res])
+                else:
+                    x = up + res
             else:
-                x = up + res
+                x = up
+            x = conv(x)
+            return x
+        return op
+
+def upsampling_block(
+            input,
+            filters: int,
+            parent_name:str,
+            kernel_size: int=2,
+            mode:str="tconv", # tconv, up_nn, up_bilinera
+            norm_layer:str=None,
+            activation: str="relu",
+            #l2_reg: float=1e-5,
+            use_bias:bool = True,
+            name: str="Upsampling2D",
+        ):
+        assert mode in ["tconv", "up_nn", "up_bilinear"], "invalid mode"
+        if parent_name is not None and len(parent_name)>0:
+            name = f"{parent_name}/{name}"
+        if mode=="tconv":
+            upsample = tf.keras.layers.Conv2DTranspose(
+                filters,
+                kernel_size=kernel_size,
+                strides=kernel_size,
+                padding='same',
+                activation=activation,
+                use_bias=use_bias,
+                # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
+                name=f"{name}/tConv{kernel_size}x{kernel_size}",
+            )
+            conv=None
         else:
-            x = up
-        x = self.conv(x)
+            interpolation = "nearest" if mode=="up_nn" else 'bilinear'
+            upsample = tf.keras.layers.UpSampling2D(size=kernel_size, interpolation=interpolation, name = f"{name}/Upsample{kernel_size}x{kernel_size}_{interpolation}")
+            conv = tf.keras.layers.Conv2D(
+                filters=filters,
+                kernel_size=kernel_size,
+                strides=1,
+                padding='same',
+                name=f"{name}/Conv{kernel_size}x{kernel_size}",
+                # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
+                use_bias=use_bias,
+                activation=activation
+            )
+        x = upsample(input)
+        if conv is not None:
+            x = conv(x)
         return x
 
-    def compute_output_shape(self, input_shape):
-        return input_shape[0],input_shape[1] * self.size_factor, input_shape[2] * self.size_factor,input_shape[3]
+def stop_gradient(input, parent_name:str, name:str="StopGradient"):
+    if parent_name is not None and len(parent_name)>0:
+        name = f"{parent_name}/{name}"
+    return tf.stop_gradient( input, name=name )
 
-def parse_param_list(param_list, ignore_stride:bool = False, name="Sequence"):
+def combine_block(input,
+            filters: int,
+            parent_name:str,
+            activation: str="relu",
+            #l2_reg: float=1e-5,
+            use_bias:bool = True,
+            name: str="Combine"):
+    if parent_name is not None and len(parent_name)>0:
+        name = f"{parent_name}/{name}"
+
+    concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}/Concat")
+    combine_conv = Conv2D(
+        filters=filters,
+        kernel_size=1,
+        padding='same',
+        activation=activation,
+        use_bias=use_bias,
+        # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
+        name=f"{name}/Conv1x1")
+    x = concat(input)
+    x = combine_conv(x)
+    return x
+
+def parse_param_list(param_list, name:str, ignore_stride:bool = False):
     total_contraction = 1
     if ignore_stride:
         param_list = [params.copy() for params in param_list]
@@ -301,32 +290,32 @@ def parse_param_list(param_list, ignore_stride:bool = False, name="Sequence"):
     i = 0
     if param_list[0].get("downscale", 1)==1:
         if len(param_list)>1 and param_list[1].get("downscale", 1) == 1:
-            sequence = tf.keras.Sequential(name = name)
+            sequence = []
             while i<len(param_list) and param_list[i].get("downscale", 1) == 1:
-                sequence.add(parse_params(**param_list[i], name = f"{i}"))
+                sequence.append(parse_params(**param_list[i], name = f"{name}/Op{i}"))
                 i+=1
         else:
-            sequence = parse_params(**param_list[0], name = "0")
+            sequence = [parse_params(**param_list[0], name = f"{name}/Op")]
             i=1
     else:
         sequence=None
 
     if i<len(param_list):
         if i==len(param_list):
-            down = parse_params(**param_list[i], name="DownOp")
+            down = [parse_params(**param_list[i], name=f"{name}/DownOp")]
             total_contraction *= param_list[i].get("downscale", 1)
         else:
-            down = tf.keras.Sequential(name = "DownOp")
+            down = []
             for ii in range(i, len(param_list)):
-                down.add(parse_params(**param_list[i], name = f"{i}"))
+                down.append(parse_params(**param_list[i], name = f"{name}/DownOp{i}"))
                 total_contraction *= param_list[i].get("downscale", 1)
     else:
         down = None
     return sequence, down, total_contraction
 
-def parse_params(filters, kernel_size = 3, expand_filters=0, SE=True, activation="relu", downscale=1, name="0"):
+def parse_params(filters:int, kernel_size:int = 3, expand_filters:int=0, SE:bool=True, activation="relu", downscale:int=1, name:str=""):
     if expand_filters <= 0:
-        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, padding='same', activation=activation, name=f"Conv{kernel_size}x{kernel_size}f{filters}_{name}")
+        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}f{filters}")
     else:
         return Bneck(
             out_channels=filters,
@@ -336,5 +325,5 @@ def parse_params(filters, kernel_size = 3, expand_filters=0, SE=True, activation
             use_se=SE,
             act_layer=activation,
             skip=True,
-            name=f"Bneck{kernel_size}x{kernel_size}f{expand_filters}-{filters}_{name}"
+            name=f"{name}/Bneck{kernel_size}x{kernel_size}f{expand_filters}"
         )
