@@ -15,6 +15,11 @@ class SelfAttention(Layer):
         self.filters = filters
         self.return_attention=return_attention
 
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"positional_encoding": self.positional_encoding, "filters":filters, "return_attention":return_attention})
+      return config
+
     def build(self, input_shape):
         self.spatial_dims=input_shape[1:-1]
         self.spatial_dim = np.prod(self.spatial_dims)
