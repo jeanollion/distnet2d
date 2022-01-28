@@ -110,7 +110,7 @@ def get_distnet_2d(input_shape,
             conv_catnext = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="Output4_CategoryNext")
 
         # Create GRAPH
-        input = tf.keras.layers.Input(shape=input_shape)
+        input = tf.keras.layers.Input(shape=input_shape, name="Input")
         residuals = []
         downsampled = [input]
         for l in encoder_layers:
@@ -313,7 +313,7 @@ def parse_param_list(param_list, name:str, ignore_stride:bool = False):
         down = None
     return sequence, down, total_contraction
 
-def parse_params(filters:int, kernel_size:int = 3, expand_filters:int=0, SE:bool=True, activation="relu", downscale:int=1, name:str=""):
+def parse_params(filters:int, kernel_size:int = 3, expand_filters:int=0, SE:bool=False, activation="relu", downscale:int=1, name:str=""):
     if expand_filters <= 0:
         return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}f{filters}")
     else:

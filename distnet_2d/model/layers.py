@@ -533,6 +533,7 @@ class Bneck(Layer):
             self.se = SEBottleneck( l2_reg=self.l2_reg, name="Depthwise/SEBottleneck",)
         _available_activation = {
             "relu": tf.keras.layers.ReLU(name="Depthwise/ReLU"),
+            "hard_sigmoid": HardSigmoid(name="Depthwise/HardSigmoid"),
             "hswish": HardSwish(name="Depthwise/HardSwish"),
         }
         self.act = get_layer(self.act_layer, _available_activation, Identity())
