@@ -95,7 +95,8 @@ def get_distnet_2d(input_shape,
         decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else ("sg" if skip_stop_gradient else None), activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
 
         # defin output operations
-        conv_edm = Conv2D(filters=3 if next else 2, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output0_EDM")
+        conv_edm = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvEDM")
+        conv_edm_out = Conv2D(filters=3 if next else 2, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output0_EDM")
         ## displacement
         conv_d = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
         conv_dy = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=False, name="Output1_dy")
@@ -131,7 +132,8 @@ def get_distnet_2d(input_shape,
             upsampled.append(up)
 
         edm = conv_edm(upsampled[-1])
-
+        edm = conv_edm_out(edm)
+        
         displacement = conv_d(upsampled[-1-output_conv_level])
         dy = conv_dy(displacement) # TODO test MB CONV with SE
         dx = conv_dx(displacement) # TODO test MB CONV with SE
