@@ -17,7 +17,7 @@ class SelfAttention(Layer):
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"positional_encoding": self.positional_encoding, "filters":filters, "return_attention":return_attention})
+      config.update({"positional_encoding": self.positional_encoding, "filters":self.filters, "return_attention":self.return_attention})
       return config
 
     def build(self, input_shape):
