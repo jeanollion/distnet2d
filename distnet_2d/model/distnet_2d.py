@@ -92,7 +92,7 @@ def get_distnet_2d(input_shape,
             self_attention = Directional2DSelfAttention(positional_encoding=True, name="SelfAttention")
         else:
             self_attention = SelfAttention(positional_encoding="2D", name="SelfAttention")
-        attention_skip_op = lambda x : combine_block(x, filters=attention_filters//2, parent_name="FeatureSequence")
+        attention_skip_op = Combine(filters=attention_filters//2, name="FeatureSequence")
 
         # define decoder operations
         decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else ("sg" if skip_stop_gradient else None), activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
@@ -172,7 +172,6 @@ def get_distnet_2d_sep(input_shape,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
-        attention_filters=feature_settings[-1].get("filters")
         if decoder_settings is None:
             decoder_settings = DECODER_SETTINGS_DS if output_conv_level==1 else DECODER_SETTINGS
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
@@ -190,11 +189,14 @@ def get_distnet_2d_sep(input_shape,
             op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
-            combine_residual_layer.append(lambda x : combine_block(x, filters=residual_filters * (3 if next else 2), parent_name=f"CombineResidulas{l_idx}"))
+            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), name=f"CombineResidulas{l_idx}"))
         # define feature operations
-        feature_convs, _, _, _ = parse_param_list(feature_settings, "FeatureSequence")
+        feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
         attention_op = Attention(positional_encoding="2D", name="Attention")
-        attention_skip_op = lambda x : combine_block(x, filters=attention_filters, parent_name="FeatureSequence")
+        self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
+        self_attention_skip_op = Combine(filters=attention_filters//2, name="SelfAttentionSkip")
+        combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
+        attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
 
         # define decoder operations
         decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else ("sg" if skip_stop_gradient else None), activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
@@ -232,15 +234,16 @@ def get_distnet_2d_sep(input_shape,
             feature = downsampled[-1]
             for op in feature_convs:
                 feature = op(feature)
+            sa = self_attention_op([feature, feature])
+            feature = self_attention_skip_op([feature, sa])
             all_features.append(feature)
-
+        combined_features = combine_features_op(all_features)
         attention = attention_op([all_features[0], all_features[1]])
         if next:
             attention_next= attention_op([all_features[1], all_features[2]])
-            feature = attention_skip_op([attention, attention_next, *all_features])
+            feature = attention_skip_op([attention, attention_next, combined_features])
         else:
-            feature = attention_skip_op([attention, all_features[0], all_features[1]])
-
+            feature = attention_skip_op([attention, combined_features])
 
         residuals = []
         for l_idx in range(len(encoder_layers)):
@@ -313,7 +316,7 @@ def decoder_op(
         name=f"{name}{layer_idx}"
         up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, kernel_size=size_factor, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
         if skip_combine_mode=="conv":
-            combine = lambda x : combine_block(x, parent_name = name, filters=filters) #, l2_reg=l2_reg
+            combine = Combine(name = name, filters=filters) #, l2_reg=l2_reg
         else:
             combine = None
         if skip_mode=="sg":
@@ -384,29 +387,6 @@ def stop_gradient(input, parent_name:str, name:str="StopGradient"):
     if parent_name is not None and len(parent_name)>0:
         name = f"{parent_name}/{name}"
     return tf.stop_gradient( input, name=name )
-
-def combine_block(input,
-            filters: int,
-            parent_name:str,
-            activation: str="relu",
-            #l2_reg: float=1e-5,
-            use_bias:bool = True,
-            name: str="Combine"):
-    if parent_name is not None and len(parent_name)>0:
-        name = f"{parent_name}/{name}"
-
-    concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}/Concat")
-    combine_conv = Conv2D(
-        filters=filters,
-        kernel_size=1,
-        padding='same',
-        activation=activation,
-        use_bias=use_bias,
-        # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
-        name=f"{name}/Conv1x1")
-    x = concat(input)
-    x = combine_conv(x)
-    return x
 
 def parse_param_list(param_list, name:str, ignore_stride:bool = False):
     total_contraction = 1

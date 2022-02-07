@@ -302,19 +302,28 @@ class Combine(Layer):
             filters: int,
             activation: str="relu",
             #l2_reg: float=1e-5,
-            use_bias:bool = True,
             name: str="Combine",
         ):
+        self.activation = activation
+        self.filters= filters
         super().__init__(name=name)
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"activation": self.activation, "filters":self.filters})
+      return config
+
+    def build(self, input_shape):
         self.concat = tf.keras.layers.Concatenate(axis=-1, name = "Concat")
         self.combine_conv = Conv2D(
-            filters=filters,
+            filters=self.filters,
             kernel_size=1,
             padding='same',
-            activation=activation,
-            use_bias=use_bias,
+            activation=self.activation,
+            use_bias=True,
             # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
             name="Conv1x1")
+        super().build(input_shape)
 
     def call(self, input):
         x = self.concat(input)
