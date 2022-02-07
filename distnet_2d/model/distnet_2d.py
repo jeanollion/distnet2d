@@ -194,7 +194,7 @@ def get_distnet_2d_sep(input_shape,
         feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
         attention_op = Attention(positional_encoding="2D", name="Attention")
         self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
-        self_attention_skip_op = Combine(filters=attention_filters//2, name="SelfAttentionSkip")
+        self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
         combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
         attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
 
