@@ -426,7 +426,7 @@ def parse_param_list(param_list, name:str, ignore_stride:bool = False):
 
 def parse_params(filters:int, kernel_size:int = 3, expand_filters:int=0, SE:bool=False, activation="relu", downscale:int=1, name:str=""):
     if expand_filters <= 0:
-        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}f{filters}")
+        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
     else:
         return Bneck(
             out_channels=filters,

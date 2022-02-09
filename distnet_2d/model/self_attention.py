@@ -107,7 +107,7 @@ def scaled_dot_product_attention(q, k, v):
     matmul_qk = tf.matmul(q, k, transpose_b=True)  # (..., seq_len_q, seq_len_k)
 
     # scale matmul_qk
-    dk = tf.cast(tf.shape(k)[-1], tf.float32)
+    dk = tf.cast(tf.shape(k)[-1], matmul_qk.dtype)
     scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
 
     # softmax is normalized on the last axis (seq_len_k) so that the scores
