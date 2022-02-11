@@ -22,6 +22,7 @@ class DyDxIterator(TrackingIterator):
         elasticdeform_parameters:dict = {},
         downscale_displacement_and_categories=1,
         input_image_data_generator=None,
+        output_float16=False,
         **kwargs):
         if len(channel_keywords)!=3:
             raise ValueError('keyword should contain 3 elements in this order: grayscale input images, object labels, object previous labels')
@@ -30,6 +31,7 @@ class DyDxIterator(TrackingIterator):
         self.downscale=downscale_displacement_and_categories
         self.erase_edge_cell_size=erase_edge_cell_size
         self.aug_frame_subsampling=aug_frame_subsampling
+        self.output_float16=output_float16
         if input_image_data_generator is not None:
             kwargs["image_data_generators"] = [input_image_data_generator, None, None]
         super().__init__(dataset=dataset,
@@ -160,7 +162,9 @@ class DyDxIterator(TrackingIterator):
                 if self.downscale>>1:
                     categories_next = rescale(categories_next, scale, anti_aliasing= False, order=0)
                 all_channels.insert(4, categories_next)
-
+        if self.output_float16:
+            for i, c in enumerate(all_channels):
+                all_channels[i] = c.astype('float16')
         return all_channels
 
     def _erase_small_objects_at_edges(self, labelImage, batch_idx, channel_idxs, channel_idxs_chan, batch_by_channel):
