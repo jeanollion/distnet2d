@@ -19,7 +19,7 @@ def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=
 
         #considering weights are ordered by class, for each class
         #true(1) if the class index is equal to the weight index
-        class_selectors = [K.equal(i, class_selectors) for i in range(len(weights_list_cast))]
+        class_selectors = [K.equal(i, class_selectors) for i in class_indices]
 
         #casting boolean to float for calculations
         #each tensor in the list contains 1 where ground true class is equal to its index
