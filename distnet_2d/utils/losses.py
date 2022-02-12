@@ -10,6 +10,7 @@ def ssim_loss(max_val = 1, filter_size=11, filter_sigma=1.5, k1=0.01, k2=0.03):
 
 def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=True, dtype='float32'):
     weights_list_cast = np.array(weights_list).astype(dtype)
+    class_indices = np.array([i in range(len(weights_list_cast))]).astype(dtype)
     def loss_func(true, pred):
         if sparse:
             class_selectors = K.squeeze(true, axis=axis)
@@ -26,7 +27,7 @@ def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=
         class_selectors = [tf.cast(x, dtype) for x in class_selectors]
 
         #for each of the selections above, multiply their respective weight
-        weights = [sel * w for sel, w in zip(class_selectors, weights_list)]
+        weights = [sel * w for sel, w in zip(class_selectors, weights_list_cast)]
 
         #sums all the selections
         #result is a tensor with the respective weight for each element in predictions
