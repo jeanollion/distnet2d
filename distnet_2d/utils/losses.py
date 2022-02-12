@@ -14,10 +14,10 @@ def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=
             class_selectors = K.squeeze(true, axis=axis)
         else:
             class_selectors = K.argmax(true, axis=axis)
-
+        weights_list = np.array(weights_list).astype(dtype)
         #considering weights are ordered by class, for each class
         #true(1) if the class index is equal to the weight index
-        class_selectors = [K.equal(float(i), class_selectors) for i in range(len(weights_list))]
+        class_selectors = [K.equal(i, class_selectors) for i in range(len(weights_list))]
 
         #casting boolean to float for calculations
         #each tensor in the list contains 1 where ground true class is equal to its index
