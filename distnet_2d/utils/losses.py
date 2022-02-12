@@ -9,15 +9,16 @@ def ssim_loss(max_val = 1, filter_size=11, filter_sigma=1.5, k1=0.01, k2=0.03):
     return loss_fun
 
 def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=True, dtype='float32'):
+    weights_list_cast = np.array(weights_list).astype(dtype)
     def loss_func(true, pred):
         if sparse:
             class_selectors = K.squeeze(true, axis=axis)
         else:
             class_selectors = K.argmax(true, axis=axis)
-        weights_list = np.array(weights_list).astype(dtype)
+
         #considering weights are ordered by class, for each class
         #true(1) if the class index is equal to the weight index
-        class_selectors = [K.equal(i, class_selectors) for i in range(len(weights_list))]
+        class_selectors = [K.equal(i, class_selectors) for i in range(len(weights_list_cast))]
 
         #casting boolean to float for calculations
         #each tensor in the list contains 1 where ground true class is equal to its index
