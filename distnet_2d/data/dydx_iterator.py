@@ -69,10 +69,22 @@ class DyDxIterator(TrackingIterator):
             for c in channels:
                 batch_by_channel[c] = batch_by_channel[c][..., sel]
 
+        if perform_elasticdeform or perform_tiling: ## elastic deform do not support float16 type -> temporarily convert to float32
+            channels = [c for c in batch_by_channel.keys() if c>=0]
+            converted_from_float16=[]
+            for c in channels:
+                if batch_by_channel[c].dtype == np.float16:
+                    batch_by_channel[c] = batch_by_channel[c].astype('float32')
+                    converted_from_float16.append(c)
+
         if perform_elasticdeform:
             self._apply_elasticdeform(batch_by_channel)
         if perform_tiling:
             self._apply_tiling(batch_by_channel)
+            
+        if perform_elasticdeform or perform_tiling:
+            for c in converted_from_float16:
+                batch_by_channel[c] = batch_by_channel[c].astype('float16')
 
         return batch_by_channel, aug_param_array, ref_channel
 
