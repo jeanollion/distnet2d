@@ -48,7 +48,7 @@ DECODER_SETTINGS = [
     {"filters":64},
     {"filters":96},
     {"filters":128},
-    {"filters":256}
+    {"filters":256, "up_kernel_size":4}
 ]
 
 def get_distnet_2d(input_shape,
@@ -280,6 +280,109 @@ def get_distnet_2d_sep(input_shape,
             outputs = edm, dy, dx, cat
         return Model([input], outputs, name=name)
 
+def get_distnet_2d_sep_out(input_shape,
+            upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
+            downsampling_mode:str = "stride", #maxpool, stride
+            combine_kernel_size:int = 3,
+            skip_stop_gradient:bool = False,
+            encoder_settings:list = ENCODER_SETTINGS,
+            feature_settings: list = FEATURE_SETTINGS,
+            decoder_settings: list = DECODER_SETTINGS,
+            output_conv_filters:int=32,
+            name: str="DiSTNet2D",
+            l2_reg: float=1e-5,
+    ):
+        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
+        assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
+
+        spatial_dims = input_shape[:-1]
+        assert input_shape[-1] in [2, 3], "channel number should be in [2, 3]"
+        next = input_shape[-1]==3
+
+        # define enconder operations
+        encoder_layers = []
+        contraction_per_layer = []
+        combine_residual_layer = []
+        for l_idx, param_list in enumerate(encoder_settings):
+            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
+            encoder_layers.append(op)
+            contraction_per_layer.append(contraction)
+            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), name=f"CombineResidulas{l_idx}"))
+        # define feature operations
+        feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
+        attention_op = Attention(positional_encoding="2D", name="Attention")
+        self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
+        self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
+        combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
+        attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
+
+        # define decoder operations
+        decoder_layers=[]
+        decoder_out = []
+        for l_idx, param_list in enumerate(decoder_settings):
+            if l_idx==0:
+                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output0_EDM"], name="DecoderEDM", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
+                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output1_dy", "Output1_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
+                cat_names = ["Output3_Category", "Output4_CategoryNext"] if next else ["Output3_Category"]
+                decoder_out.append( decoder_sep2_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4) )
+            else:
+                decoder_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, skip_mode="sg" if skip_stop_gradient else None, activation="relu", layer_idx=l_idx) )
+
+        # Create GRAPH
+        input = tf.keras.layers.Input(shape=input_shape, name="Input")
+        inputs = tf.split(input, num_or_size_splits = 3 if next else 2, axis=-1)
+        all_residuals = []
+        all_downsampled = []
+        all_features = []
+        for i in inputs:
+            residuals = []
+            downsampled = [i]
+            for l in encoder_layers:
+                down, res = l(downsampled[-1])
+                downsampled.append(down)
+                residuals.append(res)
+            all_residuals.append(residuals)
+            all_downsampled.append(downsampled)
+            feature = downsampled[-1]
+            for op in feature_convs:
+                feature = op(feature)
+            sa = self_attention_op([feature, feature])
+            feature = self_attention_skip_op([feature, sa])
+            all_features.append(feature)
+        combined_features = combine_features_op(all_features)
+        attention = attention_op([all_features[0], all_features[1]])
+        if next:
+            attention_next= attention_op([all_features[1], all_features[2]])
+            feature = attention_skip_op([attention, attention_next, combined_features])
+        else:
+            feature = attention_skip_op([attention, combined_features])
+
+        residuals = []
+        for l_idx in range(len(encoder_layers)):
+            res = [residuals_c[l_idx] for residuals_c in all_residuals]
+            if l_idx>=1:
+                combine_residual_op = combine_residual_layer[l_idx]
+                residuals.append(combine_residual_op(res))
+            else:
+                residuals.append(res)
+
+        upsampled = [feature]
+        residuals = residuals[::-1]
+        for i, l in enumerate(decoder_layers[::-1]):
+            up = l([upsampled[-1], residuals[i]])
+            upsampled.append(up)
+
+        last_residuals = residuals[-1]
+        [edm] = decoder_out[0]([ upsampled[-1], last_residuals ])
+        dy, dx = decoder_out[1]([ upsampled[-1], last_residuals[1:] ])
+        cat = decoder_out[2]([ upsampled[-1], last_residuals[1:] ])
+
+        if next:
+            cat, cat_next  = cat
+            outputs =  edm, dy, dx, cat, cat_next
+        else:
+            outputs = edm, dy, dx, cat
+        return Model([input], outputs, name=name)
 
 def encoder_op(param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
@@ -304,8 +407,10 @@ def decoder_op(
             filters: int,
             size_factor: int=2,
             conv_kernel_size:int=3,
+            up_kernel_size:int=0,
             mode:str="tconv", # tconv, up_nn, up_bilinear
             skip_combine_mode = "conv", # conv, sum
+            combine_kernel_size = 1,
             skip_mode = "sg", # sg, omit, None
             activation: str="relu",
             #l2_reg: float=1e-5,
@@ -314,14 +419,14 @@ def decoder_op(
             layer_idx:int=1,
         ):
         name=f"{name}{layer_idx}"
-        up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, kernel_size=size_factor, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
+        up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
         if skip_combine_mode=="conv":
-            combine = Combine(name = name, filters=filters) #, l2_reg=l2_reg
+            combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
         else:
             combine = None
         if skip_mode=="sg":
             stop_grad = lambda x : stop_gradient(x, parent_name=name)
-        conv = Conv2D(filters=filters, kernel_size=conv_kernel_size, padding='same', activation="relu", name=f"{name}/Conv{conv_kernel_size}x{conv_kernel_size}")
+        conv = Conv2D(filters=filters, kernel_size=conv_kernel_size, padding='same', activation=activation, name=f"{name}/Conv{conv_kernel_size}x{conv_kernel_size}")
         def op(input):
             down, res = input
             up = up_op(down)
@@ -338,11 +443,69 @@ def decoder_op(
             return x
         return op
 
+def decoder_sep_op(
+            output_names:list,
+            filters: int,
+            size_factor: int=2,
+            up_kernel_size:int=0,
+            combine_kernel_size:int=3,
+            conv_kernel_size:int=3,
+            mode:str="tconv", # tconv, up_nn, up_bilinear
+            activation: str="relu",
+            activation_out:str = "linear",
+            filters_out:int = 1,
+            #l2_reg: float=1e-5,
+            #use_bias:bool = True,
+            name: str="DecoderSepLayer",
+            layer_idx:int=-1,
+        ):
+        if layer_idx>=0:
+            name=f"{name}{layer_idx}"
+        up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
+        combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
+        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=f"{name}/{output_name}") for output_name in output_names]
+        concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name) for output_name in output_names]
+        def op(input):
+            down, res_list = input
+            up = up_op(down)
+            x_list = [combine([up, res]) for res in res_list]
+            return [concat_out[i]([conv_out[i](x) for x in x_list]) for i in range(len(output_names))]
+        return op
+
+def decoder_sep2_op(
+            output_names:list,
+            filters: int,
+            size_factor: int=2,
+            up_kernel_size:int=0,
+            combine_kernel_size:int=3,
+            conv_kernel_size:int=3,
+            mode:str="tconv", # tconv, up_nn, up_bilinear
+            activation: str="relu",
+            activation_out:str = "linear",
+            filters_out:int = 1,
+            #l2_reg: float=1e-5,
+            #use_bias:bool = True,
+            name: str="DecoderSepLayer",
+            layer_idx:int=-1,
+        ):
+        if layer_idx>=0:
+            name=f"{name}{layer_idx}"
+        up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
+        combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
+        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=output_name) for output_name in output_names]
+        def op(input):
+            down, res_list = input
+            assert len(res_list)==len(output_names), "decoder_sep2 : expected as many outputs as residuals"
+            up = up_op(down)
+            return [ conv_out[i](combine([up, res])) for i, res in enumerate(res_list) ]
+        return op
+
 def upsampling_block(
             input,
             filters: int,
             parent_name:str,
-            kernel_size: int=2,
+            size_factor:int=2,
+            kernel_size: int=0,
             mode:str="tconv", # tconv, up_nn, up_bilinera
             norm_layer:str=None,
             activation: str="relu",
@@ -351,13 +514,15 @@ def upsampling_block(
             name: str="Upsampling2D",
         ):
         assert mode in ["tconv", "up_nn", "up_bilinear"], "invalid mode"
+        if kernel_size<size_factor:
+            kernel_size = size_factor
         if parent_name is not None and len(parent_name)>0:
             name = f"{parent_name}/{name}"
         if mode=="tconv":
             upsample = tf.keras.layers.Conv2DTranspose(
                 filters,
                 kernel_size=kernel_size,
-                strides=kernel_size,
+                strides=size_factor,
                 padding='same',
                 activation=activation,
                 use_bias=use_bias,
@@ -367,7 +532,7 @@ def upsampling_block(
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
-            upsample = tf.keras.layers.UpSampling2D(size=kernel_size, interpolation=interpolation, name = f"{name}/Upsample{kernel_size}x{kernel_size}_{interpolation}")
+            upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{name}/Upsample{kernel_size}x{kernel_size}_{interpolation}")
             conv = tf.keras.layers.Conv2D(
                 filters=filters,
                 kernel_size=kernel_size,
