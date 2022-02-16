@@ -381,6 +381,7 @@ def get_distnet_2d_sep_out(input_shape,
             cat, cat_next  = cat
             outputs =  edm, dy, dx, cat, cat_next
         else:
+            [cat] = cat
             outputs = edm, dy, dx, cat
         return Model([input], outputs, name=name)
 
