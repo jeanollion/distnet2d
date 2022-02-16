@@ -288,7 +288,6 @@ def get_distnet_2d_sep_out(input_shape,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
-            output_conv_filters:int=32,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
@@ -322,7 +321,7 @@ def get_distnet_2d_sep_out(input_shape,
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output0_EDM"], name="DecoderEDM", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
-                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output1_dy", "Output1_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
+                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output1_dy", "Output2_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
                 cat_names = ["Output3_Category", "Output4_CategoryNext"] if next else ["Output3_Category"]
                 decoder_out.append( decoder_sep2_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4) )
             else:
@@ -466,11 +465,13 @@ def decoder_sep_op(
         combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
         conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=f"{name}/{output_name}") for output_name in output_names]
         concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name) for output_name in output_names]
+        id_out = [lambda input : tf.identity(input, name = output_name) for output_name in output_names]
         def op(input):
             down, res_list = input
             up = up_op(down)
             x_list = [combine([up, res]) for res in res_list]
-            return [concat_out[i]([conv_out[i](x) for x in x_list]) for i in range(len(output_names))]
+            out_op = id_out if len(x_list)==1 else concat_out
+            return [out_op[i]([conv_out[i](x) for x in x_list]) for i in range(len(output_names))]
         return op
 
 def decoder_sep2_op(
