@@ -465,13 +465,15 @@ def decoder_sep_op(
         combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
         conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=f"{name}/{output_name}") for output_name in output_names]
         concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name) for output_name in output_names]
-        id_out = [lambda input : tf.identity(input, name = output_name) for output_name in output_names]
+        id_out = [tf.keras.layers.Lambda(lambda x: x, name = output_name) for output_name in output_names]
         def op(input):
             down, res_list = input
             up = up_op(down)
             x_list = [combine([up, res]) for res in res_list]
-            out_op = id_out if len(x_list)==1 else concat_out
-            return [out_op[i]([conv_out[i](x) for x in x_list]) for i in range(len(output_names))]
+            if len(x_list)==1:
+                return [id_out[i](conv_out[i](x_list[0])) for i in range(len(output_names))]
+            else:
+                return [concat_out[i]([conv_out[i](x) for x in x_list]) for i in range(len(output_names))]
         return op
 
 def decoder_sep2_op(
