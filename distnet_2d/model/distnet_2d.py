@@ -462,14 +462,14 @@ def decoder_sep_op(
         if layer_idx>=0:
             name=f"{name}{layer_idx}"
         up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
-        combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
+        combine_gen = lambda i: Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
         conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=f"{name}/{output_name}") for output_name in output_names]
         concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name) for output_name in output_names]
         id_out = [tf.keras.layers.Lambda(lambda x: x, name = output_name) for output_name in output_names]
         def op(input):
             down, res_list = input
             up = up_op(down)
-            x_list = [combine([up, res]) for res in res_list]
+            x_list = [combine_gen(i)([up, res]) for i, res in enumerate(res_list)]
             if len(x_list)==1:
                 return [id_out[i](conv_out[i](x_list[0])) for i in range(len(output_names))]
             else:
@@ -495,13 +495,13 @@ def decoder_sep2_op(
         if layer_idx>=0:
             name=f"{name}{layer_idx}"
         up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
-        combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
+        combine = [Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) for i, _ in enumerate(output_names) ] #, l2_reg=l2_reg
         conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=output_name) for output_name in output_names]
         def op(input):
             down, res_list = input
             assert len(res_list)==len(output_names), "decoder_sep2 : expected as many outputs as residuals"
             up = up_op(down)
-            return [ conv_out[i](combine([up, res])) for i, res in enumerate(res_list) ]
+            return [ conv_out[i](combine[i]([up, res])) for i, res in enumerate(res_list) ]
         return op
 
 def upsampling_block(
