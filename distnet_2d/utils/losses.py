@@ -41,3 +41,16 @@ def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=
         loss = loss * weight_multiplier
         return loss
     return loss_func
+
+def edm_contour_loss(original_loss_func, contour_weight_factor, dtype='float32'):
+    '''
+    This function allows to set a weight for contour values (edm==1)
+    '''
+    weights_values = np.array((1, contour_weight_factor)).astype(dtype)
+    def loss_func(y_true, y_pred):
+        contour_value =
+        weight_map = tf.where(y_true==1, weights_values[1], weights_values[0])
+        loss = original_loss_func(y_true, y_pred)
+        loss = loss * weight_map
+        return loss
+    return loss_func

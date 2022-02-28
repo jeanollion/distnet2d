@@ -22,6 +22,7 @@ class DyDxIterator(TrackingIterator):
         elasticdeform_parameters:dict = {},
         downscale_displacement_and_categories=1,
         input_image_data_generator=None,
+        return_contours = False,
         output_float16=False,
         **kwargs):
         if len(channel_keywords)!=3:
@@ -32,6 +33,7 @@ class DyDxIterator(TrackingIterator):
         self.erase_edge_cell_size=erase_edge_cell_size
         self.aug_frame_subsampling=aug_frame_subsampling
         self.output_float16=output_float16
+        self.return_contours=return_contours
         if input_image_data_generator is not None:
             kwargs["image_data_generators"] = [input_image_data_generator, None, None]
         super().__init__(dataset=dataset,
@@ -81,7 +83,7 @@ class DyDxIterator(TrackingIterator):
             self._apply_elasticdeform(batch_by_channel)
         if perform_tiling:
             self._apply_tiling(batch_by_channel)
-            
+
         if perform_elasticdeform or perform_tiling:
             for c in converted_from_float16:
                 batch_by_channel[c] = batch_by_channel[c].astype('float16')
@@ -159,24 +161,31 @@ class DyDxIterator(TrackingIterator):
         for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
             edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
         all_channels.insert(0, edm)
+        if self.return_contours:
+            contour = edm == 1
+            all_channels.insert(1, contour)
+            channel_inc = 1
+        else:
+            channel_inc = 0
         downscale_factor = 1./self.downscale if self.downscale>1 else 0
         scale = [1, downscale_factor, downscale_factor, 1]
         if self.downscale>>1:
             dyIm = rescale(dyIm, scale, anti_aliasing= False, order=0)
             dxIm = rescale(dxIm, scale, anti_aliasing= False, order=0)
-        all_channels.insert(1, dyIm)
-        all_channels.insert(2, dxIm)
+        all_channels.insert(1+channel_inc, dyIm)
+        all_channels.insert(2+channel_inc, dxIm)
         if self.return_categories:
             if self.downscale>>1:
                 categories = rescale(categories, scale, anti_aliasing= False, order=0)
-            all_channels.insert(3, categories)
+            all_channels.insert(3+channel_inc, categories)
             if return_next:
                 if self.downscale>>1:
                     categories_next = rescale(categories_next, scale, anti_aliasing= False, order=0)
-                all_channels.insert(4, categories_next)
+                all_channels.insert(4+channel_inc, categories_next)
         if self.output_float16:
             for i, c in enumerate(all_channels):
-                all_channels[i] = c.astype('float16')
+                if not ( self.return_contours and i==1 or i==3+channel_inc or return_next and i==4+channel_inc ): # softmax / sigmoid activation -> float32
+                    all_channels[i] = c.astype('float16', copy=False)
         return all_channels
 
     def _erase_small_objects_at_edges(self, labelImage, batch_idx, channel_idxs, channel_idxs_chan, batch_by_channel):

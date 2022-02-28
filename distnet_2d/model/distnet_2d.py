@@ -7,6 +7,8 @@ import numpy as np
 from .self_attention import SelfAttention
 from .attention import Attention
 from .directional_2d_self_attention import Directional2DSelfAttention
+from ..utils.helpers import ensure_multiplicity, flatten_list
+from .utils import get_layer_dtype
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -285,6 +287,7 @@ def get_distnet_2d_sep_out(input_shape,
             downsampling_mode:str = "stride", #maxpool, stride
             combine_kernel_size:int = 3,
             skip_stop_gradient:bool = False,
+            predict_contours:bool = False,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
@@ -318,11 +321,12 @@ def get_distnet_2d_sep_out(input_shape,
         # define decoder operations
         decoder_layers=[]
         decoder_out = []
+        output_inc = 1 if predict_contours else 0
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
-                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output0_EDM"], name="DecoderEDM", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
-                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output1_dy", "Output2_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
-                cat_names = ["Output3_Category", "Output4_CategoryNext"] if next else ["Output3_Category"]
+                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output0_EDM", "Output1_Contours"] if predict_contours else ["Output0_EDM"], name="DecoderEDM", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out=["linear", "sigmoid"] if predict_contours else "linear") )
+                decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
+                cat_names = [f"Output{3+output_inc}_Category", f"Output{4+output_inc}_CategoryNext"] if next else [f"Output{3+output_inc}_Category"]
                 decoder_out.append( decoder_sep2_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4) )
             else:
                 decoder_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, skip_mode="sg" if skip_stop_gradient else None, activation="relu", layer_idx=l_idx) )
@@ -372,16 +376,10 @@ def get_distnet_2d_sep_out(input_shape,
             upsampled.append(up)
 
         last_residuals = residuals[-1]
-        [edm] = decoder_out[0]([ upsampled[-1], last_residuals ])
+        seg = decoder_out[0]([ upsampled[-1], last_residuals ])
         dy, dx = decoder_out[1]([ upsampled[-1], last_residuals[1:] ])
         cat = decoder_out[2]([ upsampled[-1], last_residuals[1:] ])
-
-        if next:
-            cat, cat_next  = cat
-            outputs =  edm, dy, dx, cat, cat_next
-        else:
-            [cat] = cat
-            outputs = edm, dy, dx, cat
+        outputs = flatten_list([seg, dy, dx, cat])
         return Model([input], outputs, name=name)
 
 def encoder_op(param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1):
@@ -459,13 +457,14 @@ def decoder_sep_op(
             name: str="DecoderSepLayer",
             layer_idx:int=-1,
         ):
+        activation_out = ensure_multiplicity(len(output_names), activation_out)
         if layer_idx>=0:
             name=f"{name}{layer_idx}"
         up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
         combine_gen = lambda i: Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
-        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=f"{name}/{output_name}") for output_name in output_names]
-        concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name) for output_name in output_names]
-        id_out = [tf.keras.layers.Lambda(lambda x: x, name = output_name) for output_name in output_names]
+        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=a, dtype=get_layer_dtype(a), name=f"{name}/{output_name}") for output_name, a in zip(output_names, activation_out)]
+        concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name, dtype=get_layer_dtype(a)) for output_name, a in zip(output_names, activation_out)]
+        id_out = [tf.keras.layers.Lambda(lambda x: x, name = output_name, dtype=get_layer_dtype(a)) for output_name, a in zip(output_names, activation_out)]
         def op(input):
             down, res_list = input
             up = up_op(down)
@@ -496,7 +495,7 @@ def decoder_sep2_op(
             name=f"{name}{layer_idx}"
         up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
         combine = [Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) for i, _ in enumerate(output_names) ] #, l2_reg=l2_reg
-        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=output_name) for output_name in output_names]
+        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=output_name, dtype=get_layer_dtype(activation_out)) for output_name in output_names]
         def op(input):
             down, res_list = input
             assert len(res_list)==len(output_names), "decoder_sep2 : expected as many outputs as residuals"

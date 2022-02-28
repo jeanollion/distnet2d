@@ -22,3 +22,9 @@ def get_layer(layer_name, layer_dict, default_layer):
         return layer_dict.get(layer_name)
     else:
         raise NotImplementedError(f"Layer [{layer_name}] is not implemented")
+
+def get_layer_dtype(activation:str):
+    if activation == "sigmoid" or activation == "softmax":
+        return "float32"
+    else:
+        return None
