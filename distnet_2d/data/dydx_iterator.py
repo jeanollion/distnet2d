@@ -8,6 +8,7 @@ from math import copysign
 import sys
 import itertools
 import edt
+from random import random
 
 class DyDxIterator(TrackingIterator):
     def __init__(self,
@@ -51,13 +52,16 @@ class DyDxIterator(TrackingIterator):
                     **kwargs)
 
     def _get_batch_by_channel(self, index_array, perform_augmentation, input_only=False, perform_elasticdeform=True, perform_tiling=True):
-        if self.aug_frame_subsampling>1 and self.aug_frame_subsampling is not None:
-            if callable(self.aug_frame_subsampling):
-                self.n_frames = self.aug_frame_subsampling()
-            else:
-                self.n_frames=np.random.randint(self.aug_frame_subsampling)+1
+        if self.aug_remove_prob>0 and random() < self.aug_remove_prob:
+            self.n_frames = 0 # flag that aug_remove = true
         else:
-            self.n_frames = 1
+            if self.aug_frame_subsampling>1 and self.aug_frame_subsampling is not None:
+                if callable(self.aug_frame_subsampling):
+                    self.n_frames = self.aug_frame_subsampling()
+                else:
+                    self.n_frames=np.random.randint(self.aug_frame_subsampling)+1
+            else:
+                self.n_frames = 1
         batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False)
         if not issubclass(batch_by_channel[1].dtype.type, np.integer):
             batch_by_channel[1] = batch_by_channel[1].astype(np.int32)
@@ -95,7 +99,8 @@ class DyDxIterator(TrackingIterator):
         prevlabelIms = batch_by_channel[2]
         return_next = self.channels_next[1]
         prev_label_map = []
-        end_points = [0, self.n_frames]
+        n_frames = self.n_frames if self.n_frames>0 else 1
+        end_points = [0, n_frames]
         if return_next:
             end_points.append(labelIms.shape[-1]-1)
         for b in range(labelIms.shape[0]):
