@@ -42,11 +42,14 @@ def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=
         return loss
     return loss_func
 
-def weighted_binary_crossentropy(weights, dtype='float32', **bce_kwargs):
+def weighted_binary_crossentropy(weights, add_channel_axis=True, dtype='float32', **bce_kwargs):
     weights_cast = np.array(weights).astype(dtype)
     bce = tf.keras.losses.BinaryCrossentropy(**bce_kwargs)
     def loss_func(true, pred):
         weights = tf.where(true, weights_cast[1], weights_cast[0])
+        if add_channel_axis:
+            true = tf.expand_dims( true, -1)
+            pred = tf.expand_dims( pred, -1)
         return bce(true, pred, sample_weight=weights)
     return loss_func
 
