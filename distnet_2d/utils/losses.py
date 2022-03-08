@@ -46,7 +46,7 @@ def weighted_loss_binary(original_loss_func, weights, dtype='float32', squeeze_l
     weights_cast = np.array(weights).astype(dtype)
     def loss_func(true, pred):
         weight_multiplier = tf.where(true, weights_cast[1], weights_cast[0])
-        if squeeze:
+        if squeeze_last_axis:
             weight_multiplier = tf.squeeze(weight_multiplier, axis=-1)
         loss = original_loss_func(true, pred)
         loss = loss * weight_multiplier
