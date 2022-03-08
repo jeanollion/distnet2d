@@ -153,27 +153,36 @@ def get_nd_gaussian_kernel(radius=1, sigma=0, ndim=2):
     z = z.reshape(coords[0].shape) # Reshape back to a (N, N) grid.
     return z/z.sum()
 
-def get_foreground_and_contour_proportion(dataset, label_keyword="regionLabels", group_keyword=None):
-  params = dict(dataset=dataset,
+def get_foreground_and_contour_proportion(dataset, label_keyword="regionLabels", group_keyword=None, return_class_weights=False):
+    params = dict(dataset=dataset,
               channel_keywords=[label_keyword],
               group_keyword=group_keyword,
               output_channels=[],
               perform_data_augmentation=False,
               batch_size=1,
               shuffle=False)
-  it = MultiChannelIterator(**params)
-  shape = it[0].shape
-  ds_size = len(it)
-  sum = np.zeros(shape=(ds_size, 3), dtype=np.float64)
-  for i in range(ds_size):
-    labels = it[i][0,...,0]
-    edm = edt.edt(labels, black_border=False)
-    sum[i, 0] = np.prod(labels.shape)
-    sum[i, 1] = np.sum(labels>0)
-    sum[i, 2] = np.sum(edm==1)
+    it = MultiChannelIterator(**params)
+    shape = it[0].shape
+    ds_size = len(it)
+    sum = np.zeros(shape=(ds_size, 3), dtype=np.float64)
+    for i in range(ds_size):
+        labels = it[i][0,...,0]
+        edm = edt.edt(labels, black_border=False)
+        sum[i, 0] = np.prod(labels.shape)
+        sum[i, 1] = np.sum(edm>1)
+        sum[i, 2] = np.sum(edm==1)
+    it._close_datasetIO()
+    size = np.sum(sum[:,0])
+    contours = np.sum(sum[:,2])
+    fg = np.sum(sum[:,1])
+    p_fg = fg/size
+    p_cont = contours/size
+    if return_class_weights:
+        p_bck = 1 - p_fg - p_cont
+        return compute_class_weights([p_bck, p_fg, p_cont])
+    else:
+        return p_fg, p_cont
 
-  it._close_datasetIO()
-  size = np.sum(sum[:,0])
-  fg = np.sum(sum[:,1])
-  contours = np.sum(sum[:,2])
-  return fg/size, contours/size
+def compute_class_weights(class_proportions):
+    n_classes = len(class_proportions)
+    return [1./(n_classes * p) for p in class_proportions]

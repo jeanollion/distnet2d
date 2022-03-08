@@ -51,13 +51,13 @@ def weighted_binarycross_entropy(original_loss_func, weights, dtype='float32'):
         return loss
     return loss_func
 
-def edm_contour_loss(original_loss_func, contour_weight_factor, dtype='float32'):
+def edm_contour_loss(original_loss_func, background_weight, edm_weight, contour_weight, dtype='float32'):
     '''
-    This function allows to set a weight for contour values (edm==1)
+    This function allows to set a distinct weight for contour values (edm==1) and rest of foreground and background
     '''
-    weights_values = np.array((1, contour_weight_factor)).astype(dtype)
+    weights_values = np.array((background_weight, edm_weight, contour_weight)).astype(dtype)
     def loss_func(y_true, y_pred):
-        weight_map = tf.where(y_true==1, weights_values[1], weights_values[0])
+        weight_map = tf.where(y_true==0, weights_values[0], tf.where(y_true==1, weights_values[2], weights_values[1]))
         loss = original_loss_func(y_true, y_pred)
         loss = loss * weight_map
         return loss
