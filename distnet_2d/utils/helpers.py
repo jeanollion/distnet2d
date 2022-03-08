@@ -3,6 +3,8 @@ import tensorflow as tf
 from tensorflow.keras.callbacks import LearningRateScheduler
 import numpy as np
 import shutil
+import edt
+from dataset_iterator import MultiChannelIterator
 
 def convert_probabilities_to_logits(y_pred): # y_pred should be a tensor: tf.convert_to_tensor(y_pred, np.float32)
       y_pred = K.clip(y_pred, K.epsilon(), 1 - K.epsilon())
@@ -150,3 +152,28 @@ def get_nd_gaussian_kernel(radius=1, sigma=0, ndim=2):
     z = multivariate_normal.pdf(stacked, mean=mu, cov=covariance)
     z = z.reshape(coords[0].shape) # Reshape back to a (N, N) grid.
     return z/z.sum()
+
+def get_foreground_and_contour_proportion(dataset, label_keyword="regionLabels", group_keyword=None):
+  params = dict(dataset=dataset,
+              channel_keywords=[label_keyword],
+              group_keyword=group_keyword,
+              output_channels=[],
+              perform_data_augmentation=False,
+              batch_size=1,
+              shuffle=False)
+  it = MultiChannelIterator(**params)
+  shape = it[0].shape
+  ds_size = len(it)
+  sum = np.zeros(shape=(ds_size, 3), dtype=np.float64)
+  for i in range(ds_size):
+    labels = it[i][0,...,0]
+    edm = edt.edt(labels, black_border=False)
+    sum[i, 0] = np.prod(labels.shape)
+    sum[i, 1] = np.sum(labels>0)
+    sum[i, 2] = np.sum(edm==1)
+
+  it._close_datasetIO()
+  size = np.sum(sum[:,0])
+  fg = np.sum(sum[:,1])
+  contours = np.sum(sum[:,2])
+  return fg/size, contours/size
