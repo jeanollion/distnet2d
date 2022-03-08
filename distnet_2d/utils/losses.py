@@ -42,6 +42,15 @@ def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=
         return loss
     return loss_func
 
+def weighted_binarycross_entropy(original_loss_func, weights, dtype='float32'):
+    weights_cast = np.array(weights).astype(dtype)
+    def loss_func(true, pred):
+        weight_multiplier = true * weights[1] + (1. - true) * weights[0]
+        loss = original_loss_func(true, pred)
+        loss = loss * weight_multiplier
+        return loss
+    return loss_func
+
 def edm_contour_loss(original_loss_func, contour_weight_factor, dtype='float32'):
     '''
     This function allows to set a weight for contour values (edm==1)
