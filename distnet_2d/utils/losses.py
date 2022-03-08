@@ -42,15 +42,12 @@ def weighted_loss_by_category(original_loss_func, weights_list, axis=-1, sparse=
         return loss
     return loss_func
 
-def weighted_loss_binary(original_loss_func, weights, dtype='float32', squeeze_last_axis=True):
+def weighted_binary_crossentropy(weights, dtype='float32', **bce_kwargs):
     weights_cast = np.array(weights).astype(dtype)
+    bce = tf.keras.losses.BinaryCrossentropy(**bce_kwargs)
     def loss_func(true, pred):
-        weight_multiplier = tf.where(true, weights_cast[1], weights_cast[0])
-        if squeeze_last_axis:
-            weight_multiplier = tf.squeeze(weight_multiplier, axis=-1)
-        loss = original_loss_func(true, pred)
-        loss = loss * weight_multiplier
-        return loss
+        weights = tf.where(true, weights_cast[1], weights_cast[0])
+        return bce(true, pred, sample_weight=weights)
     return loss_func
 
 def edm_contour_loss(original_loss_func, background_weight, edm_weight, contour_weight, dtype='float32'):
