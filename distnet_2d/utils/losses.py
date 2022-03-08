@@ -50,6 +50,8 @@ def weighted_binary_crossentropy(weights, add_channel_axis=True, dtype='float32'
         if add_channel_axis:
             true = tf.expand_dims( true, -1)
             pred = tf.expand_dims( pred, -1)
+        else:
+            weights = tf.squeeze(weights, axis=-1)
         return bce(true, pred, sample_weight=weights)
     return loss_func
 
