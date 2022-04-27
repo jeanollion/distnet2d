@@ -191,7 +191,7 @@ def get_distnet_2d_sep(input_shape,
             op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
-            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), name=f"CombineResidulas{l_idx}"))
+            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), name=f"CombineResiduals{l_idx}"))
         # define feature operations
         feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
         attention_op = Attention(positional_encoding="2D", name="Attention")
@@ -309,7 +309,7 @@ def get_distnet_2d_sep_out(input_shape,
             op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
-            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), name=f"CombineResidulas{l_idx}"))
+            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), name=f"CombineResiduals{l_idx}"))
         # define feature operations
         feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
         attention_op = Attention(positional_encoding="2D", name="Attention")
