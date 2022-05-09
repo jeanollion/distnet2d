@@ -312,7 +312,7 @@ def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:
     if isinstance(dataset, (list, tuple)):
         scale_range, center_range = [], []
         for ds in dataset:
-            sr, cr = get_center_scale_range(ds, raw_feature_name, fluoresence, tl_sd_factor, fluo_centile_range, fluo_centile_extent)
+            sr, cr = get_center_scale_range(ds, raw_feature_name, fluorescence, tl_sd_factor, fluo_centile_range, fluo_centile_extent)
             scale_range.append(sr)
             center_range.append(cr)
         if len(dataset)==1:
