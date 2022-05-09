@@ -283,3 +283,51 @@ def get_histogram_normalization_center_scale_ranges(histogram, bins, center_perc
     if verbose:
         print("normalization_center_scale: modal value: {}, center_range: [{}; {}] scale_range: [{}; {}]".format(mode_value, mode_range[0], mode_range[1], scale_range[0], scale_range[1]))
     return mode_range, scale_range
+
+def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:bool = False, tl_sd_factor:float=3., fluo_centile_range:list=[75, 99.9], fluo_centile_extent:float=5):
+    """Computes a range for center and for scale factor for data augmentation.
+    Image can then be normalized using a random center C in the center range and a random scaling factor in the scale range: I -> (I - C) / S
+
+    Parameters
+    ----------
+    dataset : datasetIO/path(str) OR list/tuple of datasetIO/path(str)
+    raw_feature_name : str
+        name of the dataset
+    fluorescence : bool
+        in fluoresence mode:
+            mode M is computed, corresponding to the Mp centile: M = centile(Mp). center_range = [centile(Mp-fluo_centile_extent), centile(Mp+fluo_centile_extent)]
+            scale_range = [centile(fluo_centile_range[0]) - M, centile(fluo_centile_range[0]) + M ]
+        in transmitted light mode: center_range = [mean - tl_sd_factor*sd, mean + tl_sd_factor*sd]; scale_range = [sd/tl_sd_factor., sd*tl_sd_factor]
+    tl_sd_factor : float
+        Description of parameter `tl_sd_factor`.
+    fluo_centile_range : list
+        in fluoresence mode, interval for scale range in centiles
+    fluo_centile_extent : float
+        in fluoresence mode, extent for center range in centiles
+    Returns
+    -------
+    scale_range (list(2)) , center_range (list(2))
+
+    """
+    if isinstance(dataset, (list, tuple)):
+        scale_range, center_range = [], []
+        for ds in dataset:
+            sr, cr = get_center_scale_range(ds, raw_feature_name, fluoresence, tl_sd_factor, fluo_centile_range, fluo_centile_extent)
+            scale_range.append(sr)
+            center_range.append(cr)
+        if len(dataset)==1:
+            return scale_range[0], center_range[0]
+        return scale_range, center_range
+    if fluorescence:
+        bins = dih.get_histogram_bins_IPR(*dih.get_histogram(dataset, raw_feature_name, bins=1000), n_bins=256, percentiles=[0, 95], verbose=True)
+        histo, _ = dih.get_histogram(dataset, "/raw", bins=bins)
+        center_range, scale_range = get_normalization_center_scale_ranges(histo, bins, fluo_centile_extent, fluo_centile_range, verbose=True)
+        print("center: [{}; {}] / scale: [{}; {}]".format(center_range[0], center_range[1], scale_range[0], scale_range[1]))
+        return center_range, scale_range
+    else:
+        mean, sd = dih.get_mean_sd(dataset, "/raw", per_channel=True)
+        mean, sd = np.mean(mean), np.mean(sd)
+        print("mean: {} sd: {}".format(mean, sd))
+        center_range, scale_range = [mean - tl_sd_factor*sd, mean + tl_sd_factor*sd], [sd/tl_sd_factor, sd*tl_sd_factor]
+        print("center: [{}; {}] / scale: [{}; {}]".format(center_range[0], center_range[1], scale_range[0], scale_range[1]))
+        return center_range, scale_range
