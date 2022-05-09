@@ -24,7 +24,7 @@ main_dir = "/data/Images/CellTrackingChallenge"
 # - 01 / labels -> 01_ST/SEG
 # - 01 / previousLabels -> previous labels
 
-ds_dirs = [f for f in listdir(main_dir) if isdir(join(dir, f))]
+ds_dirs = [join(main_dir, f) for f in listdir(main_dir) if isdir(join(main_dir, f))]
 for dir in ds_dirs:
     dirs = [f for f in listdir(dir) if isdir(join(dir, f)) and '_' not in f]
     out_dir = join(dir, basename(dir)+".h5")
@@ -46,7 +46,7 @@ for dir in ds_dirs:
             raw_ims = np.array([imread(join(raw_dir, f)) for f in images])
             print(f"raw im shape: {raw_ims.shape}")
             out_file.create_dataset(f"{position}/raw", data=raw_ims)
-            ds_labels = out_file.create_dataset(f"{position}/labels", raw_ims.shape, dtype='int16')
+            ds_labels = out_file.create_dataset(f"{position}/regionLabels", raw_ims.shape, dtype='int16')
             prev_labels = np.zeros(raw_ims.shape, dtype="int16")
             end_digit_idx = images[0].index(".tif")
             for im_name in images:
@@ -67,4 +67,4 @@ for dir in ds_dirs:
                                 #print(f"position: {position} frame: {frame} label: {l} prev label: {prev_l}")
                         else:
                             print(f"position: {position} frame: {frame} label: {l} slice:{slice} has no track")
-            out_file.create_dataset(f"{position}/prevLabels", data=prev_labels)
+            out_file.create_dataset(f"{position}/prevRegionLabels", data=prev_labels)
