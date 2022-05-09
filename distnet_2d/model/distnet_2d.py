@@ -168,6 +168,7 @@ def get_distnet_2d_sep(input_shape,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = None,
+            residual_combine_size:int = 1,
             output_conv_filters:int=32,
             output_conv_level = 0,
             conv_before_edm = False,
@@ -191,13 +192,13 @@ def get_distnet_2d_sep(input_shape,
             op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
-            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), name=f"CombineResiduals{l_idx}"))
+            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
         # define feature operations
         feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
         attention_op = Attention(positional_encoding="2D", name="Attention")
         self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
         self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
-        combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
+        combine_features_op = Combine(filters=attention_filters//2, kernel_size=residual_combine_size, name="CombineFeatures")
         attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
 
         # define decoder operations
@@ -291,6 +292,7 @@ def get_distnet_2d_sep_out(input_shape,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
+            residual_combine_size:int = 1,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
@@ -309,13 +311,13 @@ def get_distnet_2d_sep_out(input_shape,
             op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
-            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), name=f"CombineResiduals{l_idx}"))
+            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
         # define feature operations
         feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
         attention_op = Attention(positional_encoding="2D", name="Attention")
         self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
         self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
-        combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
+        combine_features_op = Combine(filters=attention_filters//2, kernel_size=residual_combine_size, name="CombineFeatures")
         attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
 
         # define decoder operations
@@ -409,7 +411,7 @@ def decoder_op(
             mode:str="tconv", # tconv, up_nn, up_bilinear
             skip_combine_mode = "conv", # conv, sum
             combine_kernel_size = 1,
-            skip_mode = "sg", # sg, omit, None
+            skip_mode = None, # sg, omit, None
             activation: str="relu",
             #l2_reg: float=1e-5,
             #use_bias:bool = True,
