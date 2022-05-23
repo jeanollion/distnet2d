@@ -332,7 +332,7 @@ def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:
         print("mean: {} sd: {}".format(mean, sd))
         if transmitted_light_per_image_mode:
             center_range, scale_range = [- tl_sd_factor*sd, tl_sd_factor*sd], [1./tl_sd_factor, tl_sd_factor]
-             print("center: [{}; {}] / scale: [{}; {}]".format(center_range[0], center_range[1], scale_range[0], scale_range[1]))
+            print("center: [{}; {}] / scale: [{}; {}]".format(center_range[0], center_range[1], scale_range[0], scale_range[1]))
         else:
             center_range, scale_range = [mean - tl_sd_factor*sd, mean + tl_sd_factor*sd], [sd/tl_sd_factor, sd*tl_sd_factor]
             print("center: [{}; {}] / scale: [{}; {}]".format(center_range[0], center_range[1], scale_range[0], scale_range[1]))
