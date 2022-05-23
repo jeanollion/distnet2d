@@ -284,7 +284,7 @@ def get_histogram_normalization_center_scale_ranges(histogram, bins, center_perc
         print("normalization_center_scale: modal value: {}, center_range: [{}; {}] scale_range: [{}; {}]".format(mode_value, mode_range[0], mode_range[1], scale_range[0], scale_range[1]))
     return mode_range, scale_range
 
-def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:bool = False, tl_sd_factor:float=3., fluo_centile_range:list=[75, 99.9], fluo_centile_extent:float=5):
+def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:bool = False, tl_sd_factor:float=3., fluo_centile_range:list=[75, 99.9], fluo_centile_extent:float=5, transmitted_light_per_image_mode:bool=True):
     """Computes a range for center and for scale factor for data augmentation.
     Image can then be normalized using a random center C in the center range and a random scaling factor in the scale range: I -> (I - C) / S
 
@@ -297,13 +297,15 @@ def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:
         in fluoresence mode:
             mode M is computed, corresponding to the Mp centile: M = centile(Mp). center_range = [centile(Mp-fluo_centile_extent), centile(Mp+fluo_centile_extent)]
             scale_range = [centile(fluo_centile_range[0]) - M, centile(fluo_centile_range[0]) + M ]
-        in transmitted light mode: center_range = [mean - tl_sd_factor*sd, mean + tl_sd_factor*sd]; scale_range = [sd/tl_sd_factor., sd*tl_sd_factor]
+        in transmitted light mode: with transmitted_light_per_image_mode=True center_range = [mean - tl_sd_factor*sd, mean + tl_sd_factor*sd]; scale_range = [sd/tl_sd_factor, sd*tl_sd_factor]
+		in transmitted light mode: with transmitted_light_per_image_mode=False: center_range = [-tl_sd_factor*sd, tl_sd_factor*sd]; scale_range = [1/tl_sd_factor, tl_sd_factor]
     tl_sd_factor : float
-        Description of parameter `tl_sd_factor`.
+        use in the computation of transmitted light ranges cf description of fluorescence parameter
     fluo_centile_range : list
         in fluoresence mode, interval for scale range in centiles
     fluo_centile_extent : float
         in fluoresence mode, extent for center range in centiles
+
     Returns
     -------
     scale_range (list(2)) , center_range (list(2))

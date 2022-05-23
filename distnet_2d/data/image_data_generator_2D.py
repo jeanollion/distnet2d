@@ -8,7 +8,71 @@ import copy
 import scipy.ndimage as ndi
 
 class ImageDataGenerator2D(ImageDataGenerator):
-    def __init__(self, rotate90=False, perform_illumination_augmentation = True, gaussian_blur_range=[1, 2], noise_intensity = 0.1, min_histogram_range=0.1, min_histogram_to_zero=False, histogram_normalization_center=None, histogram_normalization_scale=None, histogram_voodoo_n_points=5, histogram_voodoo_intensity=0.5, illumination_voodoo_n_points=5, illumination_voodoo_intensity=0.6, **kwargs):
+    """Short summary.
+
+    Parameters
+    ----------
+    rotate90 : bool
+        Description of parameter `rotate90`.
+    perform_illumination_augmentation : bool
+        Description of parameter `perform_illumination_augmentation`.
+    gaussian_blur_range : list
+        Description of parameter `gaussian_blur_range`.
+    noise_intensity : float
+        Description of parameter `noise_intensity`.
+    histogram_scaling_mode : str
+        PHASE_CONTRAST: per image scaling to random range in [min, max] with max in [0, 1] and min in [0, 1] and max-min > min_histogram_range
+        FLUORESCENCE: per image scaling to random center c and scale s with: c in histogram_normalization_center and s in histogram_normalization_scale ( I = (I - c) / s)
+        TRANSMITTED_LIGHT: per image scaling to random center c and scale s with: c in [mean + histogram_normalization_center[0], mean + histogram_normalization_center[1]] and s in [sd * histogram_normalization_scale[0], sd * histogram_normalization_scale[1]] and mean = mean(I) sd = sd(I) : I = (I - c) / s
+        AUTO: PHAST_CONTRAST if histogram_normalization_center is None or histogram_normalization_center is None else FLUORESCENCE
+        NONE: no scaling
+    min_histogram_range : float
+        Description of parameter `min_histogram_range`.
+    min_histogram_to_zero : bool
+        Description of parameter `min_histogram_to_zero`.
+    histogram_normalization_center : list
+        Description of parameter `histogram_normalization_center`.
+    histogram_normalization_scale : list
+        Description of parameter `histogram_normalization_scale`.
+    histogram_voodoo_n_points : int
+        Description of parameter `histogram_voodoo_n_points`.
+    histogram_voodoo_intensity : float
+        Description of parameter `histogram_voodoo_intensity`.
+    illumination_voodoo_n_points : int
+        Description of parameter `illumination_voodoo_n_points`.
+    illumination_voodoo_intensity : float
+        Description of parameter `illumination_voodoo_intensity`.
+    **kwargs : type
+        Description of parameter `**kwargs`.
+
+    Attributes
+    ----------
+    rotate90
+    min_histogram_range
+    min_histogram_to_zero
+    noise_intensity
+    gaussian_blur_range
+    histogram_voodoo_n_points
+    histogram_voodoo_intensity
+    illumination_voodoo_n_points
+    illumination_voodoo_intensity
+    perform_illumination_augmentation
+    histogram_normalization_center
+    histogram_normalization_scale
+
+    """
+    def __init__(self, rotate90:bool=False, perform_illumination_augmentation:bool = True, gaussian_blur_range:list=[1, 2], noise_intensity:float = 0.1, histogram_scaling_mode:str="AUTO", min_histogram_range:float=0.1, min_histogram_to_zero:bool=False, histogram_normalization_center=None, histogram_normalization_scale=None, histogram_voodoo_n_points:int=5, histogram_voodoo_intensity:float=0.5, illumination_voodoo_n_points:int=5, illumination_voodoo_intensity:float=0.6, **kwargs):
+        assert histogram_scaling_mode in ["PHASE_CONTRAST", "FLUORESCENCE", "TRANSMITTED_LIGHT", "AUTO", "NONE"], "invalid histogram scaling mode"
+        if histogram_scaling_mode=="FLUORESCENCE" or histogram_scaling_mode=="TRANSMITTED_LIGHT" or (histogram_scaling_mode=="AUTO" and histogram_normalization_center is not None and histogram_normalization_scale is not None):
+            assert histogram_normalization_center is not None and histogram_normalization_scale is not None, "in FLUORESCENCE or TRANSMITTED_LIGHT mode histogram_normalization_center and histogram_normalization_scale must be not None"
+            if isinstance(histogram_normalization_center, (list, tuple, np.ndarray)):
+                assert len(histogram_normalization_center)==2 and histogram_normalization_center[0]<=histogram_normalization_center[1], "if histogram_normalization_center is a list/tuple it represent a range and should be of length 2"
+            if isinstance(histogram_normalization_scale, (list, tuple, np.ndarray)):
+                assert len(histogram_normalization_scale)==2 and histogram_normalization_scale[0]<=histogram_normalization_scale[1], "if histogram_normalization_scale is a list/tuple it represent a range and should be of length 2"
+        elif histogram_scaling_mode == "PHASE_CONTRAST":
+            assert min_histogram_range>0 and min_histogram_range<1, "invalid min_histogram_range"
+
+        self.histogram_scaling_mode=histogram_scaling_mode
         if gaussian_blur_range is None:
             gaussian_blur_range=0
         self.rotate90=rotate90
@@ -35,14 +99,12 @@ class ImageDataGenerator2D(ImageDataGenerator):
             params["rotate90"] = True
         # illumination parameters
         if self.perform_illumination_augmentation:
-            if self.histogram_normalization_center is not None and self.histogram_normalization_scale is not None: # center / scale mode
+            if self.histogram_scaling_mode=="AUTO" and self.histogram_normalization_center is not None and self.histogram_normalization_scale is not None or self.histogram_scaling_mode=="FLUORESCENCE" or self.histogram_scaling_mode=="TRANSMITTED_LIGHT": # center / scale mode
                 if isinstance(self.histogram_normalization_center, (list, tuple, np.ndarray)):
-                    assert len(self.histogram_normalization_center)==2, "if histogram_normalization_center is a list/tuple it represent a range and should be of length 2"
                     params["center"] = uniform(self.histogram_normalization_center[0], self.histogram_normalization_center[1])
                 else:
                     params["center"] = self.histogram_normalization_center
                 if isinstance(self.histogram_normalization_scale, (list, tuple, np.ndarray)):
-                    assert len(self.histogram_normalization_scale)==2, "if histogram_normalization_scale is a list/tuple it represent a range and should be of length 2"
                     params["scale"] = uniform(self.histogram_normalization_scale[0], self.histogram_normalization_scale[1])
                 else:
                     params["scale"] = self.histogram_normalization_scale
@@ -94,14 +156,19 @@ class ImageDataGenerator2D(ImageDataGenerator):
         return img
 
     def _perform_illumination_augmentation(self, img, params):
-        if "center" in params and "scale" in params:
-            img = (img - params["center"]) / params["scale"]
-        elif "vmin" in params and "vmax" in params:
-            min = img.min()
-            max = img.max()
-            if min==max:
-                raise ValueError("Image is blank, cannot perform illumination augmentation")
-            img = pp.adjust_histogram_range(img, min=params["vmin"], max = params["vmax"], initial_range=[min, max])
+        if self.histogram_scaling_mode=="TRANSMITTED_LIGHT":
+            mean = np.mean(img)
+            sd = np.std(img)
+            img = (img - (params["center"]+mean)) / (params["scale"] * sd)
+        else:
+            if "center" in params and "scale" in params:
+                img = (img - params["center"]) / params["scale"]
+            elif "vmin" in params and "vmax" in params:
+                min = img.min()
+                max = img.max()
+                if min==max:
+                    raise ValueError("Image is blank, cannot perform illumination augmentation")
+                img = pp.adjust_histogram_range(img, min=params["vmin"], max = params["vmax"], initial_range=[min, max])
         if "histogram_voodoo_target_points" in params:
             img = pp.histogram_voodoo(img, self.histogram_voodoo_n_points, self.histogram_voodoo_intensity, target_points = params["histogram_voodoo_target_points"])
         if "illumination_voodoo_target_points" in params:
