@@ -51,26 +51,27 @@ class DyDxIterator(TrackingIterator):
                     elasticdeform_parameters=elasticdeform_parameters,
                     **kwargs)
 
-    def _get_batch_by_channel(self, index_array, perform_augmentation, input_only=False, perform_elasticdeform=True, perform_tiling=True):
+    def _get_batch_by_channel(self, index_array, perform_augmentation, input_only=False, perform_elasticdeform=True, perform_tiling=True, **kwargs):
         if self.aug_remove_prob>0 and random() < self.aug_remove_prob:
-            self.n_frames = 0 # flag that aug_remove = true
+            n_frames = 0 # flag that aug_remove = true
         else:
             if self.aug_frame_subsampling>1 and self.aug_frame_subsampling is not None:
                 if callable(self.aug_frame_subsampling):
-                    self.n_frames = self.aug_frame_subsampling()
+                    n_frames = self.aug_frame_subsampling()
                 else:
-                    self.n_frames=np.random.randint(self.aug_frame_subsampling)+1
+                    n_frames=np.random.randint(self.aug_frame_subsampling)+1
             else:
-                self.n_frames = 1
-        batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False)
+                n_frames = 1
+        kwargs.update({"n_frames":n_frames})
+        batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False, **kwargs)
         if not issubclass(batch_by_channel[1].dtype.type, np.integer):
             batch_by_channel[1] = batch_by_channel[1].astype(np.int32)
         # get previous labels and store in -666 output_position BEFORE applying tiling and elastic deform
-        self._get_prev_label(batch_by_channel)
+        self._get_prev_label(batch_by_channel, n_frames)
         batch_by_channel[-1] = batch_by_channel[0].shape[0] # batch size is recorded here: in case of tiling it will be usefull
         del batch_by_channel[2] # remove prevRegionLabels
-        if self.n_frames>1: # remove unused frames
-            sel = [0, self.n_frames, -1] if self.channels_next[1] else [0, -1]
+        if n_frames>1: # remove unused frames
+            sel = [0, n_frames, -1] if self.channels_next[1] else [0, -1]
             channels = [c for c in batch_by_channel if c>=0]
             for c in channels:
                 batch_by_channel[c] = batch_by_channel[c][..., sel]
@@ -94,12 +95,12 @@ class DyDxIterator(TrackingIterator):
 
         return batch_by_channel, aug_param_array, ref_channel
 
-    def _get_prev_label(self, batch_by_channel):
+    def _get_prev_label(self, batch_by_channel, n_frames):
         labelIms = batch_by_channel[1]
         prevlabelIms = batch_by_channel[2]
         return_next = self.channels_next[1]
         prev_label_map = []
-        n_frames = self.n_frames if self.n_frames>0 else 1
+        n_frames = n_frames if n_frames>0 else 1
         end_points = [0, n_frames]
         if return_next:
             end_points.append(labelIms.shape[-1]-1)
