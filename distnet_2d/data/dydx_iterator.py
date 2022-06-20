@@ -100,7 +100,8 @@ class DyDxIterator(TrackingIterator):
         prevlabelIms = batch_by_channel[2]
         return_next = self.channels_next[1]
         prev_label_map = []
-        n_frames = n_frames if n_frames>0 else 1
+        if n_frames <=0: 
+            n_frames = 1
         end_points = [0, n_frames]
         if return_next:
             end_points.append(labelIms.shape[-1]-1)
