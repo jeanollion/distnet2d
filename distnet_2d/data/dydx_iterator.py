@@ -64,7 +64,7 @@ class DyDxIterator(TrackingIterator):
                 n_frames = 1
         kwargs.update({"n_frames":n_frames})
         batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False, **kwargs)
-        if not issubclass(batch_by_channel[1].dtype.type, np.integer):
+        if not issubclass(batch_by_channel[1].dtype.type, np.integer): # label
             batch_by_channel[1] = batch_by_channel[1].astype(np.int32)
         # get previous labels and store in -666 output_position BEFORE applying tiling and elastic deform
         self._get_prev_label(batch_by_channel, n_frames)
@@ -114,7 +114,7 @@ class DyDxIterator(TrackingIterator):
         n_frames = (input.shape[-1]-1)//2 if return_next else input.shape[-1]-1
         if n_frames>1:
             sel = [0, n_frames, -1] if return_next else [0, -1]
-            return input[..., sel] # only return
+            return input[..., sel] # only return prev, cur & next frames
         else:
             return input
 
@@ -261,7 +261,8 @@ def _compute_prev_label_map(labelIm, prevlabelIm, end_points):
     return labels_map_prev
 
 def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, categories=None):
-    labels_map_centers = [_get_labels_and_centers(labelIm[...,c]) for c in range(labelIm.shape[-1])]
+    assert labelIm.shape[-1] == 2, f"invalid labelIm : {labelIm.shape[-1]} channels instead of 2"
+    labels_map_centers = [_get_labels_and_centers(labelIm[...,c]) for c in [0, 1]]
     if len(labels_map_centers[-1])==0:
         return
     curLabelIm = labelIm[...,-1]
