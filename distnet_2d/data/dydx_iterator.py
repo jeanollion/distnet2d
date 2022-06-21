@@ -22,7 +22,6 @@ class DyDxIterator(TrackingIterator):
         extract_tile_function = extract_tile_random_zoom_function(tile_shape=(128, 128), n_tiles=8, zoom_range=[0.6, 1.6], aspect_ratio_range=[0.75, 1.5], random_channel_jitter_shape=[50, 50] ),
         elasticdeform_parameters:dict = {},
         downscale_displacement_and_categories=1,
-        input_image_data_generator=None,
         return_contours = False,
         output_float16=False,
         **kwargs):
@@ -35,8 +34,6 @@ class DyDxIterator(TrackingIterator):
         self.aug_frame_subsampling=aug_frame_subsampling
         self.output_float16=output_float16
         self.return_contours=return_contours
-        if input_image_data_generator is not None:
-            kwargs["image_data_generators"] = [input_image_data_generator, None, None]
         super().__init__(dataset=dataset,
                     channel_keywords=channel_keywords,
                     input_channels=[0],
@@ -55,11 +52,13 @@ class DyDxIterator(TrackingIterator):
         if self.aug_remove_prob>0 and random() < self.aug_remove_prob:
             n_frames = 0 # flag that aug_remove = true
         else:
-            if self.aug_frame_subsampling>1 and self.aug_frame_subsampling is not None:
+            if self.aug_frame_subsampling is not None :
                 if callable(self.aug_frame_subsampling):
                     n_frames = self.aug_frame_subsampling()
+                elif self.aug_frame_subsampling>1:
+                    n_frames = np.random.randint(self.aug_frame_subsampling)+1
                 else:
-                    n_frames=np.random.randint(self.aug_frame_subsampling)+1
+                    n_frames = 1
             else:
                 n_frames = 1
         kwargs.update({"n_frames":n_frames})
@@ -100,8 +99,9 @@ class DyDxIterator(TrackingIterator):
         prevlabelIms = batch_by_channel[2]
         return_next = self.channels_next[1]
         prev_label_map = []
-        if n_frames <=0: 
+        if n_frames <=0:
             n_frames = 1
+        assert labelIms.shape[-1]==prevlabelIms.shape[-1] and labelIms.shape[-1]==1+n_frames*(2 if return_next else 1), f"invalid channel number: labels: {labelIms.shape[-1]} prev labels: {prevlabelIms.shape[-1]} n_frames: {n_frames}"
         end_points = [0, n_frames]
         if return_next:
             end_points.append(labelIms.shape[-1]-1)
@@ -237,7 +237,7 @@ def _compute_prev_label_map(labelIm, prevlabelIm, end_points):
             end_points[i] = n_chan + end_points[i]
     min_frame=np.min(end_points)
     max_frame=np.max(end_points)
-    assert min_frame<n_chan and max_frame<=n_chan, "invalid end_points"
+    assert min_frame<n_chan and max_frame<=n_chan, f"invalid end_points: min={min_frame}, max={max_frame}, nchan={n_chan}"
     labels_map_prev_by_c = dict()
     labels_by_c = {c : np.unique(labelIm[...,c]) for c in range(min_frame, max_frame+1)}
     for c in range(min_frame, max_frame+1):
@@ -247,10 +247,10 @@ def _compute_prev_label_map(labelIm, prevlabelIm, end_points):
     for i in range(len(end_points)-1):
         start = end_points[i]
         stop = end_points[i+1]
-        assert stop>start, "invalid endpoint [{}, {}]".format(start, stop)
+        assert stop>start, f"invalid endpoint [{start}, {stop}]"
         if start == stop-1: # successive frames: prev labels are simply those of prevlabelIm
             labels_map_prev.append(labels_map_prev_by_c[stop])
-        else: # frame subsampling -> iterate through lineage to get the previous label @ last frame
+        else: # augmentation frame subsampling -> iterate through lineage to get the previous label @ last frame
             labels_map_prev_cur = labels_map_prev_by_c[stop]
             #print("endpoint lmp @ {} = {}".format(stop, labels_map_prev_))
             for c in range(stop-1, start, -1):
