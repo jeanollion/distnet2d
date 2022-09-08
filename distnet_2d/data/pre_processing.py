@@ -322,12 +322,12 @@ def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:
         return scale_range, center_range
     if fluorescence:
         bins = dih.get_histogram_bins_IPR(*dih.get_histogram(dataset, raw_feature_name, bins=1000), n_bins=256, percentiles=[0, 95], verbose=True)
-        histo, _ = dih.get_histogram(dataset, "/raw", bins=bins)
+        histo, _ = dih.get_histogram(dataset, raw_feature_name, bins=bins)
         center_range, scale_range = get_normalization_center_scale_ranges(histo, bins, fluo_centile_extent, fluo_centile_range, verbose=True)
         print("center: [{}; {}] / scale: [{}; {}]".format(center_range[0], center_range[1], scale_range[0], scale_range[1]))
         return center_range, scale_range
     else:
-        mean, sd = dih.get_mean_sd(dataset, "/raw", per_channel=True)
+        mean, sd = dih.get_mean_sd(dataset, raw_feature_name, per_channel=True)
         mean, sd = np.mean(mean), np.mean(sd)
         print("mean: {} sd: {}".format(mean, sd))
         if transmitted_light_per_image_mode:
