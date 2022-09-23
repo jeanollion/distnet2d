@@ -9,33 +9,35 @@ from .attention import Attention
 from .directional_2d_self_attention import Directional2DSelfAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
+from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, edm_contour_loss
+from tensorflow.keras.losses import sparse_categorical_crossentropy, mean_squared_error
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
         {"filters":16},
-        {"filters":16, "downscale":2}
-    ],
-    [  # l2 64 -> 32
-        {"filters":32},
         {"filters":32, "downscale":2}
     ],
-    [ # l3: 32->16
-        {"filters":40, "expand_filters":120, "kernel_size":5, "SE":False},
-        {"filters":40, "expand_filters":120, "activation":"hswish"},
-        {"filters":80, "expand_filters":240, "activation":"hswish", "downscale":2},
+    [  # l2 64 -> 32
+        {"filters":32, "kernel_size":5},
+        {"filters":32},
+        {"filters":64, "downscale":2}
     ],
-    [ # l4: 16 -> 8
-        {"filters":80, "expand_filters":200, "activation":"hswish"},
-        {"filters":80, "expand_filters":184, "activation":"hswish"},
-        {"filters":80, "expand_filters":184, "activation":"hswish"},
-        {"filters":112, "expand_filters":480, "activation":"hswish"},
-        {"filters":112, "expand_filters":672, "kernel_size":5, "activation":"hswish"},
-        {"filters":160, "expand_filters":672, "activation":"hswish", "downscale":2}
-    ]
+    [ # l3: 32->16
+        {"filters":64, "kernel_size":5},
+        {"filters":64, "kernel_size":5},
+        {"filters":64},
+        {"filters":128, "downscale":2},
+    ],
 ]
 FEATURE_SETTINGS = [
-    {"filters":160, "expand_filters":960, "activation":"hswish"},
-    {"filters":1024, "expand_filters":1024, "activation":"hswish"},
+    {"filters":128, "kernel_size":5},
+    {"filters":1024},
+]
+
+DECODER_SETTINGS = [
+    {"filters":64}, # 96 ?
+    {"filters":256},
+    {"filters":512}
 ]
 
 DECODER_SETTINGS_DS = [
@@ -45,13 +47,84 @@ DECODER_SETTINGS_DS = [
     {"filters":128},
     {"filters":256}
 ]
-DECODER_SETTINGS = [
-    #f, s
-    {"filters":64},
-    {"filters":96},
-    {"filters":128},
-    {"filters":256, "up_kernel_size":4}
-]
+
+class DistnetModel(Model):
+    def __init__(self, *args,
+        edm_loss_weight=1, contour_loss_weight=1, displacement_loss_weight=2, category_loss_weight=1, edm_loss=mean_squared_error,
+        contour_loss = weighted_binary_crossentropy([0.623, 2.5]),
+        displacement_loss = mean_squared_error,
+        category_weights = [1, 1, 5, 5],
+        **kwargs):
+        self.contours = kwargs.pop("contours", False)
+        self.next = kwargs.pop("next", False)
+        self.update_weights(edm_loss_weight, contour_loss_weight, displacement_loss_weight, category_loss_weight)
+        self.edm_loss = edm_loss
+        self.contour_loss = contour_loss
+        assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
+        self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
+        self.displacement_loss = displacement_loss
+        super().__init__(*args, **kwargs)
+
+    def update_weights(self, edm_weight=1, contour_weight=1, displacement_weight=1, category_weight=1):
+        sum = edm_weight + (contour_weight if self.contours else 0) + displacement_weight + category_weight
+        self.edm_weight = edm_weight / sum
+        self.contour_weight=contour_weight / sum
+        self.displacement_weight=displacement_weight / sum
+        self.category_weight=category_weight / sum
+
+    def train_step(self, data):
+        x, y = data
+        displacement_weight = self.displacement_weight / 2
+        category_weight = self.category_weight / (2 if self.next else 1)
+        if len(y) == 5 + (1 if self.contours else 0):
+            label_rank = tf.one_hot(y[-1]-1, tf.math.reduce_max(y[-1]))
+            label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True)
+            label_size = tf.where(label_size==0, 1., label_size) # avoid nans
+        else :
+            label_rank = None
+        with tf.GradientTape() as tape:
+            y_pred = self(x, training=True)  # Forward pass
+            # compute loss
+            losses = dict()
+            losses["edm"] = self.edm_loss(y[0], y_pred[0])
+            loss = losses["edm"] * self.edm_weight
+            if self.contours:
+                losses["contour"] = self.contour_loss(y[1], y_pred[1])
+                loss = loss + losses["contour"] * self.contour_weight
+                inc = 1
+            else:
+                inc = 0
+            # displacement loss
+            losses["displacement"] = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
+            loss = loss + losses["displacement"] * displacement_weight
+            if label_rank is not None: # label rank is returned : enfore homogeneity
+                dym_pred = _get_mean_by_object(y_pred[1+inc], label_rank, label_size)
+                dxm_pred = _get_mean_by_object(y_pred[2+inc], label_rank, label_size)
+                losses["displacement_mean"] = tf.math.square(dym_pred - y[1+inc]) + tf.math.square(dxm_pred - y[2+inc])
+                if self.next:
+                    losses["displacement_mean"] = tf.reduce_mean(losses["displacement_mean"], axis=-1)
+                else:
+                    losses["displacement_mean"] = tf.squeeze(losses["displacement_mean"], axis=-1)
+                loss = loss + losses["displacement_mean"] * displacement_weight
+            # category loss
+            if self.next:
+                y_cat_prev, y_cat_next = tf.split(y[3+inc], 2, axis=-1)
+                losses["category"] = self.category_loss(y_cat_prev, y_pred[3+inc]) + self.category_loss(y_cat_next, y_pred[4+inc])
+            else:
+                losses["category"] = self.category_loss(y[3+inc], y_pred[3+inc])
+            loss = loss + losses["category"] * category_weight
+            losses["loss"] = loss
+
+        # Compute gradients
+        trainable_vars = self.trainable_variables
+        gradients = tape.gradient(loss, trainable_vars)
+        # Update weights
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        return losses
+
+def _get_mean_by_object(data, label_rank, label_size):
+    mean = tf.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2], keepdims = True) / label_size # batch, 1, 1, 1 or 2, n_label_max
+    return tf.reduce_sum(mean * label_rank, axis=-1) # batch, y, x, 1 or 2
 
 def get_distnet_2d(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
@@ -157,7 +230,7 @@ def get_distnet_2d(input_shape,
             outputs =  edm, dy, dx, cat, cat_next
         else:
             outputs = edm, dy, dx, cat
-        return Model([input], outputs, name=name)
+        return DistnetModel([input], outputs, name=name, next=next)
 
 def get_distnet_2d_sep(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
@@ -281,7 +354,7 @@ def get_distnet_2d_sep(input_shape,
             outputs =  edm, dy, dx, cat, cat_next
         else:
             outputs = edm, dy, dx, cat
-        return Model([input], outputs, name=name)
+        return DistnetModel([input], outputs, name=name, next=next)
 
 def get_distnet_2d_sep_out(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
@@ -382,7 +455,7 @@ def get_distnet_2d_sep_out(input_shape,
         dy, dx = decoder_out[1]([ upsampled[-1], last_residuals[1:] ])
         cat = decoder_out[2]([ upsampled[-1], last_residuals[1:] ])
         outputs = flatten_list([seg, dy, dx, cat])
-        return Model([input], outputs, name=name)
+        return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours)
 
 def encoder_op(param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"

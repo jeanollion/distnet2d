@@ -23,6 +23,7 @@ class DyDxIterator(TrackingIterator):
         elasticdeform_parameters:dict = {},
         downscale_displacement_and_categories=1,
         return_contours = False,
+        return_label_rank = False,
         output_float16=False,
         **kwargs):
         if len(channel_keywords)!=3:
@@ -34,6 +35,7 @@ class DyDxIterator(TrackingIterator):
         self.aug_frame_subsampling=aug_frame_subsampling
         self.output_float16=output_float16
         self.return_contours=return_contours
+        self.return_label_rank=return_label_rank
         super().__init__(dataset=dataset,
                     channel_keywords=channel_keywords,
                     input_channels=[0],
@@ -142,10 +144,10 @@ class DyDxIterator(TrackingIterator):
 
         dyIm = np.zeros(labelIms.shape[:-1]+(2 if return_next else 1,), dtype=self.dtype)
         dxIm = np.zeros(labelIms.shape[:-1]+(2 if return_next else 1,), dtype=self.dtype)
+        if self.return_label_rank:
+            label_rank = np.zeros(labelIms.shape[:-1]+(2 if return_next else 1,), dtype=np.int32)
         if self.return_categories:
-            categories = np.zeros(labelIms.shape[:-1]+(1,), dtype=self.dtype)
-            if return_next:
-                categories_next = np.zeros(labelIms.shape[:-1]+(1,), dtype=self.dtype)
+            categories = np.zeros(labelIms.shape[:-1]+(2 if return_next else 1,), dtype=self.dtype)
         labels_map_prev = batch_by_channel[-666]
         batch_size = batch_by_channel[-1]
         if labelIms.shape[0]>batch_size:
@@ -156,9 +158,9 @@ class DyDxIterator(TrackingIterator):
             get_idx = lambda x:x
         for i in range(labelIms.shape[0]):
             bidx = get_idx(i)
-            _compute_displacement(labelIms[i,...,:2], labels_map_prev[bidx][0], dyIm[i,...,0], dxIm[i,...,0], categories[i,...,0] if self.return_categories else None)
+            _compute_displacement(labelIms[i,...,:2], labels_map_prev[bidx][0], dyIm[i,...,0], dxIm[i,...,0], categories[i,...,0] if self.return_categories else None, label_rank[i,...,0] if self.return_label_rank else None)
             if return_next:
-                _compute_displacement(labelIms[i,...,1:], labels_map_prev[bidx][-1], dyIm[i,...,1], dxIm[i,...,1], categories_next[i,...,0] if self.return_categories else None)
+                _compute_displacement(labelIms[i,...,1:], labels_map_prev[bidx][-1], dyIm[i,...,1], dxIm[i,...,1], categories[i,...,1] if self.return_categories else None, label_rank[i,...,1] if self.return_label_rank else None)
 
         other_output_channels = [chan_idx for chan_idx in self.output_channels if chan_idx!=1 and chan_idx!=2]
         all_channels = [batch_by_channel[chan_idx] for chan_idx in other_output_channels]
@@ -176,22 +178,25 @@ class DyDxIterator(TrackingIterator):
             channel_inc = 0
         downscale_factor = 1./self.downscale if self.downscale>1 else 0
         scale = [1, downscale_factor, downscale_factor, 1]
-        if self.downscale>>1:
+        if self.downscale>1:
             dyIm = rescale(dyIm, scale, anti_aliasing= False, order=0)
             dxIm = rescale(dxIm, scale, anti_aliasing= False, order=0)
         all_channels.insert(1+channel_inc, dyIm)
         all_channels.insert(2+channel_inc, dxIm)
+        curIdx = 2+channel_inc
         if self.return_categories:
-            if self.downscale>>1:
+            if self.downscale>1:
                 categories = rescale(categories, scale, anti_aliasing= False, order=0)
             all_channels.insert(3+channel_inc, categories)
-            if return_next:
-                if self.downscale>>1:
-                    categories_next = rescale(categories_next, scale, anti_aliasing= False, order=0)
-                all_channels.insert(4+channel_inc, categories_next)
+            curIdx += 1
+        if self.return_label_rank:
+            if self.downscale>1:
+                label_rank = rescale(label_rank, scale, anti_aliasing= False, order=0)
+            curIdx += 1
+            all_channels.insert(curIdx, label_rank)
         if self.output_float16:
             for i, c in enumerate(all_channels):
-                if not ( self.return_contours and i==1 or i==3+channel_inc or return_next and i==4+channel_inc ): # softmax / sigmoid activation -> float32
+                if not ( self.return_contours and i==1 or self.return_categories and i==3+channel_inc or self.return_label_rank and i==curIdx ): # softmax / sigmoid activation -> float32
                     all_channels[i] = c.astype('float16', copy=False)
         return all_channels
 
@@ -261,14 +266,14 @@ def _compute_prev_label_map(labelIm, prevlabelIm, end_points):
             labels_map_prev.append(labels_map_prev_cur)
     return labels_map_prev
 
-def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, categories=None):
+def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, categories=None, rankIm=None):
     assert labelIm.shape[-1] == 2, f"invalid labelIm : {labelIm.shape[-1]} channels instead of 2"
     labels_map_centers = [_get_labels_and_centers(labelIm[...,c]) for c in [0, 1]]
     if len(labels_map_centers[-1])==0:
         return
     curLabelIm = labelIm[...,-1]
     labels_prev = labels_map_centers[0].keys()
-    for label, center in labels_map_centers[-1].items():
+    for rank, (label, center) in enumerate(labels_map_centers[-1].items()):
         label_prev = labels_map_prev[label]
         if label_prev in labels_prev:
             dy = center[0] - labels_map_centers[0][label_prev][0] # axis 0 is y
@@ -277,8 +282,11 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, categories=None)
                 dy = copysign(1, dy) # min value == 1 / same sign as dy
             if categories is None and abs(dx)<1:
                 dx = copysign(1, dx) # min value == 1 / same sign as dx
-            dyIm[curLabelIm == label] = dy
-            dxIm[curLabelIm == label] = dx
+            mask = curLabelIm == label
+            dyIm[mask] = dy
+            dxIm[mask] = dx
+            if rankIm is not None:
+                rankIm[mask] = rank + 1
 
     if categories is not None:
         labels = labels_map_centers[-1].keys()
