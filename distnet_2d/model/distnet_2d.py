@@ -54,6 +54,7 @@ class DistnetModel(Model):
         contour_loss = weighted_binary_crossentropy([0.623, 2.5]),
         displacement_loss = mean_squared_error,
         category_weights = [1, 1, 5, 5],
+        float16 = False,
         **kwargs):
         self.contours = kwargs.pop("contours", False)
         self.next = kwargs.pop("next", False)
@@ -77,7 +78,7 @@ class DistnetModel(Model):
         displacement_weight = self.displacement_weight / 2
         category_weight = self.category_weight / (2 if self.next else 1)
         if len(y) == 5 + (1 if self.contours else 0):
-            label_rank = tf.one_hot(y[-1]-1, tf.math.reduce_max(y[-1]))
+            label_rank = tf.one_hot(y[-1]-1, tf.math.reduce_max(y[-1]), dtype=tf.float32)
             label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True)
             label_size = tf.where(label_size==0, 1., label_size) # avoid nans
         else :
@@ -123,8 +124,14 @@ class DistnetModel(Model):
         return losses
 
 def _get_mean_by_object(data, label_rank, label_size):
+    half = data.dtype==tf.float16
+    if half:
+        data = tf.cast(data, dtype=tf.float32) # cast to float32 because sum is performed
     mean = tf.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2], keepdims = True) / label_size # batch, 1, 1, 1 or 2, n_label_max
-    return tf.reduce_sum(mean * label_rank, axis=-1) # batch, y, x, 1 or 2
+    mean = tf.reduce_sum(mean * label_rank, axis=-1) # batch, y, x, 1 or 2
+    if half:
+        mean = tf.cast(mean, dtype=tf.float16)
+    return mean
 
 def get_distnet_2d(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
