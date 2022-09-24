@@ -56,6 +56,17 @@ def weighted_binary_crossentropy(weights, add_channel_axis=True, **bce_kwargs):
         return bce(true, pred, sample_weight=weights)
     return loss_func
 
+def balanced_displacement_loss(dMin, dMax, wMin, wMax):
+    assert dMin<dMax, "expected dMin < dMax"
+    params = np.array([dMin, dMax, wMin, wMax]).astype("float32")
+    a = ( params[3] - params[2] ) / ( params[1] - params[0] )
+    mse = tf.keras.losses.MeanSquaredError()
+    def loss_func(true, pred):
+        weights = tf.where(true<=params[0], params[2], params[3]))
+        weights = tf.where(true>params[0] and true<params[1], a * (true - params[0]) , weights))
+        return mse(true, pred, sample_weight=weights)
+    return loss_func
+
 def edm_contour_loss(background_weight, edm_weight, contour_weight, dtype='float32'):
     '''
     This function allows to set a distinct weight for contour values (edm==1) and rest of foreground and background
