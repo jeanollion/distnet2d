@@ -125,8 +125,9 @@ class DistnetModel(Model):
 
         # Compute gradients
         trainable_vars = self.trainable_variables
-        scaled_grad = tape.gradient(loss, trainable_vars)
-        grad = opt.get_unscaled_gradients(scaled_grad)
+        grad = tape.gradient(loss, trainable_vars)
+        if half_precision:
+            grad = opt.get_unscaled_gradients(grad)
         # Update weights
         self.optimizer.apply_gradients(zip(grad, trainable_vars))
         return losses
