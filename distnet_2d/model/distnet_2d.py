@@ -73,6 +73,9 @@ class DistnetModel(Model):
         self.category_weight=category_weight / sum
 
     def train_step(self, data):
+        half_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
+        if half_precision:
+            opt = tf.keras.mixed_precision.LossScaleOptimizer(self.optimizer)
         x, y = data
         displacement_weight = self.displacement_weight / 2
         category_weight = self.category_weight / (2 if self.next else 1)
@@ -116,13 +119,16 @@ class DistnetModel(Model):
             else:
                 losses["category"] = self.category_loss(y[3+inc], y_pred[3+inc])
             loss = loss + losses["category"] * category_weight
+            if half_precision:
+                loss = opt.get_scaled_loss(loss)
             losses["loss"] = loss
 
         # Compute gradients
         trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
+        scaled_grad = tape.gradient(loss, trainable_vars)
+        (grad,) = opt.get_unscaled_gradients([scaled_grad])
         # Update weights
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        self.optimizer.apply_gradients(zip(grad, trainable_vars))
         return losses
 
     def _get_mean_by_object(self, data, label_rank, label_size):
