@@ -129,7 +129,7 @@ class DistnetModel(Model):
             grad = opt.get_unscaled_gradients(grad)
         # Update weights
         self.optimizer.apply_gradients(zip(grad, trainable_vars))
-        result["loss"] = tf.reduce_mean(loss)
+        losses["loss"] = tf.reduce_mean(loss)
         return losses
 
     def _get_mean_by_object(self, data, label_rank, label_size):
