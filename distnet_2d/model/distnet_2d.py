@@ -54,7 +54,6 @@ class DistnetModel(Model):
         contour_loss = weighted_binary_crossentropy([0.623, 2.5]),
         displacement_loss = mean_squared_error,
         category_weights = [1, 1, 5, 5],
-        float16 = False,
         **kwargs):
         self.contours = kwargs.pop("contours", False)
         self.next = kwargs.pop("next", False)
@@ -64,7 +63,6 @@ class DistnetModel(Model):
         assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
         self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
         self.displacement_loss = displacement_loss
-        self.float16 = float16
         super().__init__(*args, **kwargs)
 
     def update_weights(self, edm_weight=1, contour_weight=1, displacement_weight=1, category_weight=1):
@@ -94,8 +92,6 @@ class DistnetModel(Model):
             losses["edm"] = self.edm_loss(y[0], y_pred[0])
             if tf.rank(losses["edm"])==4:
                 losses["edm"] = tf.reduce_mean(losses["edm"], -1)
-            if self.float16:
-                losses["edm"] = tf.cast(losses["edm"], tf.float32)
             loss = losses["edm"] * edm_weight
             if self.contours:
                 losses["contour"] = self.contour_loss(y[1], y_pred[1])
@@ -107,8 +103,6 @@ class DistnetModel(Model):
                 inc = 0
             # displacement loss
             losses["displacement"] = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
-            if self.float16:
-                losses["displacement"] = tf.cast(losses["displacement"], tf.float32)
             loss = loss + losses["displacement"] * displacement_weight
             if label_rank is not None: # label rank is returned : enfore homogeneity
                 dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
@@ -136,8 +130,6 @@ class DistnetModel(Model):
         return losses
 
     def _get_mean_by_object(self, data, label_rank, label_size):
-        if self.float16:
-            data = tf.cast(data, dtype=tf.float32) # cast to float32 because sum is performed
         mean = tf.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2], keepdims = True) / label_size # batch, 1, 1, 1 or 2, n_label_max
         mean = tf.reduce_sum(mean * label_rank, axis=-1) # batch, y, x, 1 or 2
         return mean
@@ -191,11 +183,11 @@ def get_distnet_2d(input_shape,
         # defin output operations
         if conv_before_edm:
             conv_edm = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvEDM")
-        conv_edm_out = Conv2D(filters=3 if next else 2, kernel_size=1, padding='same', activation=None, use_bias=output_use_bias, name="Output0_EDM")
+        conv_edm_out = Conv2D(filters=3 if next else 2, kernel_size=1, padding='same', activation=None, use_bias=output_use_bias, name="Output0_EDM", dtype='float32')
         ## displacement
         conv_d = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
-        conv_dy = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=output_use_bias, name="Output1_dy")
-        conv_dx = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=output_use_bias, name="Output2_dx")
+        conv_dy = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=output_use_bias, name="Output1_dy", dtype='float32')
+        conv_dx = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=output_use_bias, name="Output2_dx", dtype='float32')
         # up_factor = np.prod([self.encoder_settings[-1-i] for i in range(1)])
         #self.d_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"Up_d" ), n)
         # categories
@@ -296,11 +288,11 @@ def get_distnet_2d_sep(input_shape,
         # define output operations
         if conv_before_edm:
             conv_edm = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvEDM")
-        conv_edm_out = Conv2D(filters=3 if next else 2, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output0_EDM")
+        conv_edm_out = Conv2D(filters=3 if next else 2, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output0_EDM", dtype='float32')
         ## displacement
         conv_d = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
-        conv_dy = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output1_dy")
-        conv_dx = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output2_dx")
+        conv_dy = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output1_dy", dtype='float32')
+        conv_dx = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output2_dx", dtype='float32')
 
         # categories
         conv_cat = Conv2D(filters=output_conv_filters, kernel_size=3, padding='same', activation="relu", name="ConvCat")
@@ -553,9 +545,9 @@ def decoder_sep_op(
             name=f"{name}{layer_idx}"
         up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
         combine_gen = lambda i: Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
-        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=a, dtype=get_layer_dtype(a), name=f"{name}/{output_name}") for output_name, a in zip(output_names, activation_out)]
-        concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name, dtype=get_layer_dtype(a)) for output_name, a in zip(output_names, activation_out)]
-        id_out = [tf.keras.layers.Lambda(lambda x: x, name = output_name, dtype=get_layer_dtype(a)) for output_name, a in zip(output_names, activation_out)]
+        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=a, dtype="float32", name=f"{name}/{output_name}") for output_name, a in zip(output_names, activation_out)]
+        concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name, dtype="float32") for output_name, a in zip(output_names, activation_out)]
+        id_out = [tf.keras.layers.Lambda(lambda x: x, name = output_name, dtype="float32") for output_name, a in zip(output_names, activation_out)]
         def op(input):
             down, res_list = input
             up = up_op(down)
@@ -586,7 +578,7 @@ def decoder_sep2_op(
             name=f"{name}{layer_idx}"
         up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
         combine = [Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) for i, _ in enumerate(output_names) ] #, l2_reg=l2_reg
-        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=output_name, dtype=get_layer_dtype(activation_out)) for output_name in output_names]
+        conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=output_name, dtype='float32') for output_name in output_names]
         def op(input):
             down, res_list = input
             assert len(res_list)==len(output_names), "decoder_sep2 : expected as many outputs as residuals"
