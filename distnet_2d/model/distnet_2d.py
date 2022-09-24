@@ -64,6 +64,7 @@ class DistnetModel(Model):
         assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
         self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
         self.displacement_loss = displacement_loss
+        self.float16 = float16
         super().__init__(*args, **kwargs)
 
     def update_weights(self, edm_weight=1, contour_weight=1, displacement_weight=1, category_weight=1):
@@ -77,6 +78,9 @@ class DistnetModel(Model):
         x, y = data
         displacement_weight = self.displacement_weight / 2
         category_weight = self.category_weight / (2 if self.next else 1)
+        contour_weight = self.contour_weight
+        edm_weight = self.edm_weight
+
         if len(y) == 5 + (1 if self.contours else 0):
             label_rank = tf.one_hot(y[-1]-1, tf.math.reduce_max(y[-1]), dtype=tf.float32)
             label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True)
@@ -88,19 +92,27 @@ class DistnetModel(Model):
             # compute loss
             losses = dict()
             losses["edm"] = self.edm_loss(y[0], y_pred[0])
-            loss = losses["edm"] * self.edm_weight
+            if tf.rank(losses["edm"])==4:
+                losses["edm"] = tf.reduce_mean(losses["edm"], -1)
+            if self.float16:
+                losses["edm"] = tf.cast(losses["edm"], tf.float32)
+            loss = losses["edm"] * edm_weight
             if self.contours:
                 losses["contour"] = self.contour_loss(y[1], y_pred[1])
-                loss = loss + losses["contour"] * self.contour_weight
+                if tf.rank(losses["contour"])==4:
+                    losses["contour"] = tf.reduce_mean(losses["contour"], -1)
+                loss = loss + losses["contour"] * contour_weight
                 inc = 1
             else:
                 inc = 0
             # displacement loss
             losses["displacement"] = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
+            if self.float16:
+                losses["displacement"] = tf.cast(losses["displacement"], tf.float32)
             loss = loss + losses["displacement"] * displacement_weight
             if label_rank is not None: # label rank is returned : enfore homogeneity
-                dym_pred = _get_mean_by_object(y_pred[1+inc], label_rank, label_size)
-                dxm_pred = _get_mean_by_object(y_pred[2+inc], label_rank, label_size)
+                dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
+                dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank, label_size)
                 losses["displacement_mean"] = tf.math.square(dym_pred - y[1+inc]) + tf.math.square(dxm_pred - y[2+inc])
                 if self.next:
                     losses["displacement_mean"] = tf.reduce_mean(losses["displacement_mean"], axis=-1)
@@ -123,15 +135,12 @@ class DistnetModel(Model):
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
         return losses
 
-def _get_mean_by_object(data, label_rank, label_size):
-    half = data.dtype==tf.float16
-    if half:
-        data = tf.cast(data, dtype=tf.float32) # cast to float32 because sum is performed
-    mean = tf.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2], keepdims = True) / label_size # batch, 1, 1, 1 or 2, n_label_max
-    mean = tf.reduce_sum(mean * label_rank, axis=-1) # batch, y, x, 1 or 2
-    if half:
-        mean = tf.cast(mean, dtype=tf.float16)
-    return mean
+    def _get_mean_by_object(self, data, label_rank, label_size):
+        if self.float16:
+            data = tf.cast(data, dtype=tf.float32) # cast to float32 because sum is performed
+        mean = tf.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2], keepdims = True) / label_size # batch, 1, 1, 1 or 2, n_label_max
+        mean = tf.reduce_sum(mean * label_rank, axis=-1) # batch, y, x, 1 or 2
+        return mean
 
 def get_distnet_2d(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
