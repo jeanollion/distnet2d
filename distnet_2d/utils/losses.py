@@ -56,14 +56,19 @@ def weighted_binary_crossentropy(weights, add_channel_axis=True, **bce_kwargs):
         return bce(true, pred, sample_weight=weights)
     return loss_func
 
-def balanced_displacement_loss(dMin, dMax, wMin, wMax):
+def balanced_displacement_loss(dMin, dMax, wMin, wMax, add_channel_axis=True):
     assert dMin<dMax, "expected dMin < dMax"
     params = np.array([dMin, dMax, wMin, wMax]).astype("float32")
     a = ( params[3] - params[2] ) / ( params[1] - params[0] )
     mse = tf.keras.losses.MeanSquaredError()
     def loss_func(true, pred):
-        weights = tf.where(true<=params[0], params[2], params[3]))
-        weights = tf.where(true>params[0] and true<params[1], a * (true - params[0]) , weights))
+        weights = tf.where(true<=params[0], params[2], params[3])
+        weights = tf.where(tf.logical_and(true>params[0], true<params[1]), a * (true - params[0]) , weights)
+        if add_channel_axis:
+            true = tf.expand_dims( true, -1)
+            pred = tf.expand_dims( pred, -1)
+        else:
+            weights = tf.squeeze(weights, axis=-1)
         return mse(true, pred, sample_weight=weights)
     return loss_func
 

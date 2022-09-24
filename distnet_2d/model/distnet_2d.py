@@ -83,9 +83,7 @@ class DistnetModel(Model):
         edm_weight = self.edm_weight
 
         if len(y) == 5 + (1 if self.contours else 0):
-            label_rank = tf.one_hot(y[-1]-1, tf.math.reduce_max(y[-1]), dtype=tf.float32)
-            label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True)
-            label_size = tf.where(label_size==0, 1., label_size) # avoid nans
+            label_rank, label_size = self._get_label_rank_and_size(y[-1])
         else :
             label_rank = None
         with tf.GradientTape() as tape:
@@ -141,6 +139,12 @@ class DistnetModel(Model):
         mean = tf.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2], keepdims = True) / label_size # batch, 1, 1, 1 or 2, n_label_max
         mean = tf.reduce_sum(mean * label_rank, axis=-1) # batch, y, x, 1 or 2
         return mean
+
+    def _get_label_rank_and_size(self, labels):
+        label_rank = tf.one_hot(labels-1, tf.math.reduce_max(labels), dtype=tf.float32) # batch, y, x, 1 or 2, n_label_max
+        label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True) # batch, 1, 1, 1 or 2, n_label_max
+        label_size = tf.where(label_size==0, 1., label_size) # avoid nans
+        return label_rank, label_size
 
 def get_distnet_2d(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
