@@ -75,7 +75,7 @@ class DistnetModel(Model):
     def train_step(self, data):
         half_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         if half_precision:
-            opt = tf.keras.mixed_precision.LossScaleOptimizer(self.optimizer)
+            opt = self.optimizer
         x, y = data
         displacement_weight = self.displacement_weight / 2
         category_weight = self.category_weight / (2 if self.next else 1)
