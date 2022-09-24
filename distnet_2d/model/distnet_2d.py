@@ -121,7 +121,6 @@ class DistnetModel(Model):
             loss = loss + losses["category"] * category_weight
             if half_precision:
                 loss = opt.get_scaled_loss(loss)
-            losses["loss"] = loss
 
         # Compute gradients
         trainable_vars = self.trainable_variables
@@ -130,6 +129,7 @@ class DistnetModel(Model):
             grad = opt.get_unscaled_gradients(grad)
         # Update weights
         self.optimizer.apply_gradients(zip(grad, trainable_vars))
+        result["loss"] = tf.reduce_mean(loss)
         return losses
 
     def _get_mean_by_object(self, data, label_rank, label_size):
