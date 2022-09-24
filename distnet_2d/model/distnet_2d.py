@@ -90,13 +90,9 @@ class DistnetModel(Model):
             # compute loss
             losses = dict()
             losses["edm"] = self.edm_loss(y[0], y_pred[0])
-            if tf.rank(losses["edm"])==4:
-                losses["edm"] = tf.reduce_mean(losses["edm"], -1)
             loss = losses["edm"] * edm_weight
             if self.contours:
                 losses["contour"] = self.contour_loss(y[1], y_pred[1])
-                if tf.rank(losses["contour"])==4:
-                    losses["contour"] = tf.reduce_mean(losses["contour"], -1)
                 loss = loss + losses["contour"] * contour_weight
                 inc = 1
             else:
