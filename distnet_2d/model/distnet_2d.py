@@ -54,6 +54,7 @@ class DistnetModel(Model):
         contour_loss = weighted_binary_crossentropy([0.623, 2.5]),
         displacement_loss = mean_squared_error,
         category_weights = [1, 1, 5, 5],
+        displacement_std=False,
         **kwargs):
         self.contours = kwargs.pop("contours", False)
         self.next = kwargs.pop("next", False)
@@ -63,6 +64,7 @@ class DistnetModel(Model):
         assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
         self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
         self.displacement_loss = displacement_loss
+        self.displacement_std=displacement_std
         super().__init__(*args, **kwargs)
 
     def update_weights(self, edm_weight=1, contour_weight=1, displacement_weight=1, category_weight=1):
@@ -73,9 +75,7 @@ class DistnetModel(Model):
         self.category_weight=category_weight / sum
 
     def train_step(self, data):
-        half_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
-        if half_precision:
-            opt = self.optimizer
+        mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
         displacement_weight = self.displacement_weight / 2
         category_weight = self.category_weight / (2 if self.next else 1)
@@ -105,15 +105,30 @@ class DistnetModel(Model):
             loss = loss + d_loss * displacement_weight
             losses["displacement"] = tf.reduce_mean(d_loss)
             if label_rank is not None: # label rank is returned : enfore homogeneity
-                dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
-                dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank, label_size)
-                dm_loss = tf.math.square(dym_pred - y[1+inc]) + tf.math.square(dxm_pred - y[2+inc])
-                if self.next:
-                    dm_loss= tf.reduce_mean(dm_loss, axis=-1)
+                if self.displacement_std:
+                    dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
+                    dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank, label_size)
+                    vary = dy2m_pred - tf.math.square(dym_pred)
+                    dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank, label_size)
+                    dx2m_pred = self._get_mean_by_object(tf.math.square(y_pred[2+inc]), label_rank, label_size)
+                    varx = dx2m_pred - tf.math.square(dxm_pred)
+                    var = vary + varx
+                    if self.next:
+                        var= tf.reduce_mean(var, axis=-1)
+                    else:
+                        var = tf.squeeze(var, axis=-1)
+                    loss = loss + var * displacement_weight
+                    losses["displacement_var"] = tf.reduce_mean(var)
                 else:
-                    dm_loss = tf.squeeze(dm_loss, axis=-1)
-                loss = loss + dm_loss * displacement_weight
-                losses["displacement_mean"] = tf.reduce_mean(dm_loss)
+                    dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
+                    dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank, label_size)
+                    dm_loss = tf.math.square(dym_pred - y[1+inc]) + tf.math.square(dxm_pred - y[2+inc])
+                    if self.next:
+                        dm_loss= tf.reduce_mean(dm_loss, axis=-1)
+                    else:
+                        dm_loss = tf.squeeze(dm_loss, axis=-1)
+                    loss = loss + dm_loss * displacement_weight
+                    losses["displacement_mean"] = tf.reduce_mean(dm_loss)
             # category loss
             if self.next:
                 y_cat_prev, y_cat_next = tf.split(y[3+inc], 2, axis=-1)
@@ -123,14 +138,14 @@ class DistnetModel(Model):
             loss = loss + cat_loss * category_weight
             losses["category"] = tf.reduce_mean(cat_loss)
             losses["loss"] = tf.reduce_mean(loss)
-            if half_precision:
-                loss = opt.get_scaled_loss(loss)
+            if mixed_precision:
+                loss = self.optimizer.get_scaled_loss(loss)
 
         # Compute gradients
         trainable_vars = self.trainable_variables
         grad = tape.gradient(loss, trainable_vars)
-        if half_precision:
-            grad = opt.get_unscaled_gradients(grad)
+        if mixed_precision:
+            grad = self.optimizer.get_unscaled_gradients(grad)
         # Update weights
         self.optimizer.apply_gradients(zip(grad, trainable_vars))
         return losses
