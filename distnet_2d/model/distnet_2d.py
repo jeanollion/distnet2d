@@ -50,29 +50,28 @@ DECODER_SETTINGS_DS = [
 
 class DistnetModel(Model):
     def __init__(self, *args,
-        edm_loss_weight=1, contour_loss_weight=1, displacement_loss_weight=2, category_loss_weight=1, edm_loss=mean_squared_error,
+        edm_loss_weight=1, contour_loss_weight=1, displacement_loss_weight=1, category_loss_weight=1, displacement_std_loss_weight=0, edm_loss=mean_squared_error,
         contour_loss = weighted_binary_crossentropy([0.623, 2.5]),
         displacement_loss = mean_squared_error,
         category_weights = [1, 1, 5, 5],
-        displacement_std=False,
         **kwargs):
         self.contours = kwargs.pop("contours", False)
         self.next = kwargs.pop("next", False)
-        self.update_weights(edm_loss_weight, contour_loss_weight, displacement_loss_weight, category_loss_weight)
+        self.update_loss_weights(edm_loss_weight, contour_loss_weight, displacement_loss_weight, category_loss_weight, displacement_std_loss_weight)
         self.edm_loss = edm_loss
         self.contour_loss = contour_loss
         assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
         self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
         self.displacement_loss = displacement_loss
-        self.displacement_std=displacement_std
         super().__init__(*args, **kwargs)
 
-    def update_weights(self, edm_weight=1, contour_weight=1, displacement_weight=1, category_weight=1):
-        sum = edm_weight + (contour_weight if self.contours else 0) + displacement_weight + category_weight
+    def update_loss_weights(self, edm_weight=1, contour_weight=1, displacement_weight=1, category_weight=1, displacement_std_weight=0, normalize=True):
+        sum = edm_weight + (contour_weight if self.contours else 0) + displacement_weight + displacement_std_weight + category_weight if normalize else 1
         self.edm_weight = edm_weight / sum
         self.contour_weight=contour_weight / sum
         self.displacement_weight=displacement_weight / sum
         self.category_weight=category_weight / sum
+        self.displacement_std_weight = displacement_std_weight / sum
 
     def train_step(self, data):
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
@@ -101,15 +100,16 @@ class DistnetModel(Model):
             else:
                 inc = 0
             # displacement loss
-            d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
-            loss = loss + d_loss * displacement_weight
-            losses["displacement"] = tf.reduce_mean(d_loss)
-            if label_rank is not None: # label rank is returned : enfore homogeneity
-                if self.displacement_std:
-                    dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
+            if label_rank is not None: # label rank is returned : object-wise loss
+                dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
+                dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank, label_size)
+                dm_loss = self.displacement_loss(dym_pred, y_pred[1+inc]) + self.displacement_loss(dxm_pred, y_pred[2+inc])
+                loss = loss + dm_loss * displacement_weight
+                losses["displacement_mean"] = tf.reduce_mean(dm_loss)
+
+                if self.displacement_std_loss_weight>0: #enforce homogeneity
                     dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank, label_size)
                     vary = dy2m_pred - tf.math.square(dym_pred)
-                    dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank, label_size)
                     dx2m_pred = self._get_mean_by_object(tf.math.square(y_pred[2+inc]), label_rank, label_size)
                     varx = dx2m_pred - tf.math.square(dxm_pred)
                     var = vary + varx
@@ -117,18 +117,13 @@ class DistnetModel(Model):
                         var= tf.reduce_mean(var, axis=-1)
                     else:
                         var = tf.squeeze(var, axis=-1)
-                    loss = loss + var * displacement_weight
+                    loss = loss + var * displacement_std_loss_weight
                     losses["displacement_var"] = tf.reduce_mean(var)
-                else:
-                    dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
-                    dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank, label_size)
-                    dm_loss = tf.math.square(dym_pred - y[1+inc]) + tf.math.square(dxm_pred - y[2+inc])
-                    if self.next:
-                        dm_loss= tf.reduce_mean(dm_loss, axis=-1)
-                    else:
-                        dm_loss = tf.squeeze(dm_loss, axis=-1)
-                    loss = loss + dm_loss * displacement_weight
-                    losses["displacement_mean"] = tf.reduce_mean(dm_loss)
+            else: # pixel-wise displacement loss
+                d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
+                loss = loss + d_loss * displacement_weight
+                losses["displacement"] = tf.reduce_mean(d_loss)
+
             # category loss
             if self.next:
                 y_cat_prev, y_cat_next = tf.split(y[3+inc], 2, axis=-1)
