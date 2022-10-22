@@ -72,14 +72,14 @@ def balanced_displacement_loss(dMin, dMax, wMin, wMax, l2=True, add_channel_axis
         return loss(true, pred, sample_weight=weights)
     return loss_func
 
-def edm_contour_loss(background_weight, edm_weight, contour_weight, dtype='float32'):
+def edm_contour_loss(background_weight, edm_weight, contour_weight, l1=False, dtype='float32'):
     '''
     This function allows to set a distinct weight for contour values (edm==1) and rest of foreground and background
     '''
     weights_values = np.array((background_weight, edm_weight, contour_weight)).astype(dtype)
     def loss_func(y_true, y_pred):
         weight_map = tf.where(y_true==0, weights_values[0], tf.where(y_true==1, weights_values[2], weights_values[1]))
-        loss = tf.math.square(y_true - y_pred)
+        loss = tf.math.square(y_true - y_pred) if not l1 else tf.math.abs(y_true - y_pred)
         loss = loss * weight_map
         return tf.reduce_mean(loss, -1)
     return loss_func
