@@ -107,7 +107,7 @@ class DistnetModel(Model):
                 loss = loss + dm_loss * displacement_weight
                 losses["displacement_mean"] = tf.reduce_mean(dm_loss)
 
-                if self.displacement_std_loss_weight>0: #enforce homogeneity
+                if self.displacement_std_weight>0: #enforce homogeneity
                     dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank, label_size)
                     vary = dy2m_pred - tf.math.square(dym_pred)
                     dx2m_pred = self._get_mean_by_object(tf.math.square(y_pred[2+inc]), label_rank, label_size)
