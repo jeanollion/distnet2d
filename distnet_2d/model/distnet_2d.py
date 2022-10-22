@@ -76,7 +76,8 @@ class DistnetModel(Model):
     def train_step(self, data):
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
-        displacement_weight = self.displacement_weight / 2
+        displacement_weight = self.displacement_weight / 2. # y & x
+        displacement_std_weight = self.displacement_std_weight / 2. # y & x
         category_weight = self.category_weight / (2 if self.next else 1)
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
@@ -117,7 +118,7 @@ class DistnetModel(Model):
                         var= tf.reduce_mean(var, axis=-1)
                     else:
                         var = tf.squeeze(var, axis=-1)
-                    loss = loss + var * displacement_std_loss_weight
+                    loss = loss + var * displacement_std_weight
                     losses["displacement_var"] = tf.reduce_mean(var)
             else: # pixel-wise displacement loss
                 d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
