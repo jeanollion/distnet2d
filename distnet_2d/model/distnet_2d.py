@@ -104,7 +104,7 @@ class DistnetModel(Model):
             if label_rank is not None: # label rank is returned : object-wise loss
                 dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank, label_size)
                 dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank, label_size)
-                dm_loss = self.displacement_loss(dym_pred, y_pred[1+inc]) + self.displacement_loss(dxm_pred, y_pred[2+inc])
+                dm_loss = self.displacement_loss(y[1+inc], dym_pred) + self.displacement_loss(y[2+inc], dxm_pred)
                 loss = loss + dm_loss * displacement_weight
                 losses["displacement_mean"] = tf.reduce_mean(dm_loss)
 
