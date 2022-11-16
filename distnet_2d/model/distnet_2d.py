@@ -1,5 +1,5 @@
 import tensorflow as tf
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient
 from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -78,12 +78,13 @@ class DistnetModel(Model):
         x, y = data
         displacement_weight = self.displacement_weight / 2. # y & x
         displacement_std_weight = self.displacement_std_weight / 2. # y & x
-        category_weight = self.category_weight / (2 if self.next else 1)
+        category_weight = self.category_weight / (2. if self.next else 1)
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
 
         if len(y) == 5 + (1 if self.contours else 0):
             label_rank, label_size = self._get_label_rank_and_size(y[-1])
+            displacement_weight = displacement_weight / 2.
         else :
             label_rank = None
         with tf.GradientTape() as tape:
@@ -120,10 +121,10 @@ class DistnetModel(Model):
                         var = tf.squeeze(var, axis=-1)
                     loss = loss + var * displacement_std_weight
                     losses["displacement_var"] = tf.reduce_mean(var)
-            else: # pixel-wise displacement loss
-                d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
-                loss = loss + d_loss * displacement_weight
-                losses["displacement"] = tf.reduce_mean(d_loss)
+            #else: # pixel-wise displacement loss
+            d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
+            loss = loss + d_loss * displacement_weight
+            losses["displacement"] = tf.reduce_mean(d_loss)
 
             # category loss
             if self.next:
@@ -469,11 +470,12 @@ def get_distnet_2d_sep_out(input_shape,
         residuals = []
         for l_idx in range(len(encoder_layers)):
             res = [residuals_c[l_idx] for residuals_c in all_residuals]
+            grad_weight_op = WeigthedGradient(1./3, name=f"WeigthedGradient_{l_idx}")
             if l_idx>=1:
                 combine_residual_op = combine_residual_layer[l_idx]
-                residuals.append(combine_residual_op(res))
-            else:
-                residuals.append(res)
+                res = combine_residual_op(res)
+            #res = grad_weight_op(res) # if several decoders -> gradients are summed # TODO error: curstom grad takes 1 positional argument but 3 were given
+            residuals.append(res)
 
         upsampled = [feature]
         residuals = residuals[::-1]

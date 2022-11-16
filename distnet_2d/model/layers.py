@@ -332,6 +332,19 @@ class Combine(Layer):
         x = self.combine_conv(x)
         return x
 
+class WeigthedGradient(tf.keras.layers.Layer):
+    def __init__(self, weight, name: str="WeigthedGradient"):
+        super().__init__()
+        self.weight = weight
+
+    def call(self, x):
+        return self.op(x)
+
+    @tf.custom_gradient
+    def op(self, x):
+        def grad(dy):
+            return dy * self.weight
+        return x, grad
 
 ############### MOBILE NET LAYERS ############################################################
 ############### FROM https://github.com/Bisonai/mobilenetv3-tensorflow/blob/master/layers.py
