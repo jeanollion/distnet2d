@@ -113,4 +113,4 @@ def _compute_background_weigh_map(y_true):
     count = tf.cast(tf.size(y_true), dtype=tf.float32)
     fore_w = count / fore_count
     bck_w = count / (count - fore_count)
-    return tf.where(y_true==0, bck_w, fore_w)
+    return tf.where(y_true, fore_w, bck_w)
