@@ -108,6 +108,7 @@ def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False):
         return loss(y_true, y_pred, sample_weight=weight_map)
     return loss_func
 
+
 def _compute_background_weigh_map(y_true, bool=False):
     fore_count = tf.math.count_nonzero(y_true, dtype=tf.float32)
     count = tf.cast(tf.size(y_true), dtype=tf.float32)
