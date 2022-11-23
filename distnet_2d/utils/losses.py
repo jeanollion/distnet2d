@@ -92,14 +92,14 @@ def edm_contour_loss(background_weight, edm_weight, contour_weight, l1=False, dt
     return loss_func
 
 def balanced_background_binary_crossentropy(add_channel_axis=True, **loss_kwargs):
-    return balanced_background_loss(tf.keras.losses.BinaryCrossentropy(**loss_kwargs), add_channel_axis)
+    return balanced_background_loss(tf.keras.losses.BinaryCrossentropy(**loss_kwargs), add_channel_axis, True)
 
 def balanced_background_l_norm(l2=True, add_channel_axis=True, **loss_kwargs):
-    return balanced_background_loss(tf.keras.losses.MeanSquaredError(**loss_kwargs) if l2 else tf.keras.losses.MeanAbsoluteError(**loss_kwargs), add_channel_axis)
+    return balanced_background_loss(tf.keras.losses.MeanSquaredError(**loss_kwargs) if l2 else tf.keras.losses.MeanAbsoluteError(**loss_kwargs), add_channel_axis, False)
 
-def balanced_background_loss(loss, add_channel_axis=True):
+def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False):
     def loss_func(y_true, y_pred):
-        weight_map = _compute_background_weigh_map(y_true)
+        weight_map = _compute_background_weigh_map(y_true, y_true_bool)
         if add_channel_axis:
             y_true = tf.expand_dims( y_true, -1)
             y_pred = tf.expand_dims( y_pred, -1)
@@ -108,9 +108,9 @@ def balanced_background_loss(loss, add_channel_axis=True):
         return loss(y_true, y_pred, sample_weight=weight_map)
     return loss_func
 
-def _compute_background_weigh_map(y_true):
-    fore_count = tf.math.count_nonzero(y_true, dtype=tf.dtypes.float32)
-    count = tf.size(y_true, out_type=tf.dtypes.float32)
+def _compute_background_weigh_map(y_true, bool=False):
+    fore_count = tf.math.count_nonzero(y_true, dtype=tf.float32)
+    count = tf.cast(tf.size(y_true), dtype=tf.float32)
     fore_w = count / fore_count
     bck_w = count / (count - fore_count)
-    return tf.where(y_true==0, bck_w, fore_w)
+    return tf.where(y_true, fore_w, bck_w) if bool else tf.where(y_true==tf.cast(0, y_true.dtype), bck_w, fore_w)

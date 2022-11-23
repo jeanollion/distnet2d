@@ -122,7 +122,7 @@ class DistnetModel(Model):
                     displacement_wm = 1 + var * displacement_var_weight
                 else:
                     displacement_wm = None
-                if displacement_mean:
+                if self.displacement_mean:
                     dm_loss = self.displacement_loss(dy_t, tf.expand_dims(dym_pred, -1), sample_weight=displacement_wm) + self.displacement_loss(dx_t, tf.expand_dims(dxm_pred, -1), sample_weight=displacement_wm)
                     loss = loss + dm_loss * displacement_weight
                     losses["displacement_mean"] = tf.reduce_mean(dm_loss)
