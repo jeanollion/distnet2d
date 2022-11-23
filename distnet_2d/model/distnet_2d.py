@@ -9,7 +9,7 @@ from .attention import Attention
 from .directional_2d_self_attention import Directional2DSelfAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
-from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, edm_contour_loss
+from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, edm_contour_loss, balanced_background_l_norm, balanced_background_binary_crossentropy
 from tensorflow.keras.losses import sparse_categorical_crossentropy, MeanSquaredError
 
 ENCODER_SETTINGS = [
@@ -50,9 +50,10 @@ DECODER_SETTINGS_DS = [
 
 class DistnetModel(Model):
     def __init__(self, *args,
-        edm_loss_weight=1, contour_loss_weight=1, displacement_loss_weight=1, category_loss_weight=1, displacement_var_weight=1./10, displacement_var_max=50, edm_loss=MeanSquaredError(),
-        contour_loss = weighted_binary_crossentropy([0.623, 2.5]),
+        edm_loss_weight=1, contour_loss_weight=1, displacement_loss_weight=1, category_loss_weight=1, displacement_var_weight=1./10, displacement_var_max=50, edm_loss=balanced_background_l_norm(),
+        contour_loss = balanced_background_binary_crossentropy(),
         displacement_loss = MeanSquaredError(),
+        displacement_mean = False,
         category_weights = [1, 1, 5, 5],
         **kwargs):
         self.contours = kwargs.pop("contours", False)
@@ -65,6 +66,7 @@ class DistnetModel(Model):
         assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
         self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
         self.displacement_loss = displacement_loss
+        self.displacement_mean=displacement_mean
         super().__init__(*args, **kwargs)
 
     def update_loss_weights(self, edm_weight=1, contour_weight=1, displacement_weight=1, category_weight=1, normalize=True):
@@ -120,9 +122,10 @@ class DistnetModel(Model):
                     displacement_wm = 1 + var * displacement_var_weight
                 else:
                     displacement_wm = None
-                dm_loss = self.displacement_loss(dy_t, tf.expand_dims(dym_pred, -1), sample_weight=displacement_wm) + self.displacement_loss(dx_t, tf.expand_dims(dxm_pred, -1), sample_weight=displacement_wm)
-                loss = loss + dm_loss * displacement_weight
-                losses["displacement_mean"] = tf.reduce_mean(dm_loss)
+                if displacement_mean:
+                    dm_loss = self.displacement_loss(dy_t, tf.expand_dims(dym_pred, -1), sample_weight=displacement_wm) + self.displacement_loss(dx_t, tf.expand_dims(dxm_pred, -1), sample_weight=displacement_wm)
+                    loss = loss + dm_loss * displacement_weight
+                    losses["displacement_mean"] = tf.reduce_mean(dm_loss)
             else:
                 displacement_wm = None
             # pixel-wise displacement loss
