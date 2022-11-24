@@ -477,11 +477,11 @@ def get_distnet_2d_sep_out(input_shape,
         residuals = []
         for l_idx in range(len(encoder_layers)):
             res = [residuals_c[l_idx] for residuals_c in all_residuals]
-            grad_weight_op = WeigthedGradient(1./3, name=f"WeigthedGradient_{l_idx}")
+            #grad_weight_op = WeigthedGradient(1./3, name=f"WeigthedGradient_{l_idx}")
             if l_idx>=1:
                 combine_residual_op = combine_residual_layer[l_idx]
                 res = combine_residual_op(res)
-            #res = grad_weight_op(res) # if several decoders -> gradients are summed # TODO error: curstom grad takes 1 positional argument but 3 were given
+            #res = grad_weight_op(res) #
             residuals.append(res)
 
         upsampled = [feature]
