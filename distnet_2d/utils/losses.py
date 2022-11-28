@@ -98,13 +98,15 @@ def balanced_background_l_norm(l2=True, add_channel_axis=True, **loss_kwargs):
     return balanced_background_loss(tf.keras.losses.MeanSquaredError(**loss_kwargs) if l2 else tf.keras.losses.MeanAbsoluteError(**loss_kwargs), add_channel_axis, False)
 
 def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False):
-    def loss_func(y_true, y_pred):
+    def loss_func(y_true, y_pred, sample_weight=None):
         weight_map = _compute_background_weigh_map(y_true, y_true_bool)
         if add_channel_axis:
             y_true = tf.expand_dims( y_true, -1)
             y_pred = tf.expand_dims( y_pred, -1)
         else:
             weight_map = tf.squeeze(weights, axis=-1)
+        if sample_weight is not None:
+            weight_map = sample_weight * weight_map
         return loss(y_true, y_pred, sample_weight=weight_map)
     return loss_func
 

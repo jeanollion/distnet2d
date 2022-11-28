@@ -94,6 +94,8 @@ class DistnetModel(Model):
             y_pred = self(x, training=True)  # Forward pass
             # compute loss
             losses = dict()
+            inc = 1 if self.contours else 0
+
             edm_loss = self.edm_loss(y[0], y_pred[0])
             loss = edm_loss * edm_weight
             losses["edm"] = tf.reduce_mean(edm_loss)
@@ -101,9 +103,7 @@ class DistnetModel(Model):
                 contour_loss = self.contour_loss(y[1], y_pred[1])
                 loss = loss + contour_loss * contour_weight
                 losses["contour"] = tf.reduce_mean(contour_loss)
-                inc = 1
-            else:
-                inc = 0
+
             # displacement loss
             dy_t = tf.expand_dims(y[1+inc], -1)
             dx_t = tf.expand_dims(y[2+inc], -1)
@@ -169,7 +169,6 @@ def get_distnet_2d(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             downsampling_mode:str = "stride", #maxpool, stride
             skip_combine_mode:str = "conv", # conv, sum
-            first_skip_mode:str = None, # sg, omit, None
             skip_stop_gradient:bool = False,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
@@ -196,7 +195,7 @@ def get_distnet_2d(input_shape,
         encoder_layers = []
         contraction_per_layer = []
         for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, _ = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
+            op, contraction, _ = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
 
@@ -209,7 +208,7 @@ def get_distnet_2d(input_shape,
         attention_skip_op = Combine(filters=attention_filters//2, name="FeatureSequence")
 
         # define decoder operations
-        decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else ("sg" if skip_stop_gradient else None), activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
+        decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
 
         # defin output operations
         if conv_before_edm:
@@ -275,7 +274,6 @@ def get_distnet_2d_sep(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             downsampling_mode:str = "stride", #maxpool, stride
             skip_combine_mode:str = "conv", # conv, sum
-            first_skip_mode:str = None, # sg, omit, None
             skip_stop_gradient:bool = False,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
@@ -301,7 +299,7 @@ def get_distnet_2d_sep(input_shape,
         contraction_per_layer = []
         combine_residual_layer = []
         for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
+            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
             combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
@@ -314,7 +312,7 @@ def get_distnet_2d_sep(input_shape,
         attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
 
         # define decoder operations
-        decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, skip_mode=first_skip_mode if l_idx==0 else ("sg" if skip_stop_gradient else None), activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
+        decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
 
         # define output operations
         if conv_before_edm:
@@ -420,7 +418,7 @@ def get_distnet_2d_sep_out(input_shape,
         contraction_per_layer = []
         combine_residual_layer = []
         for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, layer_idx = l_idx)
+            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
             combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
@@ -443,7 +441,7 @@ def get_distnet_2d_sep_out(input_shape,
                 cat_names = [f"Output{3+output_inc}_Category", f"Output{4+output_inc}_CategoryNext"] if next else [f"Output{3+output_inc}_Category"]
                 decoder_out.append( decoder_sep2_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4) )
             else:
-                decoder_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, skip_mode="sg" if skip_stop_gradient else None, activation="relu", layer_idx=l_idx) )
+                decoder_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx) )
 
         # Create GRAPH
         input = tf.keras.layers.Input(shape=input_shape, name="Input")
@@ -497,7 +495,7 @@ def get_distnet_2d_sep_out(input_shape,
         outputs = flatten_list([seg, dy, dx, cat])
         return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours)
 
-def encoder_op(param_list, downsampling_mode, name: str="EncoderLayer", layer_idx:int=1):
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     sequence, down_sequence, total_contraction, residual_filters = parse_param_list(param_list, name, ignore_stride=maxpool)
@@ -513,6 +511,8 @@ def encoder_op(param_list, downsampling_mode, name: str="EncoderLayer", layer_id
         down = res
         for l in down_sequence:
             down = l(res)
+        if skip_stop_gradient:
+            res = stop_gradient(res, parent_name = name)
         return down, res
     return op, total_contraction, residual_filters
 
@@ -524,7 +524,6 @@ def decoder_op(
             mode:str="tconv", # tconv, up_nn, up_bilinear
             skip_combine_mode = "conv", # conv, sum
             combine_kernel_size = 1,
-            skip_mode = None, # sg, omit, None
             activation: str="relu",
             #l2_reg: float=1e-5,
             #use_bias:bool = True,
@@ -537,21 +536,14 @@ def decoder_op(
             combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
         else:
             combine = None
-        if skip_mode=="sg":
-            stop_grad = lambda x : stop_gradient(x, parent_name=name)
         conv = Conv2D(filters=filters, kernel_size=conv_kernel_size, padding='same', activation=activation, name=f"{name}/Conv{conv_kernel_size}x{conv_kernel_size}")
         def op(input):
             down, res = input
             up = up_op(down)
-            if "omit"!=skip_mode:
-                if skip_mode=="sg":
-                    res = stop_grad(res)
-                if combine is not None:
-                    x = combine([up, res])
-                else:
-                    x = up + res
+            if combine is not None:
+                x = combine([up, res])
             else:
-                x = up
+                x = up + res
             x = conv(x)
             return x
         return op
