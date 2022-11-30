@@ -270,129 +270,6 @@ def get_distnet_2d(input_shape,
             outputs = edm, dy, dx, cat
         return DistnetModel([input], outputs, name=name, next=next)
 
-def get_distnet_2d_sep(input_shape,
-            upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
-            downsampling_mode:str = "stride", #maxpool, stride
-            skip_combine_mode:str = "conv", # conv, sum
-            skip_stop_gradient:bool = False,
-            encoder_settings:list = ENCODER_SETTINGS,
-            feature_settings: list = FEATURE_SETTINGS,
-            decoder_settings: list = None,
-            residual_combine_size:int = 1,
-            output_conv_filters:int=32,
-            output_conv_level = 0,
-            conv_before_edm = False,
-            name: str="DiSTNet2D",
-            l2_reg: float=1e-5,
-    ):
-        if decoder_settings is None:
-            decoder_settings = DECODER_SETTINGS_DS if output_conv_level==1 else DECODER_SETTINGS
-        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
-        assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
-
-        spatial_dims = input_shape[:-1]
-        assert input_shape[-1] in [2, 3], "channel number should be in [2, 3]"
-        next = input_shape[-1]==3
-
-        # define enconder operations
-        encoder_layers = []
-        contraction_per_layer = []
-        combine_residual_layer = []
-        for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
-            encoder_layers.append(op)
-            contraction_per_layer.append(contraction)
-            combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
-        # define feature operations
-        feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
-        attention_op = Attention(positional_encoding="2D", name="Attention")
-        self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
-        self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
-        combine_features_op = Combine(filters=attention_filters//2, kernel_size=residual_combine_size, name="CombineFeatures")
-        attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
-
-        # define decoder operations
-        decoder_layers = [decoder_op(**parameters, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode=skip_combine_mode, activation="relu", layer_idx=l_idx) for l_idx, parameters in enumerate(decoder_settings)]
-
-        # define output operations
-        if conv_before_edm:
-            conv_edm = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvEDM")
-        conv_edm_out = Conv2D(filters=3 if next else 2, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output0_EDM", dtype='float32')
-        ## displacement
-        conv_d = Conv2D(filters=output_conv_filters, kernel_size=1, padding='same', activation="relu", name="ConvDist")
-        conv_dy = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output1_dy", dtype='float32')
-        conv_dx = Conv2D(filters=2 if next else 1, kernel_size=1, padding='same', activation=None, use_bias=True, name="Output2_dx", dtype='float32')
-
-        # categories
-        conv_cat = Conv2D(filters=output_conv_filters, kernel_size=3, padding='same', activation="relu", name="ConvCat")
-        conv_catcur = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="Output3_Category")
-        if next:
-            conv_catnext = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="Output4_CategoryNext")
-
-        # Create GRAPH
-        input = tf.keras.layers.Input(shape=input_shape, name="Input")
-        inputs = tf.split(input, num_or_size_splits = 3 if next else 2, axis=-1)
-        all_residuals = []
-        all_downsampled = []
-        all_features = []
-        for i in inputs:
-            residuals = []
-            downsampled = [i]
-            for l in encoder_layers:
-                down, res = l(downsampled[-1])
-                downsampled.append(down)
-                residuals.append(res)
-            all_residuals.append(residuals)
-            all_downsampled.append(downsampled)
-            feature = downsampled[-1]
-            for op in feature_convs:
-                feature = op(feature)
-            sa = self_attention_op([feature, feature])
-            feature = self_attention_skip_op([feature, sa])
-            all_features.append(feature)
-        combined_features = combine_features_op(all_features)
-        attention = attention_op([all_features[0], all_features[1]])
-        if next:
-            attention_next= attention_op([all_features[1], all_features[2]])
-            feature = attention_skip_op([attention, attention_next, combined_features])
-        else:
-            feature = attention_skip_op([attention, combined_features])
-
-        residuals = []
-        for l_idx in range(len(encoder_layers)):
-            res = [residuals_c[l_idx] for residuals_c in all_residuals]
-            combine_residual_op = combine_residual_layer[l_idx]
-            residuals.append(combine_residual_op(res))
-
-        upsampled = [feature]
-        residuals = residuals[::-1]
-        for i, l in enumerate(decoder_layers[::-1]):
-            up = l([upsampled[-1], residuals[i]])
-            upsampled.append(up)
-
-        if conv_before_edm:
-            edm = conv_edm(upsampled[-1])
-            edm = conv_edm_out(edm)
-        else:
-            edm = conv_edm_out(upsampled[-1])
-
-        displacement = conv_d(upsampled[-1-output_conv_level])
-        dy = conv_dy(displacement)
-        dx = conv_dx(displacement)
-        #dy = self.d_up(dy)
-        #dx = self.d_up(dx)
-
-        categories = conv_cat(upsampled[-1-output_conv_level])
-        cat  = conv_catcur(categories)
-        #cat = self.cat_up(cat)
-        if next:
-            cat_next  = conv_catnext(categories)
-            #cat_next = self.cat_up(cat_next)
-            outputs =  edm, dy, dx, cat, cat_next
-        else:
-            outputs = edm, dy, dx, cat
-        return DistnetModel([input], outputs, name=name, next=next)
-
 def get_distnet_2d_sep_out(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             downsampling_mode:str = "stride", #maxpool, stride
@@ -534,8 +411,10 @@ def get_distnet_2d_out_sep(input_shape,
         output_inc = 1 if predict_contours else 0
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
-                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output0_EDM", "Output1_Contours"] if predict_contours else ["Output0_EDM"], name="DecoderEDM", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out=["linear", "sigmoid"] if predict_contours else "linear") )
-                decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
+                decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output0_EDM", "Output1_Contours"] if predict_contours else ["Output0_EDM"], name="DecoderEDM", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out=["linear", "sigmoid"] if predict_contours else "linear", filters_out=3 if next else 2) )
+
+                decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", filters_out=2 if next else 1) )
+
                 cat_names = [f"Output{3+output_inc}_Category", f"Output{4+output_inc}_CategoryNext"] if next else [f"Output{3+output_inc}_Category"]
                 decoder_out.append( decoder_sep_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4) )
             else:
