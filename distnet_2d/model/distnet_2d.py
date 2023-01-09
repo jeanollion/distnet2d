@@ -9,7 +9,7 @@ from .attention import Attention
 from .directional_2d_self_attention import Directional2DSelfAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
-from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, edm_contour_loss, balanced_background_l_norm, balanced_background_binary_crossentropy
+from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_l_norm, balanced_background_binary_crossentropy
 from tensorflow.keras.losses import sparse_categorical_crossentropy, MeanSquaredError
 
 ENCODER_SETTINGS = [
@@ -54,7 +54,7 @@ class DistnetModel(Model):
         contour_loss = balanced_background_binary_crossentropy(),
         displacement_loss = MeanSquaredError(),
         displacement_mean = False,
-        category_weights = [1, 1, 5, 5],
+        category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
         **kwargs):
         self.contours = kwargs.pop("contours", False)
         self.next = kwargs.pop("next", False)
@@ -64,7 +64,7 @@ class DistnetModel(Model):
         self.edm_loss = edm_loss
         self.contour_loss = contour_loss
         assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
-        self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
+        self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights) if category_weights is not None else balanced_category_loss(sparse_categorical_crossentropy, 4)
         self.displacement_loss = displacement_loss
         self.displacement_mean=displacement_mean
         super().__init__(*args, **kwargs)
