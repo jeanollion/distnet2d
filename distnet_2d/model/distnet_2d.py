@@ -63,11 +63,15 @@ class DistnetModel(Model):
         self.displacement_var_max=displacement_var_max
         self.edm_loss = edm_loss
         self.contour_loss = contour_loss
+        cat_background = kwargs.pop("cat_background", True)
         if category_weights is not None:
-            assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
+            if cat_background:
+                assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
+            else:
+                assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
             self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
         else:
-            self.category_loss = balanced_category_loss(sparse_categorical_crossentropy, 4, max_class_ratio=kwargs.pop("max_class_ratio", 1000))
+            self.category_loss = balanced_category_loss(sparse_categorical_crossentropy, 4 if cat_background else 3, no_background = not cat_background, max_class_ratio=kwargs.pop("max_class_ratio", 20))
         self.displacement_loss = displacement_loss
         self.displacement_mean=displacement_mean
         super().__init__(*args, **kwargs)
@@ -181,6 +185,7 @@ def get_distnet_2d(input_shape,
             directional_attention = False,
             conv_before_edm = True,
             output_use_bias = False,
+            cat_background = True, # categories include background or not
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
@@ -225,10 +230,10 @@ def get_distnet_2d(input_shape,
         #self.d_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"Up_d" ), n)
         # categories
         conv_cat = Conv2D(filters=output_conv_filters, kernel_size=3, padding='same', activation="relu", name="ConvCat")
-        conv_catcur = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="Output3_Category")
+        conv_catcur = Conv2D(filters=4 if cat_background else 3, kernel_size=1, padding='same', activation="softmax", name="Output3_Category")
         #self.cat_up = ApplyChannelWise(tf.keras.layers.Conv2DTranspose( 1, kernel_size=up_factor, strides=up_factor, padding='same', activation=None, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg), name = n+"_Up_cat" ), n)
         if next:
-            conv_catnext = Conv2D(filters=4, kernel_size=1, padding='same', activation="softmax", name="Output4_CategoryNext")
+            conv_catnext = Conv2D(filters=4 if cat_background else 3, kernel_size=1, padding='same', activation="softmax", name="Output4_CategoryNext")
 
         # Create GRAPH
         input = tf.keras.layers.Input(shape=input_shape, name="Input")
@@ -271,7 +276,7 @@ def get_distnet_2d(input_shape,
             outputs =  edm, dy, dx, cat, cat_next
         else:
             outputs = edm, dy, dx, cat
-        return DistnetModel([input], outputs, name=name, next=next)
+        return DistnetModel([input], outputs, name=name, next=next, cat_background=cat_background)
 
 def get_distnet_2d_sep_out(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
@@ -283,6 +288,7 @@ def get_distnet_2d_sep_out(input_shape,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
             residual_combine_size:int = 1,
+            cat_background = True, # categories include background or not
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
@@ -319,7 +325,7 @@ def get_distnet_2d_sep_out(input_shape,
                 decoder_out.append( decoder_sep_op(**param_list, output_names = ["Output0_EDM", "Output1_Contours"] if predict_contours else ["Output0_EDM"], name="DecoderEDM", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out=["linear", "sigmoid"] if predict_contours else "linear") )
                 decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
                 cat_names = [f"Output{3+output_inc}_Category", f"Output{4+output_inc}_CategoryNext"] if next else [f"Output{3+output_inc}_Category"]
-                decoder_out.append( decoder_sep2_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4) )
+                decoder_out.append( decoder_sep2_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4 if cat_background else 3) )
             else:
                 decoder_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx) )
 
@@ -373,7 +379,7 @@ def get_distnet_2d_sep_out(input_shape,
         dy, dx = decoder_out[1]([ upsampled[-1], last_residuals[1:] ])
         cat = decoder_out[2]([ upsampled[-1], last_residuals[1:] ])
         outputs = flatten_list([seg, dy, dx, cat])
-        return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours)
+        return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours, cat_background=cat_background)
 
 
 def get_distnet_2d_out_sep(input_shape,
@@ -386,6 +392,7 @@ def get_distnet_2d_out_sep(input_shape,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
             residual_combine_size:int = 1,
+            cat_background = True, # categories include background or not
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
     ):
@@ -419,7 +426,7 @@ def get_distnet_2d_out_sep(input_shape,
                 decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", filters_out=2 if next else 1) )
 
                 cat_names = [f"Output{3+output_inc}_Category", f"Output{4+output_inc}_CategoryNext"] if next else [f"Output{3+output_inc}_Category"]
-                decoder_out.append( decoder_sep_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4) )
+                decoder_out.append( decoder_sep_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4 if cat_background else 3) )
             else:
                 decoder_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx) )
 
@@ -447,7 +454,7 @@ def get_distnet_2d_out_sep(input_shape,
         dy, dx = decoder_out[1]([ upsampled[-1], residuals[-1] ])
         cat = decoder_out[2]([ upsampled[-1], residuals[-1] ])
         outputs = flatten_list([seg, dy, dx, cat])
-        return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours)
+        return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours, cat_background=cat_background)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"

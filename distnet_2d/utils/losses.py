@@ -29,23 +29,30 @@ def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=T
         return loss
     return loss_func
 
-def balanced_category_loss(original_loss_func, n_classes, max_class_ratio=1000, axis=-1, sparse=True, add_channel_axis=False, dtype='float32'):
+def balanced_category_loss(original_loss_func, n_classes, max_class_ratio=20, no_background=False, axis=-1, sparse=True, add_channel_axis=False, dtype='float32'):
     weight_limits = np.array([1./max_class_ratio, max_class_ratio]).astype(dtype)
     def loss_func(y_true, y_pred):
         if sparse:
             class_weights = tf.squeeze(y_true, axis=-1)
             if not class_weights.dtype.is_integer:
                 class_weights = tf.cast(class_weights, tf.int32)
-            class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
+            if no_background:
+                class_weights = tf.one_hot(class_weights, n_classes+1, dtype=dtype)
+                class_weights = class_weights[..., 1:] # remove background class
+            else:
+                class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
         else:
             class_weights = tf.cast(y_true, dtype=dtype)
 
         count = tf.cast(tf.size(y_true), dtype=tf.float32)
         class_count = tf.math.count_nonzero(class_weights, axis=tf.range(tf.rank(class_weights)-1), dtype=tf.float32)
+        class_count = tf.where(class_count==0, tf.reduce_max(class_count), class_count)
+        # zero -> max weight ?
         weight_list = tf.math.divide_no_nan(count, class_count)
         weight_list = tf.math.minimum(weight_limits[1], tf.math.maximum(weight_limits[0], weight_list))
         weight_list = tf.math.divide_no_nan(weight_list, tf.math.reduce_sum(weight_list) / tf.cast(n_classes, dtype=tf.float32)) # normalize so that sum of weights == n_classes
         weight_list = tf.cast(weight_list, dtype=dtype)
+        #print(f"class weights: {weight_list.numpy()}")
         class_weights = tf.reduce_sum(class_weights * weight_list, axis=-1, keepdims=False) # multiply with broadcast
 
         loss = original_loss_func(y_true, y_pred)
@@ -102,13 +109,13 @@ def edm_contour_loss(background_weight, edm_weight, contour_weight, l1=False, dt
             return tf.reduce_mean(loss, -1)
     return loss_func
 
-def balanced_background_binary_crossentropy(add_channel_axis=True, max_class_ratio=1000, **loss_kwargs):
+def balanced_background_binary_crossentropy(add_channel_axis=True, max_class_ratio=100, **loss_kwargs):
     return balanced_background_loss(tf.keras.losses.BinaryCrossentropy(**loss_kwargs), add_channel_axis, True, max_class_ratio)
 
-def balanced_background_l_norm(l2=True, add_channel_axis=True, max_class_ratio=1000, **loss_kwargs):
+def balanced_background_l_norm(l2=True, add_channel_axis=True, max_class_ratio=100, **loss_kwargs):
     return balanced_background_loss(tf.keras.losses.MeanSquaredError(**loss_kwargs) if l2 else tf.keras.losses.MeanAbsoluteError(**loss_kwargs), add_channel_axis, False, max_class_ratio)
 
-def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False, max_class_ratio=1000):
+def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False, max_class_ratio=100):
     def loss_func(y_true, y_pred, sample_weight=None):
         weight_map = _compute_background_weigh_map(y_true, y_true_bool, max_class_ratio)
         if add_channel_axis:
@@ -121,7 +128,7 @@ def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False, m
         return loss(y_true, y_pred, sample_weight=weight_map)
     return loss_func
 
-def _compute_background_weigh_map(y_true, bool=False, max_class_ratio=1000):
+def _compute_background_weigh_map(y_true, bool=False, max_class_ratio=100):
     fore_count = tf.math.count_nonzero(y_true, dtype=tf.float32)
     count = tf.cast(tf.size(y_true), dtype=tf.float32)
     weight_limits = np.array([1./max_class_ratio, max_class_ratio]).astype('float32')
