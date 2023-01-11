@@ -10,7 +10,7 @@ from .directional_2d_self_attention import Directional2DSelfAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_l_norm, balanced_background_binary_crossentropy
-from tensorflow.keras.losses import sparse_categorical_crossentropy, MeanSquaredError
+from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -69,9 +69,9 @@ class DistnetModel(Model):
                 assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
             else:
                 assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
-            self.category_loss=weighted_loss_by_category(sparse_categorical_crossentropy, category_weights)
+            self.category_loss=weighted_loss_by_category(SparseCategoricalCrossentropy(), category_weights)
         else:
-            self.category_loss = balanced_category_loss(sparse_categorical_crossentropy, 4 if cat_background else 3, no_background = not cat_background, max_class_ratio=kwargs.pop("max_class_ratio", 20))
+            self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4 if cat_background else 3, remove_background = not cat_background, min_class_frequency=kwargs.pop("min_class_frequency", 1./10), max_class_frequency=kwargs.pop("max_class_frequency", 10))
         self.displacement_loss = displacement_loss
         self.displacement_mean=displacement_mean
         super().__init__(*args, **kwargs)

@@ -14,7 +14,7 @@ def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=T
     n_classes = weight_list.shape[0]
     weight_list = n_classes * weight_list / np.sum(weight_list)
     weight_list = tf.cast(weight_list, dtype=dtype)
-    def loss_func(y_true, y_pred):
+    def loss_func(y_true, y_pred, sample_weight=None):
         if sparse:
             class_weights = tf.squeeze(y_true, axis=-1)
             if not class_weights.dtype.is_integer:
@@ -23,63 +23,63 @@ def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=T
         else:
             class_weights = tf.cast(y_true, dtype=dtype)
         class_weights = tf.reduce_sum(class_weights * weight_list, axis=-1, keepdims=False) # multiply with broadcast
-
-        loss = original_loss_func(y_true, y_pred)
-        loss = loss * class_weights
-        return loss
+        if sample_weight is not None:
+            class_weights = sample_weight * class_weights
+        return original_loss_func(y_true, y_pred, sample_weight=class_weights)
     return loss_func
 
-def balanced_category_loss(original_loss_func, n_classes, max_class_ratio=20, no_background=False, axis=-1, sparse=True, add_channel_axis=False, dtype='float32'):
-    weight_limits = np.array([1./max_class_ratio, max_class_ratio]).astype(dtype)
-    def loss_func(y_true, y_pred):
+def balanced_category_loss(original_loss_func, n_classes, min_class_frequency=1./10, max_class_frequency=10, remove_background=False, axis=-1, sparse=True, add_channel_axis=False, dtype='float32'):
+    weight_limits = np.array([min_class_frequency, max_class_frequency]).astype(dtype)
+    def loss_func(y_true, y_pred, sample_weight=None):
         if sparse:
             class_weights = tf.squeeze(y_true, axis=-1)
             if not class_weights.dtype.is_integer:
                 class_weights = tf.cast(class_weights, tf.int32)
-            if no_background:
+            if remove_background:
                 class_weights = tf.one_hot(class_weights, n_classes+1, dtype=dtype)
                 class_weights = class_weights[..., 1:] # remove background class
+                y_true = tf.where(y_true==tf.cast(0, y_true.dtype), 0, y_true-1) # remove background class
             else:
                 class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
         else:
             class_weights = tf.cast(y_true, dtype=dtype)
 
-        count = tf.cast(tf.size(y_true), dtype=tf.float32)
         class_count = tf.math.count_nonzero(class_weights, axis=tf.range(tf.rank(class_weights)-1), dtype=tf.float32)
-        class_count = tf.where(class_count==0, tf.reduce_max(class_count), class_count)
-        # zero -> max weight ?
+        count = tf.reduce_sum(class_count)
         weight_list = tf.math.divide_no_nan(count, class_count)
+        weight_list = tf.math.divide_no_nan(weight_list, tf.cast(n_classes, dtype=tf.float32)) # divide by class number so that balanced frequency of each class corresponds to the same frequency of 1/n_classes
         weight_list = tf.math.minimum(weight_limits[1], tf.math.maximum(weight_limits[0], weight_list))
-        weight_list = tf.math.divide_no_nan(weight_list, tf.math.reduce_sum(weight_list) / tf.cast(n_classes, dtype=tf.float32)) # normalize so that sum of weights == n_classes
+
         weight_list = tf.cast(weight_list, dtype=dtype)
         #print(f"class weights: {weight_list.numpy()}")
         class_weights = tf.reduce_sum(class_weights * weight_list, axis=-1, keepdims=False) # multiply with broadcast
-
-        loss = original_loss_func(y_true, y_pred)
-        loss = loss * class_weights
-        return loss
+        if sample_weight is not None:
+            class_weights = sample_weight * class_weights
+        return original_loss_func(y_true, y_pred, sample_weight=class_weights)
     return loss_func
 
 def weighted_binary_crossentropy(weights, add_channel_axis=True, **bce_kwargs):
     weights_cast = np.array(weights).astype("float32")
     assert weights_cast.shape[0] == 2, f"invalid weight number: expected: 2 given: {weights_cast.shape[0]}"
     bce = tf.keras.losses.BinaryCrossentropy(**bce_kwargs)
-    def loss_func(true, pred):
+    def loss_func(true, pred, sample_weight=None):
         weights = tf.where(true, weights_cast[1], weights_cast[0])
         if add_channel_axis:
             true = tf.expand_dims( true, -1)
             pred = tf.expand_dims( pred, -1)
         else:
             weights = tf.squeeze(weights, axis=-1)
+        if sample_weight is not None:
+            weights = sample_weight * weights
         return bce(true, pred, sample_weight=weights)
     return loss_func
 
-def balanced_displacement_loss(dMin, dMax, wMin, wMax, l2=True, add_channel_axis=True):
+def weighted_displacement_loss(dMin, dMax, wMin, wMax, l2=True, add_channel_axis=True):
     assert dMin<dMax, "expected dMin < dMax"
     params = np.array([dMin, dMax, wMin, wMax]).astype("float32")
     a = ( params[3] - params[2] ) / ( params[1] - params[0] )
     loss = tf.keras.losses.MeanSquaredError() if l2 else tf.keras.losses.MeanAbsoluteError()
-    def loss_func(true, pred):
+    def loss_func(true, pred, sample_weight=None):
         weights = tf.where(true<=params[0], params[2], params[3])
         weights = tf.where(tf.logical_and(true>params[0], true<params[1]), a * (true - params[0]) , weights)
         if add_channel_axis:
@@ -87,6 +87,8 @@ def balanced_displacement_loss(dMin, dMax, wMin, wMax, l2=True, add_channel_axis
             pred = tf.expand_dims( pred, -1)
         else:
             weights = tf.squeeze(weights, axis=-1)
+        if sample_weight is not None:
+            weights = sample_weight * weights
         return loss(true, pred, sample_weight=weights)
     return loss_func
 
@@ -109,15 +111,15 @@ def edm_contour_loss(background_weight, edm_weight, contour_weight, l1=False, dt
             return tf.reduce_mean(loss, -1)
     return loss_func
 
-def balanced_background_binary_crossentropy(add_channel_axis=True, max_class_ratio=100, **loss_kwargs):
-    return balanced_background_loss(tf.keras.losses.BinaryCrossentropy(**loss_kwargs), add_channel_axis, True, max_class_ratio)
+def balanced_background_binary_crossentropy(add_channel_axis=True, min_class_frequency=1./10, max_class_frequency=10, **loss_kwargs):
+    return balanced_background_loss(tf.keras.losses.BinaryCrossentropy(**loss_kwargs), add_channel_axis, True, min_class_frequency, max_class_frequency)
 
-def balanced_background_l_norm(l2=True, add_channel_axis=True, max_class_ratio=100, **loss_kwargs):
-    return balanced_background_loss(tf.keras.losses.MeanSquaredError(**loss_kwargs) if l2 else tf.keras.losses.MeanAbsoluteError(**loss_kwargs), add_channel_axis, False, max_class_ratio)
+def balanced_background_l_norm(l2=True, add_channel_axis=True, min_class_frequency=1./10, max_class_frequency=10, **loss_kwargs):
+    return balanced_background_loss(tf.keras.losses.MeanSquaredError(**loss_kwargs) if l2 else tf.keras.losses.MeanAbsoluteError(**loss_kwargs), add_channel_axis, False, min_class_frequency, max_class_frequency)
 
-def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False, max_class_ratio=100):
+def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False, min_class_frequency=1./10, max_class_frequency=10):
     def loss_func(y_true, y_pred, sample_weight=None):
-        weight_map = _compute_background_weigh_map(y_true, y_true_bool, max_class_ratio)
+        weight_map = _compute_background_weigh_map(y_true, y_true_bool, min_class_frequency, max_class_frequency)
         if add_channel_axis:
             y_true = tf.expand_dims( y_true, -1)
             y_pred = tf.expand_dims( y_pred, -1)
@@ -128,16 +130,13 @@ def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False, m
         return loss(y_true, y_pred, sample_weight=weight_map)
     return loss_func
 
-def _compute_background_weigh_map(y_true, bool=False, max_class_ratio=100):
+def _compute_background_weigh_map(y_true, bool=False, min_class_frequency=1./10, max_class_frequency=10):
     fore_count = tf.math.count_nonzero(y_true, dtype=tf.float32)
     count = tf.cast(tf.size(y_true), dtype=tf.float32)
-    weight_limits = np.array([1./max_class_ratio, max_class_ratio]).astype('float32')
-    fore_w = count / fore_count
-    bck_w = count / (count - fore_count)
+    weight_limits = np.array([min_class_frequency, max_class_frequency]).astype('float32')
+    fore_w = 0.5 * count / fore_count
+    bck_w = 0.5 * count / (count - fore_count)
     fore_w = tf.math.minimum(weight_limits[1], tf.math.maximum(weight_limits[0], fore_w))
     bck_w = tf.math.minimum(weight_limits[1], tf.math.maximum(weight_limits[0], bck_w))
-
-    norm = 0.5 * (fore_w + bck_w) # scale the loss so that sum of weights == class number
-    fore_w = fore_w / norm
-    bck_w = bck_w / norm
+    #print(f"bck weight map: fore: {fore_w.numpy()} bck: {bck_w.numpy()} count fore: {fore_count.numpy()} total: {count.numpy()}")
     return tf.where(y_true, fore_w, bck_w) if bool else tf.where(y_true==tf.cast(0, y_true.dtype), bck_w, fore_w)
