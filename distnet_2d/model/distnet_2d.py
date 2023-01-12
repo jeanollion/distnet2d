@@ -9,7 +9,7 @@ from .attention import Attention
 from .directional_2d_self_attention import Directional2DSelfAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
-from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_l_norm, balanced_background_binary_crossentropy
+from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 
 ENCODER_SETTINGS = [
@@ -50,7 +50,7 @@ DECODER_SETTINGS_DS = [
 
 class DistnetModel(Model):
     def __init__(self, *args,
-        edm_loss_weight=1, contour_loss_weight=1, displacement_loss_weight=1, category_loss_weight=1, displacement_var_weight=1./10, displacement_var_max=50, edm_loss=balanced_background_l_norm(),
+        edm_loss_weight=1, contour_loss_weight=1, displacement_loss_weight=1, category_loss_weight=1, displacement_var_weight=1./10, displacement_var_max=50, edm_loss=MeanSquaredError(),
         contour_loss = balanced_background_binary_crossentropy(),
         displacement_loss = MeanSquaredError(),
         displacement_mean = False,

@@ -38,7 +38,7 @@ def balanced_category_loss(original_loss_func, n_classes, min_class_frequency=1.
             if remove_background:
                 class_weights = tf.one_hot(class_weights, n_classes+1, dtype=dtype)
                 class_weights = class_weights[..., 1:] # remove background class
-                y_true = tf.where(y_true==tf.cast(0, y_true.dtype), 0, y_true-1) # remove background class
+                y_true = tf.where(y_true==tf.cast(0, y_true.dtype), 0, y_true-tf.cast(1, y_true.dtype)) # remove background class
             else:
                 class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
         else:
@@ -113,9 +113,6 @@ def edm_contour_loss(background_weight, edm_weight, contour_weight, l1=False, dt
 
 def balanced_background_binary_crossentropy(add_channel_axis=True, min_class_frequency=1./10, max_class_frequency=10, **loss_kwargs):
     return balanced_background_loss(tf.keras.losses.BinaryCrossentropy(**loss_kwargs), add_channel_axis, True, min_class_frequency, max_class_frequency)
-
-def balanced_background_l_norm(l2=True, add_channel_axis=True, min_class_frequency=1./10, max_class_frequency=10, **loss_kwargs):
-    return balanced_background_loss(tf.keras.losses.MeanSquaredError(**loss_kwargs) if l2 else tf.keras.losses.MeanAbsoluteError(**loss_kwargs), add_channel_axis, False, min_class_frequency, max_class_frequency)
 
 def balanced_background_loss(loss, add_channel_axis=True, y_true_bool = False, min_class_frequency=1./10, max_class_frequency=10):
     def loss_func(y_true, y_pred, sample_weight=None):
