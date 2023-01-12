@@ -38,7 +38,7 @@ def balanced_category_loss(original_loss_func, n_classes, min_class_frequency=1.
             if remove_background:
                 class_weights = tf.one_hot(class_weights, n_classes+1, dtype=dtype)
                 class_weights = class_weights[..., 1:] # remove background class
-                y_true = tf.where(y_true==tf.cast(0, y_true.dtype), 0, y_true-tf.cast(1, y_true.dtype)) # remove background class
+                y_true = tf.where(y_true==tf.cast(0, y_true.dtype), tf.cast(0, y_true.dtype), y_true-tf.cast(1, y_true.dtype)) # remove background class
             else:
                 class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
         else:
