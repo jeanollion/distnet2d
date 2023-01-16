@@ -58,6 +58,7 @@ class DistnetModel(Model):
         **kwargs):
         self.contours = kwargs.pop("contours", False)
         self.next = kwargs.pop("next", False)
+        self.frame_window = kwargs.pop("frame_window", 1)
         self.update_loss_weights(edm_loss_weight, contour_loss_weight, displacement_loss_weight, category_loss_weight)
         self.displacement_var_weight=displacement_var_weight
         self.displacement_var_max=displacement_var_max
@@ -84,11 +85,11 @@ class DistnetModel(Model):
         x, y = data
         displacement_weight = self.displacement_weight / 2. # y & x
         displacement_var_weight = self.displacement_var_weight
-        category_weight = self.category_weight / (2. if self.next else 1)
+        category_weight = self.category_weight / (self.frame_window * (2. if self.next else 1))
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
 
-        if len(y) == 5 + (1 if self.contours else 0):
+        if len(y) == 4 + (1 if self.contours else 0):
             label_rank, label_size = self._get_label_rank_and_size(y[-1])
             displacement_weight = displacement_weight / 2.
         else :
@@ -137,11 +138,9 @@ class DistnetModel(Model):
             losses["displacement"] = tf.reduce_mean(d_loss)
 
             # category loss
-            if self.next:
-                y_cat_prev, y_cat_next = tf.split(y[3+inc], 2, axis=-1)
-                cat_loss = self.category_loss(y_cat_prev, y_pred[3+inc]) + self.category_loss(y_cat_next, y_pred[4+inc])
-            else:
-                cat_loss = self.category_loss(y[3+inc], y_pred[3+inc])
+            cat_loss = 0
+            for i in range(self.frame_window * (2 if self.next else 1)):
+                cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
             loss = loss + cat_loss * category_weight
             losses["category"] = tf.reduce_mean(cat_loss)
             losses["loss"] = tf.reduce_mean(loss)
@@ -482,7 +481,7 @@ def get_distnet_2d_sep_out_fw(input_shape,
         dy, dx = decoder_out[1]([ upsampled[-1], last_residuals[1:] ])
         cat = decoder_out[2]([ upsampled[-1], [last_residuals[frame_window]]*frame_window + last_residuals[frame_window+1:] ])
         outputs = flatten_list([seg, dy, dx, cat])
-        return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours)
+        return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours, frame_window=frame_window)
 
 
 # one encoder + one decoder per output
