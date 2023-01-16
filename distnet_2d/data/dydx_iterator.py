@@ -18,7 +18,7 @@ class DyDxIterator(TrackingIterator):
         return_categories:bool = True,
         erase_edge_cell_size:int = 50,
         aug_remove_prob:float = 0.01,
-        aug_frame_subsampling = 4, # either int: subsampling interval will be drawn uniformly in [1,aug_frame_subsampling] or callable that generate an subsampling interval (int)
+        aug_frame_subsampling = 4, # either int: subsampling interval will be drawn uniformly in [frame_window,aug_frame_subsampling] or callable that generate an subsampling interval (int)
         frame_window=1,
         extract_tile_function = extract_tile_random_zoom_function(tile_shape=(128, 128), n_tiles=8, zoom_range=[0.6, 1.6], aspect_ratio_range=[0.75, 1.5], random_channel_jitter_shape=[50, 50] ),
         elasticdeform_parameters:dict = {},
@@ -27,8 +27,7 @@ class DyDxIterator(TrackingIterator):
         return_label_rank = False,
         output_float16=False,
         **kwargs):
-        if len(channel_keywords)!=3:
-            raise ValueError('keyword should contain 3 elements in this order: grayscale input images, object labels, object previous labels')
+        assert len(channel_keywords)==3, 'keyword should contain 3 elements in this order: grayscale input images, object labels, object previous labels'
 
         self.return_categories=return_categories
         self.downscale=downscale_displacement_and_categories
@@ -37,6 +36,7 @@ class DyDxIterator(TrackingIterator):
         self.output_float16=output_float16
         self.return_contours=return_contours
         self.return_label_rank=return_label_rank
+        assert frame_window>=1, "frame_window must be >=1"
         self.frame_window = frame_window
         super().__init__(dataset=dataset,
                     channel_keywords=channel_keywords,
@@ -45,6 +45,7 @@ class DyDxIterator(TrackingIterator):
                     channels_prev=[True]*3,
                     channels_next=[next]*3,
                     mask_channels=[1, 2],
+                    n_frames = self.frame_window,
                     aug_remove_prob=aug_remove_prob,
                     aug_all_frames=False,
                     convert_masks_to_dtype=False,
@@ -69,6 +70,19 @@ class DyDxIterator(TrackingIterator):
         batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False, **kwargs)
         if not issubclass(batch_by_channel[1].dtype.type, np.integer): # label
             batch_by_channel[1] = batch_by_channel[1].astype(np.int32)
+        # correction for oob @ previous labels
+        for b in range(batch_by_channel[2].shape[0]):
+            for i in range(n_frames):
+                inc = n_frames - i
+                prev_inc = aug_param_array[b][ref_channel].get(f"prev_inc_{inc}", inc)
+                if prev_inc!=inc:
+                    #print(f"oob prev: n_frames={n_frames}, idx:{i} inc={inc} actual inc:{prev_inc} will replace at {i+1}")
+                    batch_by_channel[2][b][...,i+1] = batch_by_channel[1][b][...,i]
+                if self.channels_next[1]:
+                    next_inc = aug_param_array[b][ref_channel].get(f"next_inc_{inc}", inc)
+                    if next_inc!=inc:
+                        #print(f"oob next: n_frames={n_frames}, idx:{i} inc={inc} actual inc:{next_inc} will replace prev labels at {n_frames+inc}")
+                        batch_by_channel[2][b][...,n_frames+inc] = batch_by_channel[1][b][...,n_frames+inc-1]
         # get previous labels and store in -666 output_position BEFORE applying tiling and elastic deform
         self._get_prev_label(batch_by_channel, n_frames)
         batch_by_channel[-1] = batch_by_channel[0].shape[0] # batch size is recorded here: in case of tiling it will be usefull
@@ -76,6 +90,7 @@ class DyDxIterator(TrackingIterator):
         if n_frames>1: # remove unused frames
             sel = self._get_end_points(n_frames, False)
             channels = [c for c in batch_by_channel if c>=0]
+            #print(f"remove unused frames: nframes: {n_frames*2+1} sel: {sel} channels: {channels}")
             for c in channels:
                 batch_by_channel[c] = batch_by_channel[c][..., sel]
 
@@ -100,9 +115,9 @@ class DyDxIterator(TrackingIterator):
 
     def _get_end_points(self, n_frames, pairs):
         return_next = self.channels_next[1]
-        end_points = [n_frames * i/self.frame_window for i in range(0, self.frame_window+1)]
+        end_points = [int(n_frames * i/self.frame_window + 0.5) for i in range(0, self.frame_window+1)]
         if return_next:
-            end_points = end_points + [n_frames + n_frames * i/self.frame_window for i in range(1, self.frame_window+1)]
+            end_points = end_points + [n_frames + int(n_frames * i/self.frame_window + 0.5) for i in range(1, self.frame_window+1)]
         if pairs:
             end_point_pairs = [[end_points[i], n_frames] for i in range(0, self.frame_window)]
             if return_next:
@@ -119,21 +134,11 @@ class DyDxIterator(TrackingIterator):
         if n_frames <=0:
             n_frames = 1
         assert labelIms.shape[-1]==prevlabelIms.shape[-1] and labelIms.shape[-1]==1+n_frames*(2 if return_next else 1), f"invalid channel number: labels: {labelIms.shape[-1]} prev labels: {prevlabelIms.shape[-1]} n_frames: {n_frames}"
-        end_points_pairs = self._get_end_points(n_frames, True)
-        print(f"n_frames: {n_frames}, frame_window: {self.frame_window}, return_next: {return_next}, end_points: {self._get_end_points(n_frames, False)}, end_points_pairs: {end_point_pairs}")
+        end_point_pairs = self._get_end_points(n_frames, True)
+        #print(f"n_frames: {n_frames}, nchan: {labelIms.shape[-1]}, frame_window: {self.frame_window}, return_next: {return_next}, end_points: {self._get_end_points(n_frames, False)}, end_point_pairs: {end_point_pairs}")
         for b in range(labelIms.shape[0]):
             prev_label_map.append(_compute_prev_label_map(labelIms[b], prevlabelIms[b], end_point_pairs))
         batch_by_channel[-666] = prev_label_map
-
-    def _get_input_batch(self, batch_by_channel, ref_chan_idx, aug_param_array):
-        input = super()._get_input_batch(batch_by_channel, ref_chan_idx, aug_param_array)
-        return_next = self.channels_next[1]
-        n_frames = (input.shape[-1]-1)//2 if return_next else input.shape[-1]-1
-        if n_frames>1:
-            sel = self._get_end_points(n_frames, False)
-            return input[..., sel] # only return prev, cur & next frames
-        else:
-            return input
 
     def _get_output_batch(self, batch_by_channel, ref_chan_idx, aug_param_array):
         # dx & dy are computed and returned along with edm and categories
@@ -152,11 +157,11 @@ class DyDxIterator(TrackingIterator):
             # cur timepoint
             self._erase_small_objects_at_edges(labelIms[i,...,self.frame_window], i, mask_to_erase_cur, mask_to_erase_chan_cur, batch_by_channel)
             # prev timepoints
-            for i in range(0, self.frame_window):
-                self._erase_small_objects_at_edges(labelIms[i,...,i], i, mask_to_erase_prev, [m+i for m in mask_to_erase_chan_prev], batch_by_channel)
+            for j in range(0, self.frame_window):
+                self._erase_small_objects_at_edges(labelIms[i,...,j], i, mask_to_erase_prev, [m+j for m in mask_to_erase_chan_prev], batch_by_channel)
             if return_next:
-                for i in range(0, self.frame_window):
-                    self._erase_small_objects_at_edges(labelIms[i,...,self.frame_window+1+i], i, mask_to_erase_next, [m+i for m in mask_to_erase_chan_next], batch_by_channel)
+                for j in range(0, self.frame_window):
+                    self._erase_small_objects_at_edges(labelIms[i,...,self.frame_window+1+j], i, mask_to_erase_next, [m+j for m in mask_to_erase_chan_next], batch_by_channel)
 
         dyIm = np.zeros(labelIms.shape[:-1]+(2 * self.frame_window if return_next else self.frame_window,), dtype=self.dtype)
         dxIm = np.zeros(labelIms.shape[:-1]+(2 * self.frame_window if return_next else self.frame_window,), dtype=self.dtype)
@@ -177,17 +182,16 @@ class DyDxIterator(TrackingIterator):
             bidx = get_idx(i)
             for c in range(0, self.frame_window):
                 sel = [c, self.frame_window]
-                _compute_displacement(labelIms[i,...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], categories[i,...,c] if self.return_categories else None, label_rank[i,...,c] if self.return_label_rank else None)
+                _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], categories[i,...,c] if self.return_categories else None, label_rank[i,...,c] if self.return_label_rank else None)
             if return_next:
                 for c in range(self.frame_window, 2*self.frame_window):
                     sel = [self.frame_window, c+1]
-                    _compute_displacement(labelIms[i,...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], categories[i,...,c] if self.return_categories else None, label_rank[i,...,c] if self.return_label_rank else None)
+                    _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], categories[i,...,c] if self.return_categories else None, label_rank[i,...,c] if self.return_label_rank else None)
 
         other_output_channels = [chan_idx for chan_idx in self.output_channels if chan_idx!=1 and chan_idx!=2]
         all_channels = [batch_by_channel[chan_idx] for chan_idx in other_output_channels]
 
-        edm_c = 3 if return_next else 2
-        edm = np.zeros(shape = labelIms.shape[:-1]+(edm_c,), dtype=np.float32)
+        edm = np.zeros(shape = labelIms.shape, dtype=np.float32)
         for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
             edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
         all_channels.insert(0, edm)
