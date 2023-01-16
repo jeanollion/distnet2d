@@ -28,19 +28,14 @@ def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=T
         return original_loss_func(y_true, y_pred, sample_weight=class_weights)
     return loss_func
 
-def balanced_category_loss(original_loss_func, n_classes, min_class_frequency=1./10, max_class_frequency=10, remove_background=False, axis=-1, sparse=True, add_channel_axis=False, dtype='float32'):
+def balanced_category_loss(original_loss_func, n_classes, min_class_frequency=1./10, max_class_frequency=10, axis=-1, sparse=True, add_channel_axis=False, dtype='float32'):
     weight_limits = np.array([min_class_frequency, max_class_frequency]).astype(dtype)
     def loss_func(y_true, y_pred, sample_weight=None):
         if sparse:
             class_weights = tf.squeeze(y_true, axis=-1)
             if not class_weights.dtype.is_integer:
                 class_weights = tf.cast(class_weights, tf.int32)
-            if remove_background:
-                class_weights = tf.one_hot(class_weights, n_classes+1, dtype=dtype)
-                class_weights = class_weights[..., 1:] # remove background class
-                y_true = tf.where(y_true==tf.cast(0, y_true.dtype), tf.cast(0, y_true.dtype), y_true-tf.cast(1, y_true.dtype)) # remove background class
-            else:
-                class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
+            class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
         else:
             class_weights = tf.cast(y_true, dtype=dtype)
 
