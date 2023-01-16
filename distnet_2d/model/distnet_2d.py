@@ -89,9 +89,10 @@ class DistnetModel(Model):
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
 
-        if len(y) == 4 + (1 if self.contours else 0):
+        if len(y) == 5 + (1 if self.contours else 0):
             label_rank, label_size = self._get_label_rank_and_size(y[-1])
-            displacement_weight = displacement_weight / 2.
+            if self.displacement_mean:
+                displacement_weight = displacement_weight / 2.
         else :
             label_rank = None
         with tf.GradientTape() as tape:
