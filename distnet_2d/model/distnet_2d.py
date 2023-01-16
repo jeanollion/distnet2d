@@ -63,15 +63,11 @@ class DistnetModel(Model):
         self.displacement_var_max=displacement_var_max
         self.edm_loss = edm_loss
         self.contour_loss = contour_loss
-        cat_background = kwargs.pop("cat_background", True)
         if category_weights is not None:
-            if cat_background:
-                assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
-            else:
-                assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
+            assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
             self.category_loss=weighted_loss_by_category(SparseCategoricalCrossentropy(), category_weights)
         else:
-            self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4 if cat_background else 3, remove_background = not cat_background, min_class_frequency=kwargs.pop("min_class_frequency", 1./10), max_class_frequency=kwargs.pop("max_class_frequency", 10))
+            self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4, min_class_frequency=kwargs.pop("min_class_frequency", 1./10), max_class_frequency=kwargs.pop("max_class_frequency", 10))
         self.displacement_loss = displacement_loss
         self.displacement_mean=displacement_mean
         super().__init__(*args, **kwargs)
