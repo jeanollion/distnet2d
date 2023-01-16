@@ -132,7 +132,7 @@ class DyDxIterator(TrackingIterator):
         return_next = self.channels_next[1]
         prev_label_map = []
         if n_frames <=0:
-            n_frames = 1
+            n_frames = self.frame_window
         assert labelIms.shape[-1]==prevlabelIms.shape[-1] and labelIms.shape[-1]==1+n_frames*(2 if return_next else 1), f"invalid channel number: labels: {labelIms.shape[-1]} prev labels: {prevlabelIms.shape[-1]} n_frames: {n_frames}"
         end_point_pairs = self._get_end_points(n_frames, True)
         #print(f"n_frames: {n_frames}, nchan: {labelIms.shape[-1]}, frame_window: {self.frame_window}, return_next: {return_next}, end_points: {self._get_end_points(n_frames, False)}, end_point_pairs: {end_point_pairs}")
