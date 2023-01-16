@@ -405,13 +405,13 @@ def get_distnet_2d_sep_out_fw(input_shape,
             op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
-            combine_residual_layer.append(Combine(filters=residual_filters * 2, kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
+            combine_residual_layer.append(Combine(filters=residual_filters, kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
         # define feature operations
         feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
         attention_op = Attention(positional_encoding="2D", name="Attention")
         self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
         self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
-        combine_features_op = Combine(filters=attention_filters//2, kernel_size=residual_combine_size, name="CombineFeatures")
+        combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
         attention_combine = Combine(filters=attention_filters//2, name="AttentionCombine")
         attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
 
