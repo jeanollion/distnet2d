@@ -113,6 +113,12 @@ class DyDxIterator(TrackingIterator):
 
         return batch_by_channel, aug_param_array, ref_channel
 
+    def _get_frames_to_augment(self, img, chan_idx, aug_params):
+        if self.aug_all_frames:
+            return list(range(img.shape[-1]))
+        n_frames = (img.shape[-1]-1)//2 if self.channels_prev[chan_idx] and self.channels_next[chan_idx] else img.shape[-1]-1
+        return self._get_end_points(n_frames, False)
+
     def _get_end_points(self, n_frames, pairs):
         return_next = self.channels_next[1]
         end_points = [int(n_frames * i/self.frame_window + 0.5) for i in range(0, self.frame_window+1)]

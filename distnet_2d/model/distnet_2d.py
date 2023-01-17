@@ -487,7 +487,6 @@ def get_distnet_2d_sep_out_fw(input_shape,
         outputs = flatten_list([seg, dy, dx, cat])
         return DistnetModel([input], outputs, name=name, next = next, contours = predict_contours, frame_window=frame_window)
 
-
 # one encoder + one decoder per output
 def get_distnet_2d_out_sep(input_shape,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
