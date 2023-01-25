@@ -256,7 +256,7 @@ class DistnetModel(Model):
 
     def _get_center(self, center, center_fun, label_rank):
         center_ob = label_rank * tf.expand_dims(center, -1) # (B, Y, X, T, N)
-        shape = center_ob.shape
+        shape = tf.shape(center_ob)
         center_ob = tf.reshape(center_ob, tf.concat([shape[:3], [-1]], 0) ) #(B, Y, X, TxN)
         center_ob = center_fun(center_ob) # (B, 1, 1, TxN, 2)
         return tf.reshape(center_ob, tf.concat([shape[:1], [1, 1], shape[-2:], [2]],0)) # (B, 1, 1, T, N, 2)
