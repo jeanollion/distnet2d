@@ -18,11 +18,11 @@ class SoftArgmax2D(Layer):
         self.kernel = tf.constant(generate_kernel(Y, X, C), dtype = tf.float32)
 
     def call(self,x):
-        _, Y, X, C = x.shape.as_list()
+        B, Y, X, C = x.shape.as_list()
         count = tf.expand_dims(tf.math.count_nonzero(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, C, 1)
-        x = tf.reshape(x, (-1, Y*X, C))
+        x = tf.reshape(x, (B, -1, C))
         x = tf.nn.softmax(x * self.beta, axis = 1)
-        x = tf.reshape(x, (-1, Y, X, C))
+        x = tf.reshape(x, (B, Y, X, C))
         argmax = tf.nn.depthwise_conv2d(x, self.kernel, strides= [1,1,1,1], padding='VALID')
         argmax = tf.reshape(argmax, (-1, 1, 1, C, 2))
         return tf.where(count==0, tf.constant(float('NaN')), argmax) # when no values should return nan
@@ -32,12 +32,12 @@ class SoftArgmax2D(Layer):
 
 def get_soft_argmax_2d_fun(beta=1e2):
     def sam(x):
-        _, Y, X, C = x.shape.as_list()
+        B, Y, X, C = x.shape.as_list()
         kernel = tf.constant(generate_kernel(Y, X, C), dtype = tf.float32)
         count = tf.expand_dims(tf.math.count_nonzero(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, C, 1)
-        x = tf.reshape(x, (-1, Y*X, C))
+        x = tf.reshape(x, (B, -1, C))
         x = tf.nn.softmax(x * beta, axis = 1)
-        x = tf.reshape(x, (-1, Y, X, C))
+        x = tf.reshape(x, (B, Y, X, C))
         argmax = tf.nn.depthwise_conv2d(x, kernel, strides= [1,1,1,1], padding='VALID')
         argmax = tf.reshape(argmax, (-1, 1, 1, C, 2))
         return tf.where(count==0, tf.constant(float('NaN')), argmax) # when no values should return nan
