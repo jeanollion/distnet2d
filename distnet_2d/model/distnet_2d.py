@@ -128,11 +128,17 @@ class DistnetModel(Model):
         inc = 1 if self.predict_contours else 0
         inc += 1 if self.predict_center else 0
         if len(y) == 6 + inc: # y = edm, contour, center, dy, dX, cat, no_next, label_rank
-            label_rank, label_size = self._get_label_rank_and_size(y[-1]) # (B, Y, X, C, T, N) & (B, 1, 1, C, T, N)
+            label_rank, label_size, N = self._get_label_rank_and_size(y[-1]) # (B, Y, X, C, T, N) & (B, 1, 1, C, T, N)
             if self.displacement_mean:
                 displacement_weight = displacement_weight / 2.
         else :
             label_rank = None
+            if self.predict_center and self.predict_contours:
+                assert len(y) == 6, f"invalid number of output. Expected: 6 actual {len(y)}"
+            elif self.predict_center or self.predict_contours:
+                assert len(y) == 5, f"invalid number of output. Expected: 5 actual {len(y)}"
+            else:
+                assert len(y) == 4, f"invalid number of output. Expected: 4 actual {len(y)}"
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)  # Forward pass
             # compute loss
@@ -176,7 +182,7 @@ class DistnetModel(Model):
                     center_pred = y_pred[inc] # (B, Y, X, T)
                     center_pred_ob = self._get_center(center_pred, self.get_center, label_rank) # (B, 1, 1, T, N, 2)
                     no_prev = tf.equal(self._get_mean_by_object(y[3+inc], label_rank_sel, label_size_sel, project=False), tf.cast(3, tf.float32))[...,tf.newaxis] # (B, 1, 1, T-1, N, 1)
-                    no_next = y[-2][...,:label_rank.shape.as_list()[-1]] # (B, T-1, N) # trim no_next from (B, T-1, n_label_max)
+                    no_next = y[-2][...,:N] # (B, T-1, N) # trim no_next from (B, T-1, n_label_max)
                     no_next = no_next[:, tf.newaxis, tf.newaxis, :, :, tf.newaxis] # (B, 1, 1, T-1, N, 1)
                     # current -> previous:  move cur so that it corresponds to prev
                     center_pred_ob_cur = center_pred_ob[...,fw:fw+1,:,:]
@@ -189,7 +195,6 @@ class DistnetModel(Model):
                     center_pred_ob_prev = tf.where(no_next[...,:fw, :, :], nan, center_pred_ob_prev)
                     center_pred_ob_prev = self.center_spead(center_pred_ob_prev) # (B, Y, X, FW)
                     center_displacement_loss = self.center_displacement_loss(center_pred_ob_prev, center_pred_ob_cur_to_prev) # (B, Y, X, FW)
-
                     if self.next:
                         # next -> current : move next so that it corresponds to current
                         center_pred_ob_next = center_pred_ob[...,fw+1:,:,:] # (B, 1, 1, FW, N, 2)
@@ -232,6 +237,7 @@ class DistnetModel(Model):
                 displacement_wm = None
             # pixel-wise displacement loss
             d_loss = self.displacement_loss(dy_t, tf.expand_dims(y_pred[1+inc], -1), sample_weight=displacement_wm) + self.displacement_loss(dx_t, tf.expand_dims(y_pred[2+inc], -1), sample_weight=displacement_wm)
+
             loss = loss + d_loss * displacement_weight
             losses["displacement"] = tf.reduce_mean(d_loss)
 
@@ -256,10 +262,7 @@ class DistnetModel(Model):
 
     def _get_center(self, center, center_fun, label_rank):
         center_ob = label_rank * tf.expand_dims(center, -1) # (B, Y, X, T, N)
-        shape = tf.shape(center_ob)
-        center_ob = tf.reshape(center_ob, tf.concat([shape[:3], [-1]], 0) ) #(B, Y, X, TxN)
-        center_ob = center_fun(center_ob) # (B, 1, 1, TxN, 2)
-        return tf.reshape(center_ob, tf.concat([shape[:1], [1, 1], shape[-2:], [2]],0)) # (B, 1, 1, T, N, 2)
+        return center_fun(center_ob) # (B, 1, 1, T, N, 2)
 
     def _get_mean_by_object(self, data, label_rank, label_size, project=True):
         wsum = tf.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2], keepdims = True)
@@ -274,7 +277,7 @@ class DistnetModel(Model):
         N = tf.math.maximum(1, tf.math.reduce_max(labels)) # in case of empty image: 1
         label_rank = tf.one_hot(labels-1, N, dtype=tf.float32) # B, Y, X, T, N
         label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True) # B, 1, 1, T, N
-        return label_rank, label_size
+        return label_rank, label_size, N
 
 # one encoder per input + one decoder + one last level of decoder per output + custom frame window size
 def get_distnet_2d_sep_out_fw(input_shape, # Y, X

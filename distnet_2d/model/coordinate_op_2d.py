@@ -31,21 +31,6 @@ class SoftArgmax2D(Layer):
     def compute_output_shape(self, input_shape):  # (B, Y, X, C)
         return (input_shape[0], 1, 1, input_shape[3], 2)  # (B, 1, 1, C, 2)
 
-def get_soft_argmax_2d_fun(beta=1e2):
-    @tf.function
-    def sam(x):
-        B, Y, X, C = x.shape.as_list()
-        shape = tf.shape(x)
-        kernel = tf.constant(generate_kernel(Y, X, C), dtype = tf.float32)
-        count = tf.expand_dims(tf.math.count_nonzero(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, C, 1)
-        x = tf.reshape(x, tf.concat([shape[:1], [-1], shape[-1:]], 0))
-        x = tf.nn.softmax(x * beta, axis = 1)
-        x = tf.reshape(x, shape)
-        argmax = tf.nn.depthwise_conv2d(x, kernel, strides= [1,1,1,1], padding='VALID')
-        argmax = tf.reshape(argmax, tf.concat([shape[:1], [1, 1], shape[-1:], [2]], 0))
-        return tf.where(count==0, tf.constant(float('NaN')), argmax) # when no values should return nan
-    return sam
-
 class WeightedMean2D(Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -66,17 +51,41 @@ class WeightedMean2D(Layer):
         return (input_shape[0], 1, 1, input_shape[-1], 2) # (B, 1, 1, C, 2)
 
 
-def get_weighted_mean_2d_fun():
-    #@tf.function ??
-    def wm(x):
-        _, Y, X, C = x.shape.as_list() # HOW TO DO THIS IN EAGER MODE ? GENERATE KERNEL WITH TF ?
+
+def get_soft_argmax_2d_fun(beta=1e2, two_channel_axes=True):
+    @tf.function
+    def sam(x):
+        Y, X = get_spatial_kernels(*x.shape.as_list()[1:3], two_channel_axes)
         shape = tf.shape(x)
-        kernel = tf.constant(generate_kernel(Y, X, C), dtype = tf.float32)
-        wsum = tf.nn.depthwise_conv2d(x, kernel, strides= [1,1,1,1], padding='VALID')
-        wsum = tf.reshape(wsum, tf.concat([shape[:1], [1, 1], shape[-1:], [2]], 0))
-        sum = tf.expand_dims(tf.reduce_sum(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, C, 1)
-        return tf.math.divide(wsum, sum) # when no values should return nan
+        count = tf.expand_dims(tf.math.count_nonzero(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, T, C, 1)
+        x = tf.reshape(x, tf.concat([shape[:1], [-1], shape[-1:]], 0))
+        x = tf.nn.softmax(x * beta, axis = 1)
+        x = tf.reshape(x, shape)
+        argmax_y = tf.reduce_sum(x*Y, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
+        argmax_x = tf.reduce_sum(x*X, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
+        argmax = tf.stack([argmax_y, argmax_x], -1) # (B, 1, 1, T, C, 2)
+        return tf.where(count==0, tf.constant(float('NaN')), argmax) # when no values should return nan
+    return sam
+
+def get_weighted_mean_2d_fun(two_channel_axes=True):
+    @tf.function
+    def wm(x):
+        shape = tf.shape(x)
+        Y, X = get_spatial_kernels(*x.shape.as_list()[1:3], two_channel_axes)
+        wsum_y = tf.reduce_sum(x * Y, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
+        wsum_x = tf.reduce_sum(x * X, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
+        wsum = tf.stack([wsum_y, wsum_x], -1) # (B, 1, 1, T, C, 2)
+        sum = tf.expand_dims(tf.reduce_sum(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, T, C, 1)
+        return tf.math.divide(wsum, sum) # when no values should return nan # (B, 1, 1, T, C, 2)
     return wm
+
+def get_spatial_kernels(Y, X, two_channel_axes=True):
+    Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')
+    if two_channel_axes:
+        return Y[tf.newaxis][..., tf.newaxis, tf.newaxis], X[tf.newaxis][..., tf.newaxis, tf.newaxis]
+    else:
+        return Y[tf.newaxis][..., tf.newaxis], X[tf.newaxis][..., tf.newaxis]
+
 
 class GaussianSpread(Layer): # convert a coordinate to a gaussian distribution centered at the coordinate
     def __init__(self, sigma, sizeY=None, sizeX=None, kernel=None, objectwise=True, **kwargs):
