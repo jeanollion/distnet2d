@@ -11,7 +11,7 @@ from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
-from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_gaussian_spread_fun
+from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -63,10 +63,10 @@ class DistnetModel(Model):
         predict_contours = True,
         predict_center = False,
         center_mode = "MEAN", # among MAX, MEAN
-        edm_center_mode = "MAX", # among MAX, MEAN or NONE
+        edm_center_mode = "MAX", # among MAX, MEAN, SKELETON or NONE
         center_softargmax_beta = 1e2,
         center_sigma = 4,
-        contour_sigma = 1,
+        contour_sigma = 0.5,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.predict_contours = predict_contours
@@ -80,7 +80,7 @@ class DistnetModel(Model):
             if center_mode == "MAX":
                 self.get_center = get_soft_argmax_2d_fun(beta=center_softargmax_beta)
             elif center_mode == "MEAN":
-                self.get_center=get_weighted_mean_2d_fun()
+                self.get_center = get_weighted_mean_2d_fun()
             else:
                 self.get_center = None
             if self.get_center is not None:
@@ -90,6 +90,8 @@ class DistnetModel(Model):
                 self.edm_to_center = get_soft_argmax_2d_fun(beta=center_softargmax_beta)
             elif edm_center_mode == "EDM_MEAN":
                 self.edm_to_center = get_weighted_mean_2d_fun()
+            elif center_mode == "SKELETON":
+                self.edm_to_center = get_skeleton_center_fun()
             else:
                 self.edm_to_center = None
             if self.edm_to_center is not None:
@@ -113,7 +115,6 @@ class DistnetModel(Model):
             self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
         self.displacement_loss = displacement_loss
         self.displacement_mean=displacement_mean
-
 
     def update_loss_weights(self, edm_weight=1, contour_weight=1, center_weight=1, displacement_weight=1, category_weight=1, normalize=True): # TODO: normalize per decoder head ?
         sum = edm_weight + (contour_weight if self.predict_contours else 0) + (center_weight if self.predict_center else 0) + displacement_weight + category_weight if normalize else 1
@@ -219,9 +220,9 @@ class DistnetModel(Model):
                     losses["center_displacement"] = tf.reduce_mean(center_displacement_loss)
 
                 if self.predict_center and self.edm_to_center is not None: # center edm loss
-                    edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1)) # (B, 1, 1, T, N, 2)
-                    edm_center_ob = self.center_spead(edm_center_ob) # (B, Y, X, T)
-                    edm_center_loss = self.edm_center_loss(center_pred, edm_center_ob)
+                    edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
+                    edm_center = self.center_spead(edm_center_ob) # (B, Y, X, T)
+                    edm_center_loss = self.edm_center_loss(center_pred, edm_center)
                     loss = loss + edm_center_loss * center_weight
                     losses["edm_center"] = tf.reduce_mean(edm_center_loss)
 
@@ -296,6 +297,8 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             residual_combine_size:int = 3,
             frame_window:int = 1,
             predict_center = False,
+            center_mode = "MEAN", # among MAX, MEAN
+            edm_center_mode = "SKELETON", # among MAX, MEAN, SKELETON or NONE
             next:bool=True,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
@@ -403,7 +406,7 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         dy, dx = decoder_out[1]([ upsampled[-1], residuals_displacement ])
         cat = decoder_out[2]([ upsampled[-1], residuals_displacement ])
         outputs = flatten_list([seg, dy, dx, cat])
-        return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims)
+        return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, center_mode=center_mode, edm_center_mode=edm_center_mode)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"

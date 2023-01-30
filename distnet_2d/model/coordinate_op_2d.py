@@ -5,7 +5,7 @@ from tensorflow.keras.losses import MeanSquaredError
 
 def get_soft_argmax_2d_fun(beta=1e2, two_channel_axes=True):
     @tf.function
-    def sam(x):
+    def sam(x, x_flat=None, label_rank=None):
         Y, X = _get_spatial_kernels(*x.shape.as_list()[1:3], two_channel_axes)
         shape = tf.shape(x)
         count = tf.expand_dims(tf.math.count_nonzero(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, T, C, 1)
@@ -20,7 +20,7 @@ def get_soft_argmax_2d_fun(beta=1e2, two_channel_axes=True):
 
 def get_weighted_mean_2d_fun(two_channel_axes=True):
     @tf.function
-    def wm(x):
+    def wm(x, x_flat=None, label_rank=None):
         shape = tf.shape(x)
         Y, X = _get_spatial_kernels(*x.shape.as_list()[1:3], two_channel_axes)
         wsum_y = tf.reduce_sum(x * Y, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
@@ -29,6 +29,23 @@ def get_weighted_mean_2d_fun(two_channel_axes=True):
         sum = tf.expand_dims(tf.reduce_sum(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, T, C, 1)
         return tf.math.divide(wsum, sum) # when no values should return nan # (B, 1, 1, T, C, 2)
     return wm
+
+def get_skeleton_center_fun(w = 0.1):
+    wm = get_weighted_mean_2d_fun(True)
+    @tf.function
+    def sk(edm_ob, edm, label_rank): # (B, Y, X, T, N), (B, Y, X, T), (B, Y, X, T, N)
+        shape = tf.shape(edm)
+        Y, X = _get_spatial_kernels(shape[1], shape[2], True)
+        center = wm(edm_ob) # B, 1, 1, T, N, 2
+        mp = tf.nn.max_pool(edm, ksize=3, strides=1, padding="SAME")
+        lm = tf.where(tf.math.equal(mp, edm), 1., 0.) # TODO: also limit to edm > 1 ?
+        lm = label_rank * tf.expand_dims(lm, -1) # B, Y, X, T, N
+        lm_coords = tf.stack([lm * Y, lm * X], -1) # B, Y, X, T, N, 2
+        lm_dist = tf.math.reduce_sum(tf.math.square(lm_coords - center), [-1], keepdims = False) # B, Y, X, T, N
+        lm_dist_inv = tf.math.divide_no_nan(1., lm_dist + w)
+        lm_dist_inv = lm * lm_dist_inv # mask other than lm
+        return wm(lm_dist_inv)
+    return sk
 
 def get_gaussian_spread_fun(sigma, Y, X, objectwise=True):
     kernel = _generate_kernel(Y, X, O=1 if objectwise else 0) # (Y, X, 1, 2) or # (Y, X, 1, 1, 2)

@@ -5,6 +5,7 @@ import numpy.ma as ma
 from scipy.ndimage import center_of_mass, find_objects, maximum_filter
 from scipy.ndimage.measurements import mean
 from skimage.transform import rescale
+from skimage.feature import peak_local_max
 from math import copysign
 import sys
 import itertools
@@ -25,9 +26,9 @@ class DyDxIterator(TrackingIterator):
         elasticdeform_parameters:dict = {},
         downscale_displacement_and_categories=1,
         return_contours = False,
-        contour_sigma = 1,
+        contour_sigma = 0.5,
         return_center = False,
-        center_mode = "GEOMETRICAL", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN"
+        center_mode = "GEOMETRICAL", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON"
         center_sigma = 3,
         return_label_rank = False,
         output_float16=False,
@@ -290,6 +291,24 @@ def _get_labels_and_centers(labelIm, edm, center_mode = "GEOMETRICAL"):
     elif center_mode == "EDM_MEAN":
         assert edm is not None and edm.shape == labelIm.shape
         centers = center_of_mass(edm, labelIm, labels)
+    elif center_mode == "SKELETON":
+        assert edm is not None and edm.shape == labelIm.shape
+        mass_centers = np.array(center_of_mass(labelIm, labelIm, labels))[np.newaxis] # 1, N_ob, 2
+        lm_coords = peak_local_max(edm, labels = labelIm) # N_lm, 2
+        lm_coords_l = labelIm[lm_coords[:,0], lm_coords[:,1]] # N_lm
+        # labels in labelIm are not necessarily continuous -> replace by rank
+        label_rank = np.zeros(shape=(max(labels)+1,), dtype=np.int32)
+        for l in labels:
+            label_rank[l] = labels.index(l)
+        lm_coords_l = label_rank[lm_coords_l]
+        lm_coords_l = np.eye(len(labels))[lm_coords_l] # N_lm, N_ob
+        lm_coords_ob = lm_coords[:,np.newaxis] * lm_coords_l[...,np.newaxis] # N_lm, N_ob, 1
+        lm_coords_dist = np.sum(np.square(mass_centers - lm_coords_ob), 2, keepdims=True) # N_lm, N_ob, 1
+        lm_coords_dinv= 1./(lm_coords_dist + 0.1) # N_lm, N_ob, 1
+        lm_coords_dinv = lm_coords_dinv * lm_coords_ob # erase weights that are outside object
+        wsum=np.sum(lm_coords_ob * lm_coords_dinv, 0, keepdims=False) # N_ob, 2
+        sum=np.sum(lm_coords_dinv, 0, keepdims=False) # N_ob, 1
+        centers = wsum / sum # N_ob, 2
     else:
         raise ValueError(f"Invalid center mode: {center_mode}")
     return dict(zip(labels, centers))
