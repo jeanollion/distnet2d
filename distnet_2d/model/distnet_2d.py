@@ -51,7 +51,7 @@ DECODER_SETTINGS_DS = [
 
 class DistnetModel(Model):
     def __init__(self, *args, spatial_dims,
-        edm_loss_weight=1, contour_loss_weight=1, displacement_loss_weight=1, category_loss_weight=1, displacement_var_weight=1./10, displacement_var_max=50, edm_loss=MeanSquaredError(),
+        edm_loss_weight=1, contour_loss_weight=1, center_loss_weight=1, edm_center_loss_weight=0.1, center_displacement_loss_weight=0.1, displacement_loss_weight=1, category_loss_weight=1, displacement_var_weight=1./10, displacement_var_max=50, edm_loss=MeanSquaredError(),
         contour_loss = MeanSquaredError(),
         center_loss = MeanSquaredError(),
         displacement_loss = MeanSquaredError(),
@@ -101,7 +101,9 @@ class DistnetModel(Model):
             self.contour_edm_loss = MeanSquaredError()
         self.next = next
         self.frame_window = frame_window
-        self.update_loss_weights(edm_loss_weight, contour_loss_weight, displacement_loss_weight, category_loss_weight)
+        self.update_loss_weights(edm_loss_weight, contour_loss_weight, center_loss_weight, displacement_loss_weight, category_loss_weight)
+        self.edm_center_weight = edm_center_loss_weight
+        self.center_displacement_weight = center_displacement_loss_weight
         self.displacement_var_weight=displacement_var_weight
         self.displacement_var_max=displacement_var_max
         self.edm_loss = edm_loss
@@ -215,8 +217,7 @@ class DistnetModel(Model):
                         center_pred_ob_cur = tf.where(no_next[...,fw:, :, :], nan, center_pred_ob_cur)
                         center_pred_ob_cur = self.center_spead(center_pred_ob_cur) # (B, Y, X, FW)
                         center_displacement_loss += self.center_displacement_loss(center_pred_ob_cur, center_pred_ob_next_to_cur)
-
-                    loss = loss + center_displacement_loss * (center_weight / (2. if self.next else 1.))
+                    loss = loss + center_displacement_loss * (self.center_displacement_weight / (2. if self.next else 1.))
                     losses["center_displacement"] = tf.reduce_mean(center_displacement_loss)
 
                 if self.predict_center and self.edm_to_center is not None: # center edm loss
@@ -224,7 +225,7 @@ class DistnetModel(Model):
                     edm_center = self.center_spead(edm_center_ob) # (B, Y, X, T)
                     center_pred = y_pred[inc]
                     edm_center_loss = self.edm_center_loss(center_pred, edm_center)
-                    loss = loss + edm_center_loss * center_weight
+                    loss = loss + edm_center_loss * self.edm_center_weight
                     losses["edm_center"] = tf.reduce_mean(edm_center_loss)
 
                 if self.displacement_var_weight>0: # enforce homogeneity : increase weight
