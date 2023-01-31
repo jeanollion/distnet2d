@@ -224,7 +224,7 @@ class DistnetModel(Model):
                     edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center = self.center_spead(edm_center_ob) # (B, Y, X, T)
                     center_pred = y_pred[inc]
-                    edm_center_loss = self.edm_center_loss(y[inc], edm_center)
+                    edm_center_loss = self.edm_center_loss(center_pred, edm_center)
                     loss = loss + edm_center_loss * self.edm_center_weight
                     losses["edm_center"] = tf.reduce_mean(edm_center_loss)
 
