@@ -51,7 +51,10 @@ DECODER_SETTINGS_DS = [
 
 class DistnetModel(Model):
     def __init__(self, *args, spatial_dims,
-        edm_loss_weight=1, contour_loss_weight=1, center_loss_weight=1, edm_center_loss_weight=0.1, center_displacement_loss_weight=0.1, displacement_loss_weight=1, category_loss_weight=1, displacement_var_weight=1./10, displacement_var_max=50, edm_loss=MeanSquaredError(),
+        edm_loss_weight=1, contour_loss_weight=1, center_loss_weight=1, edm_center_loss_weight=0.1, displacement_loss_weight=1, center_displacement_loss_weight=0.1, center_displacement_pred=False,
+        displacement_var_weight=1./10, displacement_var_max=50,
+        category_loss_weight=1,
+        edm_loss=MeanSquaredError(),
         contour_loss = MeanSquaredError(),
         center_loss = MeanSquaredError(),
         displacement_loss = MeanSquaredError(),
@@ -104,6 +107,7 @@ class DistnetModel(Model):
         self.update_loss_weights(edm_loss_weight, contour_loss_weight, center_loss_weight, displacement_loss_weight, category_loss_weight)
         self.edm_center_weight = edm_center_loss_weight
         self.center_displacement_weight = center_displacement_loss_weight
+        self.center_displacement_pred=center_displacement_pred
         self.displacement_var_weight=displacement_var_weight
         self.displacement_var_max=displacement_var_max
         self.edm_loss = edm_loss
@@ -184,9 +188,13 @@ class DistnetModel(Model):
             if label_rank is not None: # label rank is returned : object-wise loss
                 label_rank_sel = tf.concat([tf.tile(label_rank[..., fw:fw+1, :], [1,1,1,fw,1]), label_rank[..., fw+1:, :]], axis=-2)
                 label_size_sel = tf.concat([tf.tile(label_size[..., fw:fw+1, :], [1,1,1,fw,1]), label_size[..., fw+1:, :]], axis=-2)
+                if self.center_displacement_pred or self.displacement_var_weight>0 or self.displacement_mean
                 dym_pred_center, dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank_sel, label_size_sel)
                 dxm_pred_center, dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank_sel, label_size_sel)
                 if self.predict_center and self.get_center is not None: # center+displacement coherence loss
+                    if not self.center_displacement_pred:
+                        dym_pred_center = self._get_mean_by_object(y[1+inc], label_rank_sel, label_size_sel, project=False)
+                        dxm_pred_center = self._get_mean_by_object(y[2+inc], label_rank_sel, label_size_sel, project=False)
                     # predicted  center coord per object
                     nan = tf.cast(float('NaN'), tf.float32)
                     d_pred_center = tf.stack([dym_pred_center, dxm_pred_center], -1) # (B, 1, 1, T-1, N, 2)
@@ -226,7 +234,7 @@ class DistnetModel(Model):
                     center_pred = y_pred[inc]
                     edm_center_loss = self.edm_center_loss(center_pred, edm_center)
                     loss = loss + edm_center_loss * self.edm_center_weight
-                    losses["edm_center"] = tf.reduce_mean(edm_center_loss)
+                    losses["center_edm"] = tf.reduce_mean(edm_center_loss)
 
                 if self.displacement_var_weight>0: # enforce homogeneity : increase weight
                     _, dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank_sel, label_size_sel)
