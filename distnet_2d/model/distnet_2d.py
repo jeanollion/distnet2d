@@ -222,6 +222,7 @@ class DistnetModel(Model):
                 if self.predict_center and self.edm_to_center is not None: # center edm loss
                     edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center = self.center_spead(edm_center_ob) # (B, Y, X, T)
+                    center_pred = y_pred[inc]
                     edm_center_loss = self.edm_center_loss(center_pred, edm_center)
                     loss = loss + edm_center_loss * center_weight
                     losses["edm_center"] = tf.reduce_mean(edm_center_loss)
@@ -298,7 +299,7 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             frame_window:int = 1,
             predict_center = False,
             center_mode = "MEAN", # among MAX, MEAN
-            edm_center_mode = "SKELETON", # among MAX, MEAN, SKELETON or NONE
+            edm_center_mode = "MEAN", # among MAX, MEAN, SKELETON or NONE
             next:bool=True,
             name: str="DiSTNet2D",
             l2_reg: float=1e-5,
