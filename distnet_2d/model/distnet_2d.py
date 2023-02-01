@@ -200,7 +200,7 @@ class DistnetModel(Model):
                     d_pred_center = tf.stack([dym_pred_center, dxm_pred_center], -1) # (B, 1, 1, T-1, N, 2)
                     center_pred = y_pred[inc] # (B, Y, X, T)
                     center_pred_ob = self.get_center(label_rank * tf.expand_dims(center_pred, -1))
-                    no_prev = tf.equal(self._get_mean_by_object(y[3+inc], label_rank_sel, label_size_sel, project=False), tf.cast(3, tf.float32))[...,tf.newaxis] # (B, 1, 1, T-1, N, 1)
+                    no_prev = tf.equal(self._get_mean_by_object(y[3+inc], label_rank_sel, label_size_sel, project=False), tf.cast(3, tf.float32))[...,tf.newaxis] # (B, 1, 1, T-1, N, 1) # no prev is category #3
                     no_next = y[-2][...,:N] # (B, T-1, N) # trim no_next from (B, T-1, n_label_max)
                     no_next = no_next[:, tf.newaxis, tf.newaxis, :, :, tf.newaxis] # (B, 1, 1, T-1, N, 1)
                     # current -> previous:  move cur so that it corresponds to prev
@@ -209,6 +209,7 @@ class DistnetModel(Model):
                     # remove centers with no prev
                     center_pred_ob_cur_to_prev = tf.where(no_prev[...,:fw, :, :], nan, center_pred_ob_cur_to_prev)
                     center_pred_ob_cur_to_prev = self.center_spead(center_pred_ob_cur_to_prev) # (B, Y, X, FW)
+
                     # target is previous centers excluding those with no_next
                     center_pred_ob_prev = center_pred_ob[...,:fw,:,:]
                     center_pred_ob_prev = tf.where(no_next[...,:fw, :, :], nan, center_pred_ob_prev)
@@ -224,7 +225,7 @@ class DistnetModel(Model):
                         # target is current centers excluding those with no_next
                         center_pred_ob_cur = tf.where(no_next[...,fw:, :, :], nan, center_pred_ob_cur)
                         center_pred_ob_cur = self.center_spead(center_pred_ob_cur) # (B, Y, X, FW)
-                        center_displacement_loss += self.center_displacement_loss(center_pred_ob_cur, center_pred_ob_next_to_cur)
+                        center_displacement_loss = center_displacement_loss + self.center_displacement_loss(center_pred_ob_cur, center_pred_ob_next_to_cur)
                     loss = loss + center_displacement_loss * (self.center_displacement_weight / (2. if self.next else 1.))
                     losses["center_displacement"] = tf.reduce_mean(center_displacement_loss)
 
@@ -344,15 +345,17 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         if predict_contours:
             output_inc += 1
             seg_out += ["Output1_Contours"]
-            activation_out += ["linear"]
+            activation_out += ["sigmoid"] # sigmoid  ?
         if predict_center:
             output_inc += 1
-            seg_out += [f"Output{output_inc}_Center"]
-            activation_out += ["linear"]
+            #seg_out += [f"Output{output_inc}_Center"]
+            #activation_out += ["sigmoid"] # sigmoid  ?
 
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 decoder_out.append( decoder_sep_op(**param_list, output_names =seg_out, name="DecoderSegmentation", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out=activation_out ))
+                if predict_center:
+                    decoder_out.append( decoder_sep_op(**param_list, output_names =[f"Output{output_inc}_Center"], name="DecoderCenter", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="sigmoid"))
                 decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
                 cat_names = [f"Output_Category_{i}" for i in range(0, frame_window)]
                 if next:
