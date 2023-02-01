@@ -416,8 +416,13 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         if next:
             residuals_displacement+=last_residuals[frame_window+1:] # next are from next->central
         seg = decoder_out[0]([ upsampled[-1], last_residuals ])
-        dy, dx = decoder_out[1]([ upsampled[-1], residuals_displacement ])
-        cat = decoder_out[2]([ upsampled[-1], residuals_displacement ])
+        d_inc=0
+        if predict_center:
+            center = decoder_out[1]([ upsampled[-1], last_residuals ])
+            seg.append(center)
+            d_inc += 1
+        dy, dx = decoder_out[1+d_inc]([ upsampled[-1], residuals_displacement ])
+        cat = decoder_out[2+d_inc]([ upsampled[-1], residuals_displacement ])
         outputs = flatten_list([seg, dy, dx, cat])
         return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, center_mode=center_mode, edm_center_mode=edm_center_mode)
 
