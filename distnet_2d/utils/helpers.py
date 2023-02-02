@@ -30,6 +30,8 @@ def flatten_list(l):
     return flat_list
 
 def append_to_list(l, element):
+    if isinstance(element, tuple):
+        element = list(element)
     if isinstance(element, list):
         l.extend(element)
     else:

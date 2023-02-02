@@ -6,8 +6,8 @@ from tensorflow.keras.losses import MeanSquaredError
 def get_soft_argmax_2d_fun(beta=1e2, two_channel_axes=True):
     @tf.function
     def sam(x, x_flat=None, label_rank=None):
-        Y, X = _get_spatial_kernels(*x.shape.as_list()[1:3], two_channel_axes)
         shape = tf.shape(x)
+        Y, X = _get_spatial_kernels(shape[1], shape[2], two_channel_axes)
         count = tf.expand_dims(tf.math.count_nonzero(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, T, C, 1)
         x = tf.reshape(x, tf.concat([shape[:1], [-1], shape[-1:]], 0))
         x = tf.nn.softmax(x * beta, axis = 1)
@@ -22,7 +22,7 @@ def get_weighted_mean_2d_fun(two_channel_axes=True):
     @tf.function
     def wm(x, x_flat=None, label_rank=None):
         shape = tf.shape(x)
-        Y, X = _get_spatial_kernels(*x.shape.as_list()[1:3], two_channel_axes)
+        Y, X = _get_spatial_kernels(shape[1], shape[2], two_channel_axes)
         wsum_y = tf.reduce_sum(x * Y, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
         wsum_x = tf.reduce_sum(x * X, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
         wsum = tf.stack([wsum_y, wsum_x], -1) # (B, 1, 1, T, C, 2)
