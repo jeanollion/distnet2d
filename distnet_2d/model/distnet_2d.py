@@ -90,9 +90,9 @@ class DistnetModel(Model):
         self.edm_center_mode=edm_center_mode
         if edm_center_mode == "MAX":
             self.edm_to_center = get_soft_argmax_2d_fun(beta=center_softargmax_beta)
-        elif edm_center_mode == "EDM_MEAN":
+        elif edm_center_mode == "MEAN":
             self.edm_to_center = get_weighted_mean_2d_fun()
-        elif center_mode == "SKELETON":
+        elif edm_center_mode == "SKELETON":
             self.edm_to_center = get_skeleton_center_fun()
         else:
             self.edm_to_center = None
@@ -176,7 +176,7 @@ class DistnetModel(Model):
                     edm_c = tf.where(tf.math.greater_equal(y_pred[0], one), tf.math.exp(tf.math.square(y_pred[0]-1) * mul), zero)
                     contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(y_pred[1], edm_c))
                     loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
-                    losses["contour_edm"] = contour_edm_loss
+                    losses["edm_contour"] = contour_edm_loss
             elif self.contour_sigma>0:
                 mul = -1./(self.contour_sigma * self.contour_sigma)
                 one = tf.cast(1, tf.float32)
@@ -185,7 +185,7 @@ class DistnetModel(Model):
                 edm_c_true = tf.where(tf.math.greater_equal(y[0], one), tf.math.exp(tf.math.square(y[0]-1) * mul), zero)
                 contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(edm_c_true, edm_c_pred))
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
-                losses["contour_edm"] = contour_edm_loss
+                losses["edm_contour"] = contour_edm_loss
 
             if self.predict_center:
                 inc+=1
@@ -241,19 +241,18 @@ class DistnetModel(Model):
                     center_displacement_loss = tf.reduce_mean(center_displacement_loss)
                     loss = loss + center_displacement_loss * (self.center_displacement_weight / (2. if self.next else 1.))
                     losses["center_displacement"] = center_displacement_loss
-
-                if self.predict_center and self.edm_to_center is not None: # center edm loss
+                edm_center_weight: {self.edm_center_weight}")
+                if self.predict_center and self.edm_to_center is not None and self.edm_center_weight>0: # center edm loss
                     edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
-
                     edm_center_loss = tf.reduce_mean(self.edm_center_loss(center_pred_ob, edm_center_ob))
                     loss = loss + edm_center_loss * self.edm_center_weight
-                    losses["center_edm"] = edm_center_loss
-                elif self.edm_to_center is not None:
+                    losses["edm_center"] = edm_center_loss
+                elif self.edm_to_center is not None and self.edm_center_weight>0:
                     edm_center_ob_pred = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center_ob_true = self.edm_to_center(label_rank * tf.expand_dims(y[0], -1), y[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center_loss = tf.reduce_mean(self.edm_center_loss(edm_center_ob_true, edm_center_ob_pred))
                     loss = loss + edm_center_loss * self.edm_center_weight
-                    losses["center_edm"] = edm_center_loss
+                    losses["edm_center"] = edm_center_loss
                 if self.displacement_var_weight>0: # enforce homogeneity : increase weight
                     _, dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank_sel, label_size_sel)
                     vary = dy2m_pred - tf.math.square(dym_pred)
