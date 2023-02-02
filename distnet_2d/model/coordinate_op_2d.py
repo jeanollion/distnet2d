@@ -63,6 +63,15 @@ def get_gaussian_spread_fun(sigma, Y, X, objectwise=True):
         return exp
     return gs
 
+def get_euclidean_distance_loss(objectwise=True):
+    sum_axis = [-1, -2] if objectwise else [-1]
+    def loss(true, pred): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2)
+        na_mask = tf.math.is_nan(true) # empty objects
+        zero = tf.cast(0, true.dtype)
+        true = tf.where(na_mask, zero, true)
+        pred = tf.where(na_mask, zero, pred)
+        return tf.math.reduce_sum(tf.math.square(true - pred), axis=sum_axis, keepdims=False) #(B, 1, 1)
+    return loss
 def _get_spatial_kernels(Y, X, two_channel_axes=True):
     Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')
     if two_channel_axes:
