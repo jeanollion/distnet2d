@@ -96,8 +96,8 @@ class DistnetModel(Model):
         else:
             self.edm_to_center = None
         if self.edm_to_center is not None:
-            self.edm_center_loss = get_euclidean_distance_loss()
-        self.center_displacement_loss = get_euclidean_distance_loss()
+            self.edm_center_loss = get_euclidean_distance_loss(spatial_dims)
+        self.center_displacement_loss = get_euclidean_distance_loss(spatial_dims)
         self.contour_sigma = contour_sigma
         if self.contour_sigma>0:
             self.contour_edm_loss = MeanSquaredError()
@@ -240,19 +240,19 @@ class DistnetModel(Model):
                         center_pred_ob_cur_from_next = tf.where(no_prev[...,fw:, :, :], nan, center_pred_ob_cur_from_next)
                         center_pred_ob_prev = tf.stack([center_pred_ob_prev, center_pred_ob_cur_from_next], axis=-3)
                         center_pred_ob_cur_to_prev = tf.stack([center_pred_ob_cur_to_prev, center_pred_ob_next_to_cur], axis=-3)
-                    center_displacement_loss = tf.reduce_mean(self.center_displacement_loss(center_pred_ob_prev, center_pred_ob_cur_to_prev))
+                    center_displacement_loss = tf.reduce_mean(self.center_displacement_loss(center_pred_ob_prev, center_pred_ob_cur_to_prev, object_size=label_size_sel))
                     loss = loss + center_displacement_loss * self.center_displacement_weight
                     losses["center_displacement"] = center_displacement_loss
                 if self.predict_center and self.edm_to_center is not None and self.edm_center_weight>0: # center edm loss
                     edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
-                    edm_center_loss = tf.reduce_mean(self.edm_center_loss(center_pred_ob, edm_center_ob))
+                    edm_center_loss = tf.reduce_mean(self.edm_center_loss(center_pred_ob, edm_center_ob, object_size=label_size))
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = edm_center_loss
                 elif self.edm_to_center is not None and self.edm_center_weight>0:
                     edm_center_ob_pred = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center_ob_true = self.edm_to_center(label_rank * tf.expand_dims(y[0], -1), y[0], label_rank) # (B, 1, 1, T, N, 2)
 
-                    edm_center_loss = tf.reduce_mean(self.edm_center_loss(edm_center_ob_true, edm_center_ob_pred))
+                    edm_center_loss = tf.reduce_mean(self.edm_center_loss(edm_center_ob_true, edm_center_ob_pred, object_size=label_size))
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = edm_center_loss
                 if self.displacement_var_weight>0: # enforce homogeneity : increase weight

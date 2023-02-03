@@ -26,9 +26,8 @@ def get_edm_max_2d_fun(tolerance = 0.9, two_channel_axes=True):
     @tf.function
     def sam(x, x_flat=None, label_rank=None):
         edm_max = tf.math.reduce_max(x, axis=[1, 2], keepdims = True) * tolerance
-        print(f"edm max: \n{edm_max[0, 0, 0]}")
-        x = tf.where(tf.greater_equal(x, edm_max), x, zero)
-        return wm(x)
+        mask = tf.cast(tf.greater_equal(x, edm_max), tf.float32)
+        return wm(x * mask)
     return sam
 
 def get_weighted_mean_2d_fun(two_channel_axes=True):
@@ -51,7 +50,7 @@ def get_skeleton_center_fun(w = 0.1):
         Y, X = _get_spatial_kernels(shape[1], shape[2], True)
         center = wm(edm_ob) # B, 1, 1, T, N, 2
         mp = tf.nn.max_pool(edm, ksize=3, strides=1, padding="SAME")
-        lm = tf.where(tf.math.equal(mp, edm), 1., 0.) # TODO: also limit to edm > 1 ?
+        lm = tf.cast(tf.math.equal(mp, edm), tf.float32) # TODO: also limit to edm > 1 ?
         lm = label_rank * tf.expand_dims(lm, -1) # B, Y, X, T, N
         lm_coords = tf.stack([lm * Y, lm * X], -1) # B, Y, X, T, N, 2
         lm_dist = tf.math.reduce_sum(tf.math.square(lm_coords - center), [-1], keepdims = False) # B, Y, X, T, N
@@ -76,18 +75,19 @@ def get_gaussian_spread_fun(sigma, Y, X, objectwise=True):
         return exp
     return gs
 
-def get_euclidean_distance_loss(objectwise=True):
+def get_euclidean_distance_loss(image_shape, objectwise=True):
     sum_axis = [-1, -2] if objectwise else [-1]
-    def loss(true, pred): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2)
-        na_mask = tf.math.is_nan(true) # empty objects
-        zero = tf.cast(0, true.dtype)
-        true = tf.where(na_mask, zero, true)
-        pred = tf.where(na_mask, zero, pred)
+    im_scale = tf.cast(1./(image_shape[0]*image_shape[1]), tf.float32)
+    def loss(true, pred, object_size=None): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2), and (B, 1, 1, C, N)
+        no_na_mask = tf.cast(tf.math.logical_not(tf.math.is_nan(true[...,:1])), tf.float32) # empty objects
+        true = true * no_na_mask
+        pred = pred * no_na_mask
         d = tf.math.reduce_sum(tf.math.square(true - pred), axis=sum_axis, keepdims=False) #(B, 1, 1, C)
-        if objectwise: # divide by object number
-            c = tf.reduce_sum(tf.cast(tf.math.logical_not(na_mask[...,0]), tf.float32), axis=-1, keepdims=False) #(B, 1, 1, C)
-            d = tf.math.divide(d, c)
-            d = tf.where(tf.math.is_nan(d), zero, d)
+        if objectwise: # normalize by object size / image size
+            object_size = object_size * no_na_mask[...,0]
+            norm = tf.reduce_sum(object_size, axis=-1, keepdims=False) * im_scale #(B, 1, 1, C)
+            d = tf.math.divide_no_nan(d, norm)
+            #d = tf.where(tf.math.is_nan(d), zero, d)
         return d
     return loss
 def _get_spatial_kernels(Y, X, two_channel_axes=True):

@@ -278,7 +278,7 @@ def _get_labels_and_centers(labelIm, edm, center_mode = "GEOMETRICAL"):
     labels = np.unique(labelIm)
     labels = [int(round(l)) for l in labels if l!=0]
     if len(labels)==0:
-        return [],[]
+        return dict()
     if center_mode == "GEOMETRICAL":
         centers = center_of_mass(labelIm, labelIm, labels)
     elif center_mode == "EDM_MAX":
