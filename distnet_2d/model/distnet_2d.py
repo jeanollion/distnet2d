@@ -252,7 +252,6 @@ class DistnetModel(Model):
                 elif self.edm_to_center is not None and self.edm_center_weight>0:
                     edm_center_ob_pred = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center_ob_true = self.edm_to_center(label_rank * tf.expand_dims(y[0], -1), y[0], label_rank) # (B, 1, 1, T, N, 2)
-
                     edm_center_loss = tf.reduce_mean(self.edm_center_loss(edm_center_ob_true, edm_center_ob_pred, object_size=label_size))
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = edm_center_loss
