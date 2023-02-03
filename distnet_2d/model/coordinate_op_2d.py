@@ -12,10 +12,23 @@ def get_soft_argmax_2d_fun(beta=1e2, two_channel_axes=True):
         x = tf.reshape(x, tf.concat([shape[:1], [-1], shape[-1:]], 0))
         x = tf.nn.softmax(x * beta, axis = 1)
         x = tf.reshape(x, shape)
+        x = label_rank * x
         argmax_y = tf.reduce_sum(x*Y, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
         argmax_x = tf.reduce_sum(x*X, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
         argmax = tf.stack([argmax_y, argmax_x], -1) # (B, 1, 1, T, C, 2)
         return tf.where(count==0, tf.constant(float('NaN')), argmax) # when no values should return nan
+    return sam
+
+def get_edm_max_2d_fun(tolerance = 0.9, two_channel_axes=True):
+    tolerance = tf.cast(tolerance, tf.float32)
+    zero = tf.cast(0, tf.float32)
+    wm = get_weighted_mean_2d_fun(two_channel_axes)
+    @tf.function
+    def sam(x, x_flat=None, label_rank=None):
+        edm_max = tf.math.reduce_max(x, axis=[1, 2], keepdims = True) * tolerance
+        print(f"edm max: \n{edm_max[0, 0, 0]}")
+        x = tf.where(tf.greater_equal(x, edm_max), x, zero)
+        return wm(x)
     return sam
 
 def get_weighted_mean_2d_fun(two_channel_axes=True):
@@ -70,7 +83,12 @@ def get_euclidean_distance_loss(objectwise=True):
         zero = tf.cast(0, true.dtype)
         true = tf.where(na_mask, zero, true)
         pred = tf.where(na_mask, zero, pred)
-        return tf.math.reduce_sum(tf.math.square(true - pred), axis=sum_axis, keepdims=False) #(B, 1, 1)
+        d = tf.math.reduce_sum(tf.math.square(true - pred), axis=sum_axis, keepdims=False) #(B, 1, 1, C)
+        if objectwise: # divide by object number
+            c = tf.reduce_sum(tf.cast(tf.math.logical_not(na_mask[...,0]), tf.float32), axis=-1, keepdims=False) #(B, 1, 1, C)
+            d = tf.math.divide(d, c)
+            d = tf.where(tf.math.is_nan(d), zero, d)
+        return d
     return loss
 def _get_spatial_kernels(Y, X, two_channel_axes=True):
     Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')

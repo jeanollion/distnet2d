@@ -11,7 +11,7 @@ from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
-from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, get_euclidean_distance_loss
+from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, get_euclidean_distance_loss, get_edm_max_2d_fun
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -67,7 +67,8 @@ class DistnetModel(Model):
         predict_center = False,
         center_mode = "MEAN", # among MAX, MEAN
         edm_center_mode = "MAX", # among MAX, MEAN, SKELETON or NONE
-        center_softargmax_beta = 10,
+        center_softargmax_beta = 1e2,
+        center_edm_max_tolerance = 0.9,
         center_sigma = 4,
         contour_sigma = 1.,
         **kwargs):
@@ -80,16 +81,14 @@ class DistnetModel(Model):
         self.center_spead = get_gaussian_spread_fun(center_sigma, spatial_dims[0], spatial_dims[1], objectwise=True)
         self.center_mode = center_mode
         if center_mode == "MAX":
-            self.get_center = get_soft_argmax_2d_fun(beta=center_softargmax_beta)
+            self.get_center = get_edm_max_2d_fun(center_edm_max_tolerance) #get_soft_argmax_2d_fun(beta=center_softargmax_beta)
         elif center_mode == "MEAN":
             self.get_center = get_weighted_mean_2d_fun()
         else:
             self.get_center = None
-        if self.get_center is not None:
-            self.center_displacement_loss = MeanSquaredError()
         self.edm_center_mode=edm_center_mode
         if edm_center_mode == "MAX":
-            self.edm_to_center = get_soft_argmax_2d_fun(beta=center_softargmax_beta)
+            self.edm_to_center = get_edm_max_2d_fun(center_edm_max_tolerance) #get_soft_argmax_2d_fun(beta=center_softargmax_beta)
         elif edm_center_mode == "MEAN":
             self.edm_to_center = get_weighted_mean_2d_fun()
         elif edm_center_mode == "SKELETON":
@@ -98,6 +97,7 @@ class DistnetModel(Model):
             self.edm_to_center = None
         if self.edm_to_center is not None:
             self.edm_center_loss = get_euclidean_distance_loss()
+        self.center_displacement_loss = get_euclidean_distance_loss()
         self.contour_sigma = contour_sigma
         if self.contour_sigma>0:
             self.contour_edm_loss = MeanSquaredError()
@@ -168,7 +168,7 @@ class DistnetModel(Model):
                 loss = loss + contour_loss * contour_weight
                 losses["contour"] = contour_loss
                 # contour coherence
-                if self.contour_sigma>0:
+                if self.contour_sigma>0 and self.edm_contour_weight>0:
                     mul = -1./(self.contour_sigma * self.contour_sigma)
                     one = tf.cast(1, tf.float32)
                     zero = tf.cast(0, tf.float32)
@@ -176,7 +176,7 @@ class DistnetModel(Model):
                     contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(y_pred[1], edm_c))
                     loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                     losses["edm_contour"] = contour_edm_loss
-            elif self.contour_sigma>0:
+            elif self.contour_sigma>0 and self.edm_contour_weight>0:
                 mul = -1./(self.contour_sigma * self.contour_sigma)
                 one = tf.cast(1, tf.float32)
                 zero = tf.cast(0, tf.float32)
@@ -198,56 +198,62 @@ class DistnetModel(Model):
             if label_rank is not None: # label rank is returned : object-wise loss
                 label_rank_sel = tf.concat([tf.tile(label_rank[..., fw:fw+1, :], [1,1,1,fw,1]), label_rank[..., fw+1:, :]], axis=-2)
                 label_size_sel = tf.concat([tf.tile(label_size[..., fw:fw+1, :], [1,1,1,fw,1]), label_size[..., fw+1:, :]], axis=-2)
-                if (self.predict_center and self.get_center is not None and self.center_displacement_weight>0) or self.displacement_var_weight>0 or self.displacement_mean:
+                if self.center_displacement_weight>0 or self.displacement_var_weight>0 or self.displacement_mean:
                     dym_pred_center, dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank_sel, label_size_sel)
                     dxm_pred_center, dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank_sel, label_size_sel)
+
+                center_pred_ob=None
+                edm_center_ob=None
                 if self.predict_center and self.get_center is not None:
                     center_pred = y_pred[inc] # (B, Y, X, T)
                     center_pred_ob = self.get_center(label_rank * tf.expand_dims(center_pred, -1))
-                if self.predict_center and self.get_center is not None and self.center_displacement_weight>0: # center+displacement coherence loss
+                if self.edm_to_center is not None and (self.edm_center_weight>0 or (center_pred_ob is None and self.center_displacement_weight>0)):
+                    edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank)
+                if self.center_displacement_weight>0: # center+displacement coherence loss
                     # predicted  center coord per object
                     nan = tf.cast(float('NaN'), tf.float32)
                     d_pred_center = tf.stack([dym_pred_center, dxm_pred_center], -1) # (B, 1, 1, T-1, N, 2)
-                    no_prev = tf.equal(self._get_mean_by_object(y[3+inc], label_rank_sel, label_size_sel, project=False), tf.cast(3, tf.float32))[...,tf.newaxis] # (B, 1, 1, T-1, N, 1) # no prev is category #3
-                    no_next = y[-2][...,:N] # (B, T-1, N) # trim no_next from (B, T-1, n_label_max)
-                    no_next = no_next[:, tf.newaxis, tf.newaxis, :, :, tf.newaxis] # (B, 1, 1, T-1, N, 1)
+                    center_pred = center_pred_ob if center_pred_ob is not None else edm_center_ob
+                    assert center_pred is not None, "cannot compute center_displacement loss: no center"
+                    prev_label = y[-2][...,:N] # (B, T-1, N) # trim from (B, T-1, n_label_max)
+                    prev_label = prev_label[:, tf.newaxis, tf.newaxis] # (B, 1, 1, T-1, N)
+                    no_prev = tf.math.equal(prev_label, 0)
+                    prev_idx = tf.where(no_prev, 0, prev_label-1)
+                    no_prev = tf.expand_dims(no_prev, -1)
                     # current -> previous:  move cur so that it corresponds to prev
-                    center_pred_ob_cur = center_pred_ob[...,fw:fw+1,:,:]
+                    center_pred_ob_cur = center_pred[...,fw:fw+1,:,:] # (B, 1, 1, 1, N, 2)
+                    center_pred_ob_prev = center_pred[...,:fw,:,:]
                     center_pred_ob_cur_to_prev = center_pred_ob_cur - d_pred_center[...,:fw,:,:] # (B, 1, 1, FW, N, 2)
-                    # remove centers with no prev
-                    center_pred_ob_cur_to_prev = tf.where(no_prev[...,:fw, :, :], nan, center_pred_ob_cur_to_prev)
-                    center_pred_ob_cur_to_prev = self.center_spead(center_pred_ob_cur_to_prev) # (B, Y, X, FW)
 
-                    # target is previous centers excluding those with no_next
-                    center_pred_ob_prev = center_pred_ob[...,:fw,:,:]
-                    center_pred_ob_prev = tf.where(no_next[...,:fw, :, :], nan, center_pred_ob_prev)
-                    center_pred_ob_prev = self.center_spead(center_pred_ob_prev) # (B, Y, X, FW)
-                    center_displacement_loss = self.center_displacement_loss(center_pred_ob_prev, center_pred_ob_cur_to_prev) # (B, Y, X, FW)
+                    # target is previous centers excluding those with no_prev
+
+                    center_pred_ob_prev = tf.gather(center_pred_ob_prev, indices=prev_idx[...,:fw,:], batch_dims=4, axis=4) # (B, 1, 1, FW, N, 2)
+                    center_pred_ob_prev = tf.where(no_prev[...,:fw, :, :], nan, center_pred_ob_prev)
+
+                    # print(f"center prev: \n{center_pred_ob_prev[0,0,0,0]}")
                     if self.next:
                         # next -> current : move next so that it corresponds to current
-                        center_pred_ob_next = center_pred_ob[...,fw+1:,:,:] # (B, 1, 1, FW, N, 2)
+                        center_pred_ob_next = center_pred[...,fw+1:,:,:] # (B, 1, 1, FW, N, 2)
                         center_pred_ob_next_to_cur = center_pred_ob_next - d_pred_center[...,fw:,:,:] # (B, 1, 1, FW, N, 2)
-                        # remove centers with no prev
-                        center_pred_ob_next_to_cur = tf.where(no_prev[...,fw:, :, :], nan, center_pred_ob_next_to_cur)
-                        center_pred_ob_next_to_cur = self.center_spead(center_pred_ob_next_to_cur) # (B, Y, X, FW)
-                        # target is current centers excluding those with no_next
-                        center_pred_ob_cur = tf.where(no_next[...,fw:, :, :], nan, center_pred_ob_cur)
-                        center_pred_ob_cur = self.center_spead(center_pred_ob_cur) # (B, Y, X, FW)
-                        center_displacement_loss = center_displacement_loss + self.center_displacement_loss(center_pred_ob_cur, center_pred_ob_next_to_cur)
-                    center_displacement_loss = tf.reduce_mean(center_displacement_loss)
-                    loss = loss + center_displacement_loss * (self.center_displacement_weight / (2. if self.next else 1.))
+                        # target is current centers excluding those with no_prev
+                        center_pred_ob_cur_from_next = tf.gather(tf.tile(center_pred_ob_cur, [1,1,1,fw,1,1]), indices=prev_idx[...,fw:,:], batch_dims=4, axis=4) # (B, 1, 1, FW, N, 2)
+                        center_pred_ob_cur_from_next = tf.where(no_prev[...,fw:, :, :], nan, center_pred_ob_cur_from_next)
+                        center_pred_ob_prev = tf.stack([center_pred_ob_prev, center_pred_ob_cur_from_next], axis=-3)
+                        center_pred_ob_cur_to_prev = tf.stack([center_pred_ob_cur_to_prev, center_pred_ob_next_to_cur], axis=-3)
+                    center_displacement_loss = tf.reduce_mean(self.center_displacement_loss(center_pred_ob_prev, center_pred_ob_cur_to_prev))
+                    loss = loss + center_displacement_loss * self.center_displacement_weight
                     losses["center_displacement"] = center_displacement_loss
                 if self.predict_center and self.edm_to_center is not None and self.edm_center_weight>0: # center edm loss
                     edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center_loss = tf.reduce_mean(self.edm_center_loss(center_pred_ob, edm_center_ob))
-                    loss = loss + edm_center_loss * self.edm_center_weight
+                    loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = edm_center_loss
                 elif self.edm_to_center is not None and self.edm_center_weight>0:
                     edm_center_ob_pred = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center_ob_true = self.edm_to_center(label_rank * tf.expand_dims(y[0], -1), y[0], label_rank) # (B, 1, 1, T, N, 2)
 
                     edm_center_loss = tf.reduce_mean(self.edm_center_loss(edm_center_ob_true, edm_center_ob_pred))
-                    loss = loss + edm_center_loss * self.edm_center_weight
+                    loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = edm_center_loss
                 if self.displacement_var_weight>0: # enforce homogeneity : increase weight
                     _, dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank_sel, label_size_sel)
