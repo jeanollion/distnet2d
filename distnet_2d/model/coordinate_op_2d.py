@@ -79,15 +79,15 @@ def get_euclidean_distance_loss(image_shape, objectwise=True):
     sum_axis = [-1, -2] if objectwise else [-1]
     im_scale = tf.cast(1./(image_shape[0]*image_shape[1]), tf.float32)
     def loss(true, pred, object_size=None): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2), and (B, 1, 1, C, N)
-        no_na_mask = tf.cast(tf.math.logical_not(tf.math.is_nan(true[...,:1])), tf.float32) # empty objects
-        true = true * no_na_mask
-        pred = pred * no_na_mask
+        no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32) # non-empty objects
+        true = tf.math.multiply_no_nan(true, no_na_mask)
+        pred = tf.math.multiply_no_nan(pred, no_na_mask)
         d = tf.math.reduce_sum(tf.math.square(true - pred), axis=sum_axis, keepdims=False) #(B, 1, 1, C)
         if objectwise: # normalize by object size / image size
+            n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False)
             object_size = object_size * no_na_mask[...,0]
-            norm = tf.reduce_sum(object_size, axis=-1, keepdims=False) * im_scale #(B, 1, 1, C)
-            d = tf.math.divide_no_nan(d, norm)
-            #d = tf.where(tf.math.is_nan(d), zero, d)
+            norm = tf.math.divide_no_nan(tf.reduce_sum(object_size, axis=-1, keepdims=False), n_obj) * im_scale #(B, 1, 1, C)
+            d = d * norm
         return d
     return loss
 def _get_spatial_kernels(Y, X, two_channel_axes=True):

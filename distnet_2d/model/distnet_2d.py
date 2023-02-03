@@ -170,18 +170,18 @@ class DistnetModel(Model):
                 # contour coherence
                 if self.contour_sigma>0 and self.edm_contour_weight>0:
                     mul = -1./(self.contour_sigma * self.contour_sigma)
-                    one = tf.cast(1, tf.float32)
-                    zero = tf.cast(0, tf.float32)
-                    edm_c = tf.where(tf.math.greater_equal(y_pred[0], one), tf.math.exp(tf.math.square(y_pred[0]-1) * mul), zero)
+                    mask = tf.cast(tf.math.greater_equal(y_pred[0], tf.cast(1, tf.float32)), tf.float32)
+                    edm_c = tf.math.exp(tf.math.square(y_pred[0]-1) * mul) * mask
                     contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(y_pred[1], edm_c))
                     loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                     losses["edm_contour"] = contour_edm_loss
             elif self.contour_sigma>0 and self.edm_contour_weight>0:
                 mul = -1./(self.contour_sigma * self.contour_sigma)
                 one = tf.cast(1, tf.float32)
-                zero = tf.cast(0, tf.float32)
-                edm_c_pred = tf.where(tf.math.greater_equal(y_pred[0], one), tf.math.exp(tf.math.square(y_pred[0]-1) * mul), zero)
-                edm_c_true = tf.where(tf.math.greater_equal(y[0], one), tf.math.exp(tf.math.square(y[0]-1) * mul), zero)
+                mask_pred = tf.cast(tf.math.greater_equal(y_pred[0], one), tf.float32)
+                edm_c_pred = tf.math.exp(tf.math.square(y_pred[0]-1) * mul) * mask_pred
+                mask_true = tf.cast(tf.math.greater_equal(y[0], one), tf.float32)
+                edm_c_true = tf.math.exp(tf.math.square(y[0]-1) * mul) * mask_true
                 contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(edm_c_true, edm_c_pred))
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                 losses["edm_contour"] = contour_edm_loss
@@ -217,9 +217,9 @@ class DistnetModel(Model):
                     assert center_pred is not None, "cannot compute center_displacement loss: no center"
                     prev_label = y[-2][...,:N] # (B, T-1, N) # trim from (B, T-1, n_label_max)
                     prev_label = prev_label[:, tf.newaxis, tf.newaxis] # (B, 1, 1, T-1, N)
-                    no_prev = tf.math.equal(prev_label, 0)
-                    prev_idx = tf.where(no_prev, 0, prev_label-1)
-                    no_prev = tf.expand_dims(no_prev, -1)
+                    has_prev = tf.math.greater(prev_label, 0)
+                    prev_idx = tf.cast(has_prev, tf.int32) * (prev_label-1)
+                    has_prev = tf.expand_dims(has_prev, -1)
                     # current -> previous:  move cur so that it corresponds to prev
                     center_pred_ob_cur = center_pred[...,fw:fw+1,:,:] # (B, 1, 1, 1, N, 2)
                     center_pred_ob_prev = center_pred[...,:fw,:,:]
@@ -228,7 +228,7 @@ class DistnetModel(Model):
                     # target is previous centers excluding those with no_prev
 
                     center_pred_ob_prev = tf.gather(center_pred_ob_prev, indices=prev_idx[...,:fw,:], batch_dims=4, axis=4) # (B, 1, 1, FW, N, 2)
-                    center_pred_ob_prev = tf.where(no_prev[...,:fw, :, :], nan, center_pred_ob_prev)
+                    center_pred_ob_prev = tf.where(has_prev[...,:fw, :, :], center_pred_ob_prev, nan)
 
                     # print(f"center prev: \n{center_pred_ob_prev[0,0,0,0]}")
                     if self.next:
@@ -237,9 +237,9 @@ class DistnetModel(Model):
                         center_pred_ob_next_to_cur = center_pred_ob_next - d_pred_center[...,fw:,:,:] # (B, 1, 1, FW, N, 2)
                         # target is current centers excluding those with no_prev
                         center_pred_ob_cur_from_next = tf.gather(tf.tile(center_pred_ob_cur, [1,1,1,fw,1,1]), indices=prev_idx[...,fw:,:], batch_dims=4, axis=4) # (B, 1, 1, FW, N, 2)
-                        center_pred_ob_cur_from_next = tf.where(no_prev[...,fw:, :, :], nan, center_pred_ob_cur_from_next)
-                        center_pred_ob_prev = tf.stack([center_pred_ob_prev, center_pred_ob_cur_from_next], axis=-3)
-                        center_pred_ob_cur_to_prev = tf.stack([center_pred_ob_cur_to_prev, center_pred_ob_next_to_cur], axis=-3)
+                        center_pred_ob_cur_from_next = tf.where(has_prev[...,fw:, :, :], center_pred_ob_cur_from_next, nan)
+                        center_pred_ob_prev = tf.concat([center_pred_ob_prev, center_pred_ob_cur_from_next], axis=-3)
+                        center_pred_ob_cur_to_prev = tf.concat([center_pred_ob_cur_to_prev, center_pred_ob_next_to_cur], axis=-3)
                     center_displacement_loss = tf.reduce_mean(self.center_displacement_loss(center_pred_ob_prev, center_pred_ob_cur_to_prev, object_size=label_size_sel))
                     loss = loss + center_displacement_loss * self.center_displacement_weight
                     losses["center_displacement"] = center_displacement_loss
