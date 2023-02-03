@@ -78,6 +78,7 @@ def get_gaussian_spread_fun(sigma, Y, X, objectwise=True):
 def get_euclidean_distance_loss(image_shape, objectwise=True):
     sum_axis = [-1, -2] if objectwise else [-1]
     im_scale = tf.cast(1./(image_shape[0]*image_shape[1]), tf.float32)
+    #@tf.function
     def loss(true, pred, object_size=None): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2), and (B, 1, 1, C, N)
         no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32) # non-empty objects
         true = tf.math.multiply_no_nan(true, no_na_mask)
@@ -87,6 +88,7 @@ def get_euclidean_distance_loss(image_shape, objectwise=True):
             n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False)
             object_size = object_size * no_na_mask[...,0]
             norm = tf.math.divide_no_nan(tf.reduce_sum(object_size, axis=-1, keepdims=False), n_obj) * im_scale #(B, 1, 1, C)
+            # print(f"norm: {norm[0, 0, 0, 0].numpy()}, d: {d[0, 0, 0, 0].numpy()}")
             d = d * norm
         return d
     return loss
