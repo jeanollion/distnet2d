@@ -1,16 +1,17 @@
 from os import listdir
 from os.path import isfile, isdir, join, basename
 import h5py
-from scipy.ndimage import find_objects
+from scipy.ndimage import find_objects, center_of_mass
 from tifffile import imread
 import numpy as np
-main_dir = "/data/Images/CellTrackingChallenge"
+from math import isnan
+main_dir = "/storage/Images/CellTrackingChallenge"
 
 # list folders without underscore
 # - 01 -> raw tFFF.tif
 # - 01_ST/SEG -> segmentation man_segFFF.tif
 # - 01_GT/TRA/man_track.txt -> tracking: LABEL | START_FRAME | END_FRAME | PARENT_LABEL
-
+# - 01_GT/TRA/man_trackFFF.tif
 # compute previous labels:
 # - parse track list -> dict LABEL -> {START_FRAME, END_FRAME, PARENT_LABEL}
 # - for each image t:
@@ -24,16 +25,29 @@ main_dir = "/data/Images/CellTrackingChallenge"
 # - 01 / labels -> 01_ST/SEG
 # - 01 / previousLabels -> previous labels
 
-ds_dirs = [join(main_dir, f) for f in listdir(main_dir) if isdir(join(main_dir, f))]
+def _get_label(label_im, o):
+    values, counts = np.unique(label_im[o], return_counts=True)
+    print(f"values: {values} counts: {counts}")
+    if values[0]==0:
+        values = values[1:]
+        counts = counts[1:]
+    print(f"values: {values} counts: {counts} max: {values[np.argmax(counts)]}")
+    return values[np.argmax(counts)]
+
+# ds_dirs = [join(main_dir, f) for f in listdir(main_dir) if isdir(join(main_dir, f))]
+ds_dirs = [join(main_dir, "Fluo-N2DH-SIM+")]
 for dir in ds_dirs:
+    print(f"Dataset dir: {dir}")
     dirs = [f for f in listdir(dir) if isdir(join(dir, f)) and '_' not in f]
     out_dir = join(dir, basename(dir)+".h5")
     with h5py.File(out_dir, 'w') as out_file:
         for position in dirs:
             raw_dir = join(dir, position)
             seg_dir = join(dir, position+"_ST", "SEG")
+            seg_dir_gt = join(dir, position+"_GT", "SEG")
+            track_dir = join(dir, position+"_GT", "TRA")
             # parse tracks
-            track_file = join(dir, position+"_GT", "TRA", "man_track.txt")
+            track_file = join(track_dir, "man_track.txt")
             tracks = dict()
             with open(track_file) as tf:
                 for t in tf.readlines():
@@ -52,9 +66,41 @@ for dir in ds_dirs:
             for im_name in images:
                 frame_s = im_name[1:end_digit_idx]
                 frame = int(frame_s)
-                label_im = imread(join(seg_dir, f"man_seg{frame_s}.tif"))
+                label_file = join(seg_dir_gt, f"man_seg{frame_s}.tif")
+                if not isfile(label_file):
+                    label_file = join(seg_dir, f"man_seg{frame_s}.tif") # fallback to silver truth
+                if not isfile(label_file):
+                    label_im = np.zeros(raw_ims.shape[1:], dtype="int16")
+                else:
+                    label_im = imread(label_file)
+
+                track_label_file = join(track_dir, f"man_track{frame_s}.tif")
+                if isfile(label_file):
+                    track_label_im = imread(track_label_file)
+                else:
+                    track_label_im = np.zeros(raw_ims.shape[1:], dtype="int16")
+
+                track_objects = find_objects(track_label_im)#, labels=track_label_im, index = np.arange(1, track_label_im.max()+1))
+                if isinstance(track_objects, tuple):
+                    track_objects=[track_objects]
+                for idx, o in enumerate(track_objects): # check that track label correspond to segmentation label
+                    l = idx + 1
+                    if o is not None:
+                        mask = track_label_im[o] == l
+                        ob_l = np.unique(label_im[o][mask])
+                        if len(ob_l)>1 and ob_l[0]==0:
+                            ob_l = ob_l[1]
+                        else:
+                            ob_l = ob_l[0]
+                        if ob_l==0:
+                            print(f"Warning: no object at frame: {frame_s} for track label: {l}")
+                        if ob_l!=l:
+                            label_im[label_im==ob_l] = l
+                            print(f"modified label from {ob_l} to {l}")
                 ds_labels[frame] = label_im
                 objects = find_objects(label_im)
+                if isinstance(objects, tuple):
+                    objects=[objects]
                 for idx, o in enumerate(objects):
                     l = idx + 1
                     if o is not None:

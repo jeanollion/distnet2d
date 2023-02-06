@@ -164,18 +164,22 @@ class DistnetModel(Model):
                 if self.contour_sigma>0 and self.edm_contour_weight>0:
                     mul = -1./(self.contour_sigma * self.contour_sigma)
                     one = tf.cast(1, tf.float32)
-                    mask = tf.cast(tf.math.greater_equal(y_pred[0], one), tf.float32)
-                    edm_c = tf.math.exp(tf.math.square(y_pred[0]-1) * mul) * mask
+                    edm_c_pred = tf.where(tf.math.greater_equal(y_pred[0], one),
+                        tf.math.exp(tf.math.square(y_pred[0]-one) * mul),
+                        tf.math.exp(tf.math.square(tf.math.divide(one, y_pred[0])-one) * mul) )
+                    edm_c_pred = tf.math.multiply_no_nan(edm_c_pred, tf.cast(tf.math.greater(y_pred[0], thld), tf.float32) )
                     contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(y_pred[1], edm_c))
                     loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                     losses["edm_contour"] = contour_edm_loss
             elif self.contour_sigma>0 and self.edm_contour_weight>0:
                 mul = -1./(self.contour_sigma * self.contour_sigma)
                 one = tf.cast(1, tf.float32)
-                mask_pred = tf.cast(tf.math.greater_equal(y_pred[0], one), tf.float32)
-                edm_c_pred = tf.math.exp(tf.math.square(y_pred[0]-1) * mul) * mask_pred
-                mask_true = tf.cast(tf.math.greater_equal(y[0], one), tf.float32)
-                edm_c_true = tf.math.exp(tf.math.square(y[0]-1) * mul) * mask_true
+                thld = tf.cast(1e-5, tf.float32)
+                edm_c_pred = tf.where(tf.math.greater_equal(y_pred[0], one),
+                    tf.math.exp(tf.math.square(y_pred[0]-one) * mul),
+                    tf.math.exp(tf.math.square(tf.math.divide(one, y_pred[0])-one) * mul) )
+                edm_c_pred = tf.math.multiply_no_nan(edm_c_pred, tf.cast(tf.math.greater(y_pred[0], thld), tf.float32) )
+                edm_c_true = tf.math.exp(tf.math.square(y[0]-one) * mul) * tf.cast(tf.math.greater_equal(y[0], one), tf.float32)
                 contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(edm_c_true, edm_c_pred))
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                 losses["edm_contour"] = contour_edm_loss
