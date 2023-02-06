@@ -69,7 +69,7 @@ class DistnetModel(Model):
         center_softargmax_beta = 1e2,
         center_edm_max_tolerance = 0.9,
         center_sigma = 4,
-        contour_sigma = 1.,
+        contour_sigma = 0.5,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.predict_contours = predict_contours
