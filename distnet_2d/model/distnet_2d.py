@@ -65,7 +65,6 @@ class DistnetModel(Model):
         frame_window = 1,
         predict_contours = True,
         predict_center = False,
-        center_mode = "MEAN", # among MAX, MEAN
         edm_center_mode = "MAX", # among MAX, MEAN, SKELETON or NONE
         center_softargmax_beta = 1e2,
         center_edm_max_tolerance = 0.9,
@@ -79,20 +78,14 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         center_softargmax_beta = center_softargmax_beta
         self.center_spead = get_gaussian_spread_fun(center_sigma, spatial_dims[0], spatial_dims[1], objectwise=True)
-        self.center_mode = center_mode
-        if center_mode == "MAX":
-            self.get_center = get_edm_max_2d_fun(center_edm_max_tolerance) #get_soft_argmax_2d_fun(beta=center_softargmax_beta)
-        elif center_mode == "MEAN":
-            self.get_center = get_weighted_mean_2d_fun()
-        else:
-            self.get_center = None
+        self.get_center = get_weighted_mean_2d_fun(spatial_dims)
         self.edm_center_mode=edm_center_mode
         if edm_center_mode == "MAX":
-            self.edm_to_center = get_edm_max_2d_fun(center_edm_max_tolerance) #get_soft_argmax_2d_fun(beta=center_softargmax_beta)
+            self.edm_to_center = get_edm_max_2d_fun(spatial_dims, center_edm_max_tolerance) #get_soft_argmax_2d_fun(beta=center_softargmax_beta)
         elif edm_center_mode == "MEAN":
-            self.edm_to_center = get_weighted_mean_2d_fun()
+            self.edm_to_center = get_weighted_mean_2d_fun(spatial_dims)
         elif edm_center_mode == "SKELETON":
-            self.edm_to_center = get_skeleton_center_fun()
+            self.edm_to_center = get_skeleton_center_fun(spatial_dims)
         else:
             self.edm_to_center = None
         if self.edm_to_center is not None:
@@ -207,9 +200,9 @@ class DistnetModel(Model):
                 edm_center_ob=None
                 if self.predict_center and self.get_center is not None:
                     center_pred = y_pred[inc] # (B, Y, X, T)
-                    center_pred_ob = self.get_center(label_rank * tf.expand_dims(center_pred, -1))
+                    center_pred_ob = self.get_center(tf.math.multiply_no_nan(tf.expand_dims(center_pred, -1),label_rank))
                 if self.edm_to_center is not None and (self.edm_center_weight>0 or (center_pred_ob is None and self.center_displacement_weight>0)):
-                    edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank)
+                    edm_center_ob = self.edm_to_center(tf.math.multiply_no_nan(tf.expand_dims(y_pred[0], -1), label_rank), y_pred[0], label_rank)
                 if self.center_displacement_weight>0: # center+displacement coherence loss
                     # predicted  center coord per object
                     nan = tf.cast(float('NaN'), tf.float32)
@@ -245,14 +238,13 @@ class DistnetModel(Model):
                     loss = loss + center_displacement_loss * self.center_displacement_weight
                     losses["center_displacement"] = center_displacement_loss
                 if self.predict_center and self.edm_to_center is not None and self.edm_center_weight>0: # center edm loss
-                    edm_center_ob = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center_loss = tf.reduce_mean(self.edm_center_loss(center_pred_ob, edm_center_ob, object_size=label_size))
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = edm_center_loss
                 elif self.edm_to_center is not None and self.edm_center_weight>0:
-                    edm_center_ob_pred = self.edm_to_center(label_rank * tf.expand_dims(y_pred[0], -1), y_pred[0], label_rank) # (B, 1, 1, T, N, 2)
                     edm_center_ob_true = self.edm_to_center(label_rank * tf.expand_dims(y[0], -1), y[0], label_rank) # (B, 1, 1, T, N, 2)
-                    edm_center_loss = tf.reduce_mean(self.edm_center_loss(edm_center_ob_true, edm_center_ob_pred, object_size=label_size))
+                    edm_center_loss = self.edm_center_loss(edm_center_ob_true, edm_center_ob, object_size=label_size)
+                    edm_center_loss = tf.reduce_mean(edm_center_loss)
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = edm_center_loss
                 if self.displacement_var_weight>0: # enforce homogeneity : increase weight
@@ -292,11 +284,26 @@ class DistnetModel(Model):
 
         # Compute gradients
         trainable_vars = self.trainable_variables
-        grad = tape.gradient(loss, trainable_vars)
-        if mixed_precision:
-            grad = self.optimizer.get_unscaled_gradients(grad)
+        # grad = tape.gradient(loss, trainable_vars)
+        # if mixed_precision:
+        #     grad = self.optimizer.get_unscaled_gradients(grad)
         # Update weights
-        self.optimizer.apply_gradients(zip(grad, trainable_vars))
+        # self.optimizer.apply_gradients(zip(grad, trainable_vars))
+        # return losses
+        grads_and_vars=self.optimizer._compute_gradients(loss, var_list=self.trainable_variables, tape=tape)
+        grads_and_vars=self.optimizer._aggregate_gradients(grads_and_vars)
+        def t_fn():# if any of the gradients are NaN, set loss metric to NaN
+            print("NaN gradient")
+            return losses["loss"]
+            #return tf.constant(float('NaN'))
+        def f_fn(): # if all gradients are valid apply them
+            self.optimizer.apply_gradients(grads_and_vars, experimental_aggregate_gradients=False)
+            return losses["loss"]
+        grad_nan=[tf.reduce_any(tf.math.is_nan(g)) for g,_ in grads_and_vars if g is not None]
+        grad_nan=tf.reduce_any(grad_nan)
+        losses["loss"] = tf.cond(grad_nan, t_fn, f_fn)
+        # printlosses={k:v.numpy() for k,v in losses.items()}
+        # print(f"losses: {printlosses}")
         return losses
 
     def _get_mean_by_object(self, data, label_rank, label_size, project=True):
@@ -327,7 +334,6 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             residual_combine_size:int = 3,
             frame_window:int = 1,
             predict_center = False,
-            center_mode = "MEAN", # among MAX, MEAN
             edm_center_mode = "MEAN", # among MAX, MEAN, SKELETON or NONE
             next:bool=True,
             name: str="DiSTNet2D",
@@ -443,7 +449,7 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         dy, dx = decoder_out[1+d_inc]([ upsampled[-1], residuals_displacement ])
         cat = decoder_out[2+d_inc]([ upsampled[-1], residuals_displacement ])
         outputs = flatten_list([seg, dy, dx, cat])
-        return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, center_mode=center_mode, edm_center_mode=edm_center_mode)
+        return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
