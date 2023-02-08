@@ -1,7 +1,7 @@
 from os import listdir
 from os.path import isfile, isdir, join, basename
 import h5py
-from scipy.ndimage import find_objects, center_of_mass
+from scipy.ndimage import find_objects, center_of_mass, binary_closing, generate_binary_structure, binary_fill_holes
 from tifffile import imread
 import numpy as np
 from math import isnan
@@ -25,17 +25,36 @@ main_dir = "/storage/Images/CellTrackingChallenge"
 # - 01 / labels -> 01_ST/SEG
 # - 01 / previousLabels -> previous labels
 
-def _get_label(label_im, o):
-    values, counts = np.unique(label_im[o], return_counts=True)
-    print(f"values: {values} counts: {counts}")
-    if values[0]==0:
-        values = values[1:]
-        counts = counts[1:]
-    print(f"values: {values} counts: {counts} max: {values[np.argmax(counts)]}")
-    return values[np.argmax(counts)]
-
 # ds_dirs = [join(main_dir, f) for f in listdir(main_dir) if isdir(join(main_dir, f))]
-ds_dirs = [join(main_dir, "Fluo-N2DH-SIM+")]
+
+def _close_and_fill(labelImage, iterations = 3):
+    ker = generate_binary_structure(labelImage.ndim, 2)
+    tempIm = np.zeros(labelImage.shape, dtype=bool)
+    tempIm2 = np.zeros(labelImage.shape, dtype=bool)
+    objects = find_objects(labelImage)
+    if isinstance(objects, tuple):
+        objects=[objects]
+    for idx, o in enumerate(objects):
+        l = idx+1
+        tempIm[o] = labelImage[o]==l
+        binary_closing(tempIm, ker, output=tempIm2, iterations=iterations)
+        tempIm.fill(False)
+        binary_fill_holes(tempIm2, output=tempIm)
+        tempIm2.fill(False)
+        otherLabels = (labelImage>0) & (labelImage!=l)
+        tempIm[otherLabels] = False
+        labelImage[tempIm] = l
+        tempIm.fill(False)
+
+def _get_label(masked_label_im):
+    ob_l = np.unique(masked_label_im)
+    if len(ob_l)>1 and ob_l[0]==0:
+        return ob_l[1]
+    else:
+        return ob_l[0]
+
+ds_names=["Fluo-N2DL-HeLa", "PhC-C2DH-U373"] #"Fluo-N2DH-SIM+"
+ds_dirs = [join(main_dir, n) for n in ds_names]
 for dir in ds_dirs:
     print(f"Dataset dir: {dir}")
     dirs = [f for f in listdir(dir) if isdir(join(dir, f)) and '_' not in f]
@@ -66,16 +85,24 @@ for dir in ds_dirs:
             for im_name in images:
                 frame_s = im_name[1:end_digit_idx]
                 frame = int(frame_s)
-                label_file = join(seg_dir_gt, f"man_seg{frame_s}.tif")
-                if not isfile(label_file):
-                    label_file = join(seg_dir, f"man_seg{frame_s}.tif") # fallback to silver truth
-                if not isfile(label_file):
+                label_file_GT = join(seg_dir_gt, f"man_seg{frame_s}.tif")
+                label_file_ST = join(seg_dir, f"man_seg{frame_s}.tif")
+                if not isfile(label_file_GT) and not isfile(label_file_ST):
                     label_im = np.zeros(raw_ims.shape[1:], dtype="int16")
+                    label_im_alt = None
                 else:
-                    label_im = imread(label_file)
+                    if isfile(label_file_GT):
+                        label_im = imread(label_file_GT)
+                        if isfile(label_file_ST):
+                            label_im_alt = imread(label_file_ST)
+                        else:
+                            label_im_alt = None
+                    else:
+                        label_im = imread(label_file_ST)
+                        label_im_alt = None
 
                 track_label_file = join(track_dir, f"man_track{frame_s}.tif")
-                if isfile(label_file):
+                if isfile(track_label_file):
                     track_label_im = imread(track_label_file)
                 else:
                     track_label_im = np.zeros(raw_ims.shape[1:], dtype="int16")
@@ -87,16 +114,24 @@ for dir in ds_dirs:
                     l = idx + 1
                     if o is not None:
                         mask = track_label_im[o] == l
-                        ob_l = np.unique(label_im[o][mask])
-                        if len(ob_l)>1 and ob_l[0]==0:
-                            ob_l = ob_l[1]
-                        else:
-                            ob_l = ob_l[0]
+                        ob_l = _get_label(label_im[o][mask])
                         if ob_l==0:
-                            print(f"Warning: no object at frame: {frame_s} for track label: {l}")
-                        if ob_l!=l:
+                            if label_im_alt is not None:
+                                ob_l = _get_label(label_im_alt[o][mask])
+                                if ob_l==0:
+                                    label_im[o][mask] = l # put track label instead of segmentation label
+                                    print(f"Warning: no object at frame: {frame_s} for track label: {l}  : track label written")
+                                else: # transfer object from alt label_im
+                                    label_im[label_im_alt==ob_l] = l
+                                    print(f"Warning: no object at frame: {frame_s} for track label: {l}  : transfered from ST")
+                            else:
+                                label_im[o][mask] = l
+                                print(f"Warning: no object at frame: {frame_s} for track label: {l}  : track label written")
+                        elif ob_l!=l:
                             label_im[label_im==ob_l] = l
                             print(f"modified label from {ob_l} to {l}")
+
+                _close_and_fill(label_im)
                 ds_labels[frame] = label_im
                 objects = find_objects(label_im)
                 if isinstance(objects, tuple):
