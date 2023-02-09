@@ -2,6 +2,10 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 import numpy as np
 
+class MeanSquaredErrorSampleWeightChannel(tf.keras.losses.Loss):
+  def call(self, y_true, y_pred):
+    return tf.math.square(y_pred - y_true)
+
 def ssim_loss(max_val = 1, filter_size=11, filter_sigma=1.5, k1=0.01, k2=0.03):
     def loss_fun(y_true, y_pred):
         SSIM = tf.image.ssim(y_true, y_pred, max_val=max_val, filter_size=filter_size, filter_sigma=filter_sigma, k1=k1, k2=k2)

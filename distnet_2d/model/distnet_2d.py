@@ -9,9 +9,9 @@ from .attention import Attention
 from .directional_2d_self_attention import Directional2DSelfAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
-from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy
+from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorSampleWeightChannel
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
-from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, get_euclidean_distance_loss, get_edm_max_2d_fun
+from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, EuclideanDistanceLoss, get_edm_max_2d_fun
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -57,7 +57,7 @@ class DistnetModel(Model):
         edm_loss=MeanSquaredError(),
         contour_loss = MeanSquaredError(),
         center_loss = MeanSquaredError(),
-        displacement_loss = MeanSquaredError(),
+        displacement_loss = MeanSquaredErrorSampleWeightChannel(),
         displacement_mean = False,
         category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
         category_class_frequency_range=[1/10, 10],
@@ -70,8 +70,10 @@ class DistnetModel(Model):
         center_edm_max_tolerance = 0.9,
         center_sigma = 4,
         contour_sigma = 0.5,
+        gradient_safe_mode = False,
         **kwargs):
         super().__init__(*args, **kwargs)
+        self.gradient_safe_mode=gradient_safe_mode
         self.predict_contours = predict_contours
         self.predict_center = predict_center
         self.spatial_dims = spatial_dims
@@ -89,8 +91,8 @@ class DistnetModel(Model):
         else:
             self.edm_to_center = None
         if self.edm_to_center is not None:
-            self.edm_center_loss = get_euclidean_distance_loss(spatial_dims)
-        self.center_displacement_loss = get_euclidean_distance_loss(spatial_dims)
+            self.edm_center_loss = EuclideanDistanceLoss(spatial_dims)
+        self.center_displacement_loss = EuclideanDistanceLoss(spatial_dims)
         self.contour_sigma = contour_sigma
         if self.contour_sigma>0:
             self.contour_edm_loss = MeanSquaredError()
@@ -127,6 +129,7 @@ class DistnetModel(Model):
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
         displacement_weight = self.displacement_weight / 2. # y & x
+        displacement_weight /= (2 * fw + 1.) # mean per channel
         displacement_var_weight = self.displacement_var_weight
         category_weight = self.category_weight / (self.frame_window * (2. if self.next else 1))
         contour_weight = self.contour_weight
@@ -151,15 +154,15 @@ class DistnetModel(Model):
             # compute loss
             losses = dict()
             inc=0
-            edm_loss = tf.reduce_mean(self.edm_loss(y[inc], y_pred[inc]))
+            edm_loss = self.edm_loss(y[inc], y_pred[inc])
             loss = edm_loss * edm_weight
-            losses["edm"] = edm_loss
+            losses["edm"] = tf.reduce_mean(edm_loss)
 
             if self.predict_contours:
                 inc+=1
-                contour_loss = tf.reduce_mean(self.contour_loss(y[inc], y_pred[inc]))
+                contour_loss = self.contour_loss(y[inc], y_pred[inc])
                 loss = loss + contour_loss * contour_weight
-                losses["contour"] = contour_loss
+                losses["contour"] = tf.reduce_mean(contour_loss)
                 # contour coherence
                 if self.contour_sigma>0 and self.edm_contour_weight>0:
                     mul = -1./(self.contour_sigma * self.contour_sigma)
@@ -168,9 +171,9 @@ class DistnetModel(Model):
                         tf.math.exp(tf.math.square(y_pred[0]-one) * mul),
                         tf.math.exp(tf.math.square(tf.math.divide(one, y_pred[0])-one) * mul) )
                     edm_c_pred = tf.math.multiply_no_nan(edm_c_pred, tf.cast(tf.math.greater(y_pred[0], thld), tf.float32) )
-                    contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(y_pred[1], edm_c))
+                    contour_edm_loss = self.contour_edm_loss(y_pred[1], edm_c)
                     loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
-                    losses["edm_contour"] = contour_edm_loss
+                    losses["edm_contour"] = tf.reduce_mean(contour_edm_loss)
             elif self.contour_sigma>0 and self.edm_contour_weight>0:
                 mul = -1./(self.contour_sigma * self.contour_sigma)
                 one = tf.cast(1, tf.float32)
@@ -180,19 +183,17 @@ class DistnetModel(Model):
                     tf.math.exp(tf.math.square(tf.math.divide(one, y_pred[0])-one) * mul) )
                 edm_c_pred = tf.math.multiply_no_nan(edm_c_pred, tf.cast(tf.math.greater(y_pred[0], thld), tf.float32) )
                 edm_c_true = tf.math.exp(tf.math.square(y[0]-one) * mul) * tf.cast(tf.math.greater_equal(y[0], one), tf.float32)
-                contour_edm_loss = tf.reduce_mean(self.contour_edm_loss(edm_c_true, edm_c_pred))
+                contour_edm_loss = self.contour_edm_loss(edm_c_true, edm_c_pred)
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
-                losses["edm_contour"] = contour_edm_loss
+                losses["edm_contour"] = tf.reduce_mean(contour_edm_loss)
 
             if self.predict_center:
                 inc+=1
-                center_loss = tf.reduce_mean(self.center_loss(y[inc], y_pred[inc]))
+                center_loss = self.center_loss(y[inc], y_pred[inc])
                 loss = loss + center_loss * center_weight
-                losses["center"] = center_loss
+                losses["center"] = tf.reduce_mean(center_loss)
 
             # displacement loss
-            dy_t = tf.expand_dims(y[1+inc], -1)
-            dx_t = tf.expand_dims(y[2+inc], -1)
             if label_rank is not None: # label rank is returned : object-wise loss
                 label_rank_sel = tf.concat([tf.tile(label_rank[..., fw:fw+1, :], [1,1,1,fw,1]), label_rank[..., fw+1:, :]], axis=-2)
                 label_size_sel = tf.concat([tf.tile(label_size[..., fw:fw+1, :], [1,1,1,fw,1]), label_size[..., fw+1:, :]], axis=-2)
@@ -238,19 +239,19 @@ class DistnetModel(Model):
                         center_pred_ob_cur_from_next = tf.where(has_prev[...,fw:, :, :], center_pred_ob_cur_from_next, nan)
                         center_pred_ob_prev = tf.concat([center_pred_ob_prev, center_pred_ob_cur_from_next], axis=-3)
                         center_pred_ob_cur_to_prev = tf.concat([center_pred_ob_cur_to_prev, center_pred_ob_next_to_cur], axis=-3)
-                    center_displacement_loss = tf.reduce_mean(self.center_displacement_loss(center_pred_ob_prev, center_pred_ob_cur_to_prev, object_size=label_size_sel))
+                    center_displacement_loss = self.center_displacement_loss(center_pred_ob_prev, center_pred_ob_cur_to_prev) #, object_size=label_size_sel
                     loss = loss + center_displacement_loss * self.center_displacement_weight
-                    losses["center_displacement"] = center_displacement_loss
+                    losses["center_displacement"] = tf.reduce_mean(center_displacement_loss)
                 if self.predict_center and self.edm_to_center is not None and self.edm_center_weight>0: # center edm loss
-                    edm_center_loss = tf.reduce_mean(self.edm_center_loss(center_pred_ob, edm_center_ob, object_size=label_size))
+                    edm_center_loss = self.edm_center_loss(center_pred_ob, edm_center_ob) #, object_size=label_size
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
-                    losses["edm_center"] = edm_center_loss
+                    losses["edm_center"] = tf.reduce_mean(edm_center_loss)
                 elif self.edm_to_center is not None and self.edm_center_weight>0:
                     edm_center_ob_true = self.edm_to_center(label_rank * tf.expand_dims(y[0], -1), y[0], label_rank) # (B, 1, 1, T, N, 2)
-                    edm_center_loss = self.edm_center_loss(edm_center_ob_true, edm_center_ob, object_size=label_size)
-                    edm_center_loss = tf.reduce_mean(edm_center_loss)
+                    edm_center_loss = self.edm_center_loss(edm_center_ob_true, edm_center_ob) #, object_size=label_size
+                    edm_center_loss = edm_center_loss
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
-                    losses["edm_center"] = edm_center_loss
+                    losses["edm_center"] = tf.reduce_mean(edm_center_loss)
                 if self.displacement_var_weight>0: # enforce homogeneity : increase weight
                     _, dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank_sel, label_size_sel)
                     vary = dy2m_pred - tf.math.square(dym_pred)
@@ -264,51 +265,50 @@ class DistnetModel(Model):
                 else:
                     displacement_wm = None
                 if self.displacement_mean:
-                    dm_loss = self.displacement_loss(dy_t, tf.expand_dims(dym_pred, -1), sample_weight=displacement_wm) + self.displacement_loss(dx_t, tf.expand_dims(dxm_pred, -1), sample_weight=displacement_wm)
-                    dm_loss = tf.reduce_mean(dm_loss)
+                    dm_loss = self.displacement_loss(y[1+inc], dym_pred, sample_weight=displacement_wm) + self.displacement_loss(y[2+inc], dxm_pred, sample_weight=displacement_wm)
                     loss = loss + dm_loss * displacement_weight
-                    losses["displacement_mean"] = dm_loss
+                    losses["displacement_mean"] = tf.reduce_mean(dm_loss)
             else:
                 displacement_wm = None
             # pixel-wise displacement loss
-            d_loss = self.displacement_loss(dy_t, tf.expand_dims(y_pred[1+inc], -1), sample_weight=displacement_wm) + self.displacement_loss(dx_t, tf.expand_dims(y_pred[2+inc], -1), sample_weight=displacement_wm)
-            d_loss = tf.reduce_mean(d_loss)
+            d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc], sample_weight=displacement_wm) + self.displacement_loss(y[2+inc], y_pred[2+inc], sample_weight=displacement_wm)
             loss = loss + d_loss * displacement_weight
-            losses["displacement"] = d_loss
+            losses["displacement"] = tf.reduce_mean(d_loss)
 
             # category loss
             cat_loss = 0
             for i in range(self.frame_window * (2 if self.next else 1)):
-                cat_loss = cat_loss + tf.reduce_mean(self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4]))
+                cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
             loss = loss + cat_loss * category_weight
-            losses["category"] = cat_loss
+            losses["category"] = tf.reduce_mean(cat_loss)
             losses["loss"] = loss
             if mixed_precision:
                 loss = self.optimizer.get_scaled_loss(loss)
 
         # Compute gradients
         trainable_vars = self.trainable_variables
-        # grad = tape.gradient(loss, trainable_vars)
-        # if mixed_precision:
-        #     grad = self.optimizer.get_unscaled_gradients(grad)
-        # Update weights
-        # self.optimizer.apply_gradients(zip(grad, trainable_vars))
-        # return losses
-        grads_and_vars=self.optimizer._compute_gradients(loss, var_list=self.trainable_variables, tape=tape)
-        grads_and_vars=self.optimizer._aggregate_gradients(grads_and_vars)
-        def t_fn():# if any of the gradients are NaN, set loss metric to NaN
-            print("NaN gradient")
-            return losses["loss"]
-            #return tf.constant(float('NaN'))
-        def f_fn(): # if all gradients are valid apply them
-            self.optimizer.apply_gradients(grads_and_vars, experimental_aggregate_gradients=False)
-            return losses["loss"]
-        grad_nan=[tf.reduce_any(tf.math.is_nan(g)) for g,_ in grads_and_vars if g is not None]
-        grad_nan=tf.reduce_any(grad_nan)
-        losses["loss"] = tf.cond(grad_nan, t_fn, f_fn)
-        # printlosses={k:v.numpy() for k,v in losses.items()}
-        # print(f"losses: {printlosses}")
-        return losses
+        if not self.gradient_safe_mode:
+            grad = tape.gradient(loss, trainable_vars)
+            if mixed_precision:
+                grad = self.optimizer.get_unscaled_gradients(grad)
+            self.optimizer.apply_gradients(zip(grad, trainable_vars)) #Update weights
+            return losses
+        else:
+            grads_and_vars=self.optimizer._compute_gradients(loss, var_list=self.trainable_variables, tape=tape)
+            grads_and_vars=self.optimizer._aggregate_gradients(grads_and_vars)
+            def t_fn():# if any of the gradients are NaN, set loss metric to NaN
+                print("NaN gradient")
+                return losses["loss"]
+                #return tf.constant(float('NaN'))
+            def f_fn(): # if all gradients are valid apply them
+                self.optimizer.apply_gradients(grads_and_vars, experimental_aggregate_gradients=False)
+                return losses["loss"]
+            grad_nan=[tf.reduce_any(tf.math.is_nan(g)) for g,_ in grads_and_vars if g is not None]
+            grad_nan=tf.reduce_any(grad_nan)
+            losses["loss"] = tf.cond(grad_nan, t_fn, f_fn)
+            # printlosses={k:v.numpy() for k,v in losses.items()}
+            # print(f"losses: {printlosses}")
+            return losses
 
     def _get_mean_by_object(self, data, label_rank, label_size, project=True):
         wsum = tf.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2], keepdims = True)

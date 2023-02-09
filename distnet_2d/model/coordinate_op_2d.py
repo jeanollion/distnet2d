@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
-from tensorflow.keras.losses import MeanSquaredError
+from tensorflow.keras.losses import MeanSquaredError, Loss
 
 def get_soft_argmax_2d_fun(spatial_dims, beta=1e2, two_channel_axes=True):
     Y, X = _get_spatial_kernels(spatial_dims[0], spatial_dims[1], two_channel_axes)
@@ -81,24 +81,27 @@ def get_gaussian_spread_fun(sigma, Y, X, objectwise=True):
         return exp
     return gs
 
-def get_euclidean_distance_loss(spatial_dims, objectwise=True):
-    sum_axis = [-1, -2] if objectwise else [-1]
-    im_scale = tf.cast(1./(spatial_dims[0]*spatial_dims[1]), tf.float32)
-    #@tf.function
-    def loss(true, pred, object_size=None): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2), and (B, 1, 1, C, N)
+class EuclideanDistanceLoss(Loss):
+    def __init__(self, spatial_dims, objectwise=True, reduction=tf.keras.losses.Reduction.AUTO, name="euclidean_distance_loss"):
+        super().__init__(name=name, reduction=reduction)
+        self.sum_axis = [-1, -2] if objectwise else [-1]
+        self.im_scale = tf.cast(1./(spatial_dims[0]*spatial_dims[1]), tf.float32)
+        self.objectwise = objectwise
+        
+    def call(self, true, pred): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2), and (B, 1, 1, C, N)
         no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32) # non-empty objects
         true = tf.math.multiply_no_nan(true, no_na_mask)
         pred = tf.math.multiply_no_nan(pred, no_na_mask)
-        d = tf.math.reduce_sum(tf.math.square(true - pred), axis=sum_axis, keepdims=False) #(B, 1, 1, C)
-        if objectwise: # normalize by object size / image size
+        d = tf.math.reduce_sum(tf.math.square(true - pred), axis=self.sum_axis, keepdims=False) #(B, 1, 1, C)
+        if self.objectwise: # normalize by object size / image size
             n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False)
             #object_size = object_size * no_na_mask[...,0]
             #norm = tf.math.divide_no_nan(tf.reduce_sum(object_size, axis=-1, keepdims=False), n_obj) * im_scale #(B, 1, 1, C)
-            norm = tf.math.divide_no_nan(im_scale, n_obj)
+            norm = tf.math.divide_no_nan(self.im_scale, n_obj)
             # print(f"norm: {norm[0, 0, 0, 0].numpy()}, d: {d[0, 0, 0, 0].numpy()}")
             d = tf.math.multiply_no_nan(d, norm)
+            d = tf.math.reduce_mean(d, axis=-1, keepdims=False) #(B, 1, 1)
         return d
-    return loss
 
 def _get_spatial_kernels(Y, X, two_channel_axes=True):
     Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')
