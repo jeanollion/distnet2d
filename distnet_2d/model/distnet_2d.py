@@ -299,7 +299,7 @@ class DistnetModel(Model):
             grads_and_vars=self.optimizer._aggregate_gradients(grads_and_vars)
             def t_fn():# if any of the gradients are NaN, set loss metric to NaN
                 print("NaN gradient")
-                return losses["loss"]
+                return losses["loss"]+1000
                 #return tf.constant(float('NaN'))
             def f_fn(): # if all gradients are valid apply them
                 self.optimizer.apply_gradients(grads_and_vars, experimental_aggregate_gradients=False)
