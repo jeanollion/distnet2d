@@ -167,7 +167,7 @@ class DistnetModel(Model):
                 if self.contour_sigma>0 and self.edm_contour_weight>0:
                     mul = -1./(self.contour_sigma * self.contour_sigma)
                     one = tf.cast(1, tf.float32)
-                    thld = tf.cast(1e-3, tf.float32)
+                    thld = tf.cast(1e-2, tf.float32)
                     edm_c_pred = tf.where(tf.math.greater_equal(y_pred[0], one),
                         tf.math.exp(tf.math.square(y_pred[0]-one) * mul),
                         tf.math.exp(tf.math.square(tf.math.divide(one, y_pred[0])-one) * mul) )
@@ -177,12 +177,14 @@ class DistnetModel(Model):
                     losses["edm_contour"] = tf.reduce_mean(contour_edm_loss)
             elif self.contour_sigma>0 and self.edm_contour_weight>0:
                 mul = -1./(self.contour_sigma * self.contour_sigma)
+                zero = tf.cast(0, tf.float32)
                 one = tf.cast(1, tf.float32)
-                thld = tf.cast(1e-3, tf.float32)
+                thld = tf.cast(1e-2, tf.float32)
+                edm_c_pred_out = tf.where(tf.math.greater_equal(y_pred[0], thld),
+                    tf.math.exp(tf.math.square(tf.math.divide(one, y_pred[0])-one) * mul), zero )
                 edm_c_pred = tf.where(tf.math.greater_equal(y_pred[0], one),
                     tf.math.exp(tf.math.square(y_pred[0]-one) * mul),
-                    tf.math.exp(tf.math.square(tf.math.divide(one, y_pred[0])-one) * mul) )
-                edm_c_pred = tf.math.multiply_no_nan(edm_c_pred, tf.cast(tf.math.greater(y_pred[0], thld), tf.float32) )
+                    edm_c_pred_out )
                 edm_c_true = tf.math.exp(tf.math.square(y[0]-one) * mul) * tf.cast(tf.math.greater_equal(y[0], one), tf.float32)
                 contour_edm_loss = self.contour_edm_loss(edm_c_true, edm_c_pred)
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
@@ -298,8 +300,7 @@ class DistnetModel(Model):
             grads_and_vars=self.optimizer._compute_gradients(loss, var_list=self.trainable_variables, tape=tape)
             grads_and_vars=self.optimizer._aggregate_gradients(grads_and_vars)
             def t_fn():# if any of the gradients are NaN, set loss metric to NaN
-                print("NaN gradient")
-                return losses["loss"]+1000
+                return losses["loss"]
                 #return tf.constant(float('NaN'))
             def f_fn(): # if all gradients are valid apply them
                 self.optimizer.apply_gradients(grads_and_vars, experimental_aggregate_gradients=False)
