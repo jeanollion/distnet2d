@@ -397,7 +397,7 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             decoder_c_out = []
             for l_idx, param_list in enumerate(decoder_center_settings):
                 if l_idx==0:
-                    decoder_c_out.append( decoder_sep_op(**param_list, output_names =[f"Output{output_inc}_Center"], name="DecoderCenter", size_factor=contraction_per_layer[l_idx], filters_out = n_chan, conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="sigmoid"))
+                    decoder_c_out.append( decoder_sep_op(**param_list, output_names =[f"Output{output_inc}_Center"], name="DecoderCenter", size_factor=contraction_per_layer[l_idx], filters_out = n_chan, conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="linear"))
                 else:
                     decoder_c_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name = "DecoderCenter") )
         # Create GRAPH

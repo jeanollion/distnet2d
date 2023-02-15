@@ -414,7 +414,7 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
     # gaussian
     # Y, X = centerIm.shape
     # Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-    # sigmas = map_coordinates(edm, np.array(centers).T, prefilter=False)
+    sigmas = map_coordinates(edm, np.array(list(labels_map_centers.values())).T, prefilter=False)
     # for i, center in enumerate(centers):
     #     sigma_sq = max(1, 0.5 * (sigmas[i]**2))
     #     d = np.square(center[0] - Y) + np.square(center[1] - X)
@@ -422,8 +422,9 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
     # distance to center
     Y, X = centerIm.shape
     Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-    for label, center in labels_map_centers.items():
+    for i, (label, center) in enumerate(labels_map_centers.items()):
         mask = labelIm==label
         if mask.sum()>0:
-            d = np.sqrt(np.square(Y-center[0])+np.square(X-center[1]))
+            #w = -1# -1./max(1, 0.5 * (sigmas[i]**2))
+            d = np.sqrt((np.square(Y-center[0])+np.square(X-center[1])))
             centerIm[mask] = d[mask]
