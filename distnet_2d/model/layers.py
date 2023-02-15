@@ -349,6 +349,71 @@ class WeigthedGradient(tf.keras.layers.Layer):
                 return dy * self.weight
         return x, grad
 
+
+class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
+    def __init__(
+            self,
+            kernel_size: int=3,
+            dilation: int = 1,
+            activation:str = "relu",
+            name: str="ResConv1D",
+    ):
+        super().__init__(name=name)
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.activation=activation
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation})
+      return config
+
+    def build(self, input_shape):
+        input_channels = int(input_shape[-1])
+        self.convY1 = tf.keras.layers.Conv2D(
+            filters=input_channels,
+            kernel_size=(self.kernel_size, 1),
+            strides=1,
+            padding='same',
+            name=f"{self.name}/1_{self.kernel_size}x1",
+            activation=self.activation
+        )
+        self.convX1 = tf.keras.layers.Conv2D(
+            filters=input_channels,
+            kernel_size=(1,self.kernel_size),
+            strides=1,
+            padding='same',
+            name=f"{self.name}/1_1x{self.kernel_size}",
+            activation=self.activation
+        )
+        self.convY2 = tf.keras.layers.Conv2D(
+            filters=input_channels,
+            kernel_size=(self.kernel_size, 1),
+            dilation_rate = (self.dilation, 1),
+            strides=1,
+            padding='same',
+            name=f"{self.name}/2_{self.kernel_size}x1",
+            activation=self.activation
+        )
+        self.convX2 = tf.keras.layers.Conv2D(
+            filters=input_channels,
+            kernel_size=(1,self.kernel_size),
+            dilation_rate = (1, self.dilation),
+            strides=1,
+            padding='same',
+            name=f"{self.name}/2_1x{self.kernel_size}",
+            activation="linear"
+        )
+        self.activation_layer = tf.keras.activations.get(self.activation)
+        super().build(input_shape)
+
+    def call(self, input):
+        x = self.convY1(input)
+        x = self.convX1(x)
+        x = self.convY2(x)
+        x = self.convX2(x)
+        return self.activation_layer(input + x)
+
 ############### MOBILE NET LAYERS ############################################################
 ############### FROM https://github.com/Bisonai/mobilenetv3-tensorflow/blob/master/layers.py
 from .utils import get_layer

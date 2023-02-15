@@ -1,5 +1,5 @@
 import tensorflow as tf
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D
 from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -397,7 +397,7 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             decoder_c_out = []
             for l_idx, param_list in enumerate(decoder_center_settings):
                 if l_idx==0:
-                    decoder_c_out.append( decoder_sep_op(**param_list, output_names =[f"Output{output_inc}_Center"], name="DecoderCenter", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="sigmoid"))
+                    decoder_c_out.append( decoder_sep_op(**param_list, output_names =[f"Output{output_inc}_Center"], name="DecoderCenter", size_factor=contraction_per_layer[l_idx], filters_out = n_chan, conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="sigmoid"))
                 else:
                     decoder_c_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name = "DecoderLayerCenter") )
         # Create GRAPH
@@ -458,9 +458,9 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         if predict_center:
             upsampled_c = [feature]
             for i, l in enumerate(decoder_c_layers[::-1]):
-                up = l([upsampled_c[-1], residuals[i]])
+                up = l([upsampled_c[-1], None])
                 upsampled_c.append(up)
-            center = decoder_c_out[0]([ upsampled_c[-1], last_residuals ])
+            center = decoder_c_out[0]([ upsampled_c[-1], None ])
             seg = flatten_list([seg, center]) # concat lists
 
         outputs = flatten_list([seg, dy, dx, cat])
@@ -469,19 +469,24 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
+    maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
     sequence, down_sequence, total_contraction, residual_filters = parse_param_list(param_list, name, ignore_stride=maxpool)
     assert total_contraction>1, "invalid parameters: no contraction specified"
     if maxpool:
-        down_sequence = [MaxPool2D(pool_size=total_contraction, name=f"{name}/Maxpool{total_contraction}x{total_contraction}")]
+        down_sequence = []
+    if maxpool or maxpool_and_stride:
+        down_sequence = down_sequence+[MaxPool2D(pool_size=total_contraction, name=f"{name}/Maxpool{total_contraction}x{total_contraction}")]
 
     def op(input):
         res = input
         if sequence is not None:
             for l in sequence:
                 res=l(res)
-        down = res
-        for l in down_sequence:
-            down = l(res)
+        down = [l(res) for l in down_sequence]
+        if len(down)>1:
+            down = tf.keras.layers.Concatenate(axis=-1, name = f"{name}/DownConcat", dtype="float32")(down)
+        else:
+            down = down[0]
         if skip_stop_gradient:
             res = stop_gradient(res, parent_name = name)
         return down, res
@@ -511,12 +516,13 @@ def decoder_op(
         def op(input):
             down, res = input
             up = up_op(down)
-            if combine is not None:
-                x = combine([up, res])
-            else:
-                x = up + res
-            x = conv(x)
-            return x
+            if res is not None:
+                if combine is not None:
+                    up = combine([up, res])
+                else:
+                    up = up + res
+            up = conv(up)
+            return up
         return op
 
 def decoder_sep_op(
@@ -547,9 +553,12 @@ def decoder_sep_op(
         def op(input):
             down, res_list = input
             up = up_op(down)
-            if not isinstance(res_list, (list, tuple)):
-                res_list = [res_list]
-            x_list = [combine_gen(i)([up, res]) for i, res in enumerate(res_list)]
+            if res_list is None:
+                x_list = [up]
+            else:
+                if not isinstance(res_list, (list, tuple)):
+                    res_list = [res_list]
+                x_list = [combine_gen(i)([up, res]) for i, res in enumerate(res_list)]
             if len(x_list)==1:
                 return [id_out[i](conv_out[i](x_list[0])) for i in range(len(output_names))]
             else:
@@ -668,21 +677,21 @@ def parse_param_list(param_list, name:str, ignore_stride:bool = False):
         sequence=None
         residual_filters = 0
     if i<len(param_list):
-        if i==len(param_list):
+        if i==len(param_list)-1:
             down = [parse_params(**param_list[i], name=f"{name}/DownOp")]
             total_contraction *= param_list[i].get("downscale", 1)
         else:
-            down = []
-            for ii in range(i, len(param_list)):
-                down.append(parse_params(**param_list[i], name = f"{name}/DownOp{i}"))
-                total_contraction *= param_list[i].get("downscale", 1)
+            raise ValueError("Only one downscale op allowed")
     else:
         down = None
     return sequence, down, total_contraction, residual_filters
 
-def parse_params(filters:int, kernel_size:int = 3, expand_filters:int=0, SE:bool=False, activation="relu", downscale:int=1, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, res_1D:bool = False, dilation:int=1, expand_filters:int=0, SE:bool=False, activation="relu", downscale:int=1, name:str=""):
+    if res_1D:
+        return ResConv1D(kernel_size=kernel_size, dilation=dilation, activation=activation, name=f"{name}/ResConv1D{kernel_size}")
+    assert filters > 0 , "filters must be > 0"
     if expand_filters <= 0:
-        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
+        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
     else:
         return Bneck(
             out_channels=filters,
