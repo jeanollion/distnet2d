@@ -29,7 +29,6 @@ class DyDxIterator(TrackingIterator):
         contour_sigma = 0.5,
         return_center = False,
         center_mode = "GEOMETRICAL", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON"
-        center_sigma = 3,
         return_label_rank = False,
         output_float16=False,
         **kwargs):
@@ -44,7 +43,6 @@ class DyDxIterator(TrackingIterator):
         self.contour_sigma=contour_sigma
         self.return_center=return_center
         self.center_mode=center_mode
-        self.center_sigma=center_sigma
         self.return_label_rank=return_label_rank
         assert frame_window>=1, "frame_window must be >=1"
         self.frame_window = frame_window
@@ -206,11 +204,11 @@ class DyDxIterator(TrackingIterator):
             bidx = get_idx(i)
             for c in range(0, self.frame_window):
                 sel = [c, self.frame_window]
-                _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], center_mode=self.center_mode, center_sigma=self.center_sigma, centerIm=centerIm[i,...,self.frame_window] if self.return_center and c==0 else None, centerImPrev=centerIm[i,...,c] if self.return_center else None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, rankIm=labelIm[i,...,self.frame_window] if self.return_label_rank and c==0 else None, rankImPrev=labelIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None)
+                _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], center_mode=self.center_mode, centerIm=centerIm[i,...,self.frame_window] if self.return_center and c==0 else None, centerImPrev=centerIm[i,...,c] if self.return_center else None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, rankIm=labelIm[i,...,self.frame_window] if self.return_label_rank and c==0 else None, rankImPrev=labelIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None)
             if return_next:
                 for c in range(self.frame_window, 2*self.frame_window):
                     sel = [self.frame_window, c+1]
-                    _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], center_mode=self.center_mode, center_sigma=self.center_sigma, centerIm=centerIm[i,...,c+1] if self.return_center else None, centerImPrev=None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, rankIm=labelIm[i,...,c+1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None)
+                    _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], center_mode=self.center_mode, centerIm=centerIm[i,...,c+1] if self.return_center else None, centerImPrev=None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, rankIm=labelIm[i,...,c+1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None)
 
         other_output_channels = [chan_idx for chan_idx in self.output_channels if chan_idx!=1 and chan_idx!=2]
         all_channels = [batch_by_channel[chan_idx] for chan_idx in other_output_channels]
@@ -347,7 +345,7 @@ def _compute_prev_label_map(labelIm, prevlabelIm, end_points):
             labels_map_prev.append(labels_map_prev_cur)
     return labels_map_prev
 
-def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode, center_sigma, centerIm=None, centerImPrev=None, categoryIm=None, rankIm=None, rankImPrev=None, prevLabelArr=None):
+def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode, centerIm=None, centerImPrev=None, categoryIm=None, rankIm=None, rankImPrev=None, prevLabelArr=None):
     assert labelIm.shape[-1] == 2, f"invalid labelIm : {labelIm.shape[-1]} channels instead of 2"
     labels_map_centers = [_get_labels_and_centers(labelIm[...,c], edm[...,c], center_mode) for c in [0, 1]]
     if len(labels_map_centers[-1])==0: # no cells
@@ -406,6 +404,8 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
     #             noNextArr[r]=True
 
 def _draw_centers(centerIm, centers, edm): # TODO design choice: draw gaussian and use L2 regression ?
+    if len(centers)==0:
+        return
     # for center in centers: # in case center prediction is a classification
     #     centerIm[int(center[0]+0.5), int(center[1]+0.5)] = 1
     Y, X = centerIm.shape
