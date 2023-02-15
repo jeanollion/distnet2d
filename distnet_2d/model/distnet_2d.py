@@ -399,7 +399,7 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
                 if l_idx==0:
                     decoder_c_out.append( decoder_sep_op(**param_list, output_names =[f"Output{output_inc}_Center"], name="DecoderCenter", size_factor=contraction_per_layer[l_idx], filters_out = n_chan, conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="sigmoid"))
                 else:
-                    decoder_c_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name = "DecoderLayerCenter") )
+                    decoder_c_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name = "DecoderCenter") )
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+(n_chan,), name="Input")
         inputs = tf.split(input, num_or_size_splits = n_chan, axis=-1)
@@ -501,8 +501,8 @@ def decoder_op(
             skip_combine_mode = "conv", # conv, sum
             combine_kernel_size = 1,
             activation: str="relu",
-            #l2_reg: float=1e-5,
-            #use_bias:bool = True,
+            res_1D:bool = False,
+            n_conv:int = 1,
             name: str="DecoderLayer",
             layer_idx:int=1,
         ):
@@ -512,7 +512,10 @@ def decoder_op(
             combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
         else:
             combine = None
-        conv = Conv2D(filters=filters, kernel_size=conv_kernel_size, padding='same', activation=activation, name=f"{name}/Conv{conv_kernel_size}x{conv_kernel_size}")
+        if res_1D:
+            convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}") for i in range(n_conv)]
+        else:
+            convs = [Conv2D(filters=filters, kernel_size=conv_kernel_size, padding='same', activation=activation, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         def op(input):
             down, res = input
             up = up_op(down)
@@ -521,7 +524,8 @@ def decoder_op(
                     up = combine([up, res])
                 else:
                     up = up + res
-            up = conv(up)
+            for c in convs:
+                up = c(up)
             return up
         return op
 
@@ -536,8 +540,6 @@ def decoder_sep_op(
             activation: str="relu",
             activation_out:str = "linear",
             filters_out:int = 1,
-            #l2_reg: float=1e-5,
-            #use_bias:bool = True,
             name: str="DecoderSepLayer",
             layer_idx:int=-1,
         ):
@@ -546,7 +548,7 @@ def decoder_sep_op(
         if layer_idx>=0:
             name=f"{name}{layer_idx}"
         up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
-        combine_gen = lambda i: Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
+        combine_gen = lambda i: Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size)
         conv_out = [Conv2D(filters=f, kernel_size=conv_kernel_size, padding='same', activation=a, dtype="float32", name=f"{name}/{output_name}") for output_name, a, f in zip(output_names, activation_out, filters_out)]
         concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name, dtype="float32") for output_name, a in zip(output_names, activation_out)]
         id_out = [tf.keras.layers.Lambda(lambda x: x, name = output_name, dtype="float32") for output_name, a in zip(output_names, activation_out)]

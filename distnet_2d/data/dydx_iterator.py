@@ -390,10 +390,10 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
 
     if centerIm is not None:
         assert centerIm.shape == dyIm.shape, "invalid shape for center image"
-        _draw_centers(centerIm, list(labels_map_centers[-1].values()), edm[...,1])
+        _draw_centers(centerIm, labels_map_centers[-1], edm[...,1], labelIm[...,1])
     if centerImPrev is not None:
         assert centerImPrev.shape == dyIm.shape, "invalid shape for center image prev"
-        _draw_centers(centerImPrev, list(labels_map_centers[0].values()), edm[...,0])
+        _draw_centers(centerImPrev, labels_map_centers[0], edm[...,0], labelIm[...,0])
     # if noNextArr is not None:
     #     label_prev = labels_map_centers[0].keys()
     #     label_cur = labels_map_centers[-1].keys()
@@ -403,18 +403,27 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
     #         if l in no_next:
     #             noNextArr[r]=True
 
-def _draw_centers(centerIm, centers, edm): # TODO design choice: draw gaussian and use L2 regression ?
-    if len(centers)==0:
+def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design choice: draw gaussian and use L2 regression ?
+    if len(labels_map_centers)==0:
         return
+
+    # point
     # for center in centers: # in case center prediction is a classification
     #     centerIm[int(center[0]+0.5), int(center[1]+0.5)] = 1
+
+    # gaussian
+    # Y, X = centerIm.shape
+    # Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
+    # sigmas = map_coordinates(edm, np.array(centers).T, prefilter=False)
+    # for i, center in enumerate(centers):
+    #     sigma_sq = max(1, 0.5 * (sigmas[i]**2))
+    #     d = np.square(center[0] - Y) + np.square(center[1] - X)
+    #     np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
+    # distance to center
     Y, X = centerIm.shape
     Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-    #print(f"coords: {np.array(list(centers))}")
-    sigmas = map_coordinates(edm, np.array(centers).T, prefilter=False)
-    #print(f" sigma: {sigmas}")
-    #sigmas = [edm[int(centers[i][0]+0.5), int(centers[i][1]+0.5)]/2. for i in range(len(centers))]
-    for i, center in enumerate(centers):
-        sigma_sq = max(1, 0.5 * (sigmas[i]**2))
-        d = np.square(center[0] - Y) + np.square(center[1] - X)
-        np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
+    for label, center in labels_map_centers.items():
+        mask = labelIm==label
+        if mask.sum()>0:
+            d = np.sqrt(np.square(Y-center[0])+np.square(X-center[1]))
+            centerIm[mask] = d[mask]
