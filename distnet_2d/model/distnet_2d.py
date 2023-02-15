@@ -330,7 +330,7 @@ class DistnetModel(Model):
 # one encoder per input + one decoder + one last level of decoder per output + custom frame window size
 def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
-            downsampling_mode:str = "stride", #maxpool, stride
+            downsampling_mode:str = "stride", #maxpool, stride, maxpool_and_stride
             combine_kernel_size:int = 3,
             skip_stop_gradient:bool = False,
             predict_contours:bool = False,
@@ -476,7 +476,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, n
         down_sequence = []
     if maxpool or maxpool_and_stride:
         down_sequence = down_sequence+[MaxPool2D(pool_size=total_contraction, name=f"{name}/Maxpool{total_contraction}x{total_contraction}")]
-
+        down_concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}/DownConcat", dtype="float32")
     def op(input):
         res = input
         if sequence is not None:
@@ -484,7 +484,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, n
                 res=l(res)
         down = [l(res) for l in down_sequence]
         if len(down)>1:
-            down = tf.keras.layers.Concatenate(axis=-1, name = f"{name}/DownConcat", dtype="float32")(down)
+            down = down_concat(down)
         else:
             down = down[0]
         if skip_stop_gradient:
