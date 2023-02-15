@@ -337,6 +337,7 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
+            decoder_center_settings : list = None,
             residual_combine_size:int = 3,
             frame_window:int = 1,
             predict_center = False,
@@ -347,6 +348,9 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
     ):
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
+        if predict_center:
+            assert decoder_center_settings is not None, "decoder_center_settings cannot be none"
+            assert len(encoder_settings)==len(decoder_center_settings), "decoder center should have same length as encoder"
         spatial_dims = ensure_multiplicity(2, input_shape)
         n_chan = frame_window * (2 if next else 1) + 1
         # define enconder operations
@@ -377,16 +381,10 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             output_inc += 1
             seg_out += ["Output1_Contours"]
             activation_out += ["sigmoid"] # sigmoid  ?
-        if predict_center:
-            output_inc += 1
-            #seg_out += [f"Output{output_inc}_Center"]
-            #activation_out += ["sigmoid"] # sigmoid  ?
 
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 decoder_out.append( decoder_sep_op(**param_list, output_names =seg_out, name="DecoderSegmentation", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out=activation_out ))
-                if predict_center:
-                    decoder_out.append( decoder_sep_op(**param_list, output_names =[f"Output{output_inc}_Center"], name="DecoderCenter", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="sigmoid"))
                 decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
                 cat_names = [f"Output_Category_{i}" for i in range(0, frame_window)]
                 if next:
@@ -394,7 +392,14 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
                 decoder_out.append( decoder_sep2_op(**param_list, output_names = cat_names, name="DecoderCategory", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="softmax", filters_out=4, output_name = f"Output{3+output_inc}_Category") ) # categories are concatenated
             else:
                 decoder_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx) )
-
+        if predict_center:
+            decoder_c_layers=[]
+            decoder_c_out = []
+            for l_idx, param_list in enumerate(decoder_center_settings):
+                if l_idx==0:
+                    decoder_c_out.append( decoder_sep_op(**param_list, output_names =[f"Output{output_inc}_Center"], name="DecoderCenter", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out="sigmoid"))
+                else:
+                    decoder_c_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name = "DecoderLayerCenter") )
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+(n_chan,), name="Input")
         inputs = tf.split(input, num_or_size_splits = n_chan, axis=-1)
@@ -436,8 +441,8 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             #res = grad_weight_op(res) #
             residuals.append(res)
 
-        upsampled = [feature]
         residuals = residuals[::-1]
+        upsampled = [feature]
         for i, l in enumerate(decoder_layers[::-1]):
             up = l([upsampled[-1], residuals[i]])
             upsampled.append(up)
@@ -448,12 +453,16 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             residuals_displacement+=last_residuals[frame_window+1:] # next are from next->central
         seg = decoder_out[0]([ upsampled[-1], last_residuals ])
         d_inc=0
-        if predict_center:
-            center = decoder_out[1]([ upsampled[-1], last_residuals ])
-            seg = flatten_list([seg, center]) # concat lists
-            d_inc += 1
         dy, dx = decoder_out[1+d_inc]([ upsampled[-1], residuals_displacement ])
         cat = decoder_out[2+d_inc]([ upsampled[-1], residuals_displacement ])
+        if predict_center:
+            upsampled_c = [feature]
+            for i, l in enumerate(decoder_c_layers[::-1]):
+                up = l([upsampled_c[-1], residuals[i]])
+                upsampled_c.append(up)
+            center = decoder_c_out[0]([ upsampled_c[-1], last_residuals ])
+            seg = flatten_list([seg, center]) # concat lists
+
         outputs = flatten_list([seg, dy, dx, cat])
         return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
 
