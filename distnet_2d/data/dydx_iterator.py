@@ -2,7 +2,7 @@ from dataset_iterator import TrackingIterator
 from dataset_iterator.tile_utils import extract_tile_random_zoom_function
 import numpy as np
 import numpy.ma as ma
-from scipy.ndimage import center_of_mass, find_objects, maximum_filter
+from scipy.ndimage import center_of_mass, find_objects, maximum_filter, map_coordinates
 from scipy.ndimage.measurements import mean
 from skimage.transform import rescale
 from skimage.feature import peak_local_max
@@ -392,10 +392,10 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
 
     if centerIm is not None:
         assert centerIm.shape == dyIm.shape, "invalid shape for center image"
-        _draw_centers(centerIm, labels_map_centers[-1].values(), center_sigma)
+        _draw_centers(centerIm, list(labels_map_centers[-1].values()), edm[...,1])
     if centerImPrev is not None:
         assert centerImPrev.shape == dyIm.shape, "invalid shape for center image prev"
-        _draw_centers(centerImPrev, labels_map_centers[0].values(), center_sigma)
+        _draw_centers(centerImPrev, list(labels_map_centers[0].values()), edm[...,0])
     # if noNextArr is not None:
     #     label_prev = labels_map_centers[0].keys()
     #     label_cur = labels_map_centers[-1].keys()
@@ -405,12 +405,16 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
     #         if l in no_next:
     #             noNextArr[r]=True
 
-def _draw_centers(centerIm, centers, sigma): # TODO design choice: draw gaussian and use L2 regression ?
+def _draw_centers(centerIm, centers, edm): # TODO design choice: draw gaussian and use L2 regression ?
     # for center in centers: # in case center prediction is a classification
     #     centerIm[int(center[0]+0.5), int(center[1]+0.5)] = 1
     Y, X = centerIm.shape
     Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-    sigma_sq = sigma * sigma
-    for center in centers:
+    #print(f"coords: {np.array(list(centers))}")
+    sigmas = map_coordinates(edm, np.array(centers).T, prefilter=False)
+    #print(f" sigma: {sigmas}")
+    #sigmas = [edm[int(centers[i][0]+0.5), int(centers[i][1]+0.5)]/2. for i in range(len(centers))]
+    for i, center in enumerate(centers):
+        sigma_sq = max(1, 0.5 * (sigmas[i]**2))
         d = np.square(center[0] - Y) + np.square(center[1] - X)
         np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
