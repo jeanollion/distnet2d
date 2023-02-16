@@ -8,7 +8,7 @@ def get_soft_argmax_2d_fun(spatial_dims, beta=1e2, two_channel_axes=True):
     #@tf.function
     def sam(x, x_flat=None, label_rank=None):
         # if spatial_dims is None:
-        #     shape = tf.shape(x)
+        shape = tf.shape(x)
         #     Y, X = _get_spatial_kernels(shape[1], shape[2], two_channel_axes)
         count = tf.expand_dims(tf.math.count_nonzero(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, T, C, 1)
         x = tf.reshape(x, tf.concat([shape[:1], [-1], shape[-1:]], 0))
@@ -87,7 +87,7 @@ class EuclideanDistanceLoss(Loss):
         self.sum_axis = [-1, -2] if objectwise else [-1]
         self.im_scale = tf.cast(1./(spatial_dims[0]*spatial_dims[1]), tf.float32)
         self.objectwise = objectwise
-        
+
     def call(self, true, pred): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2), and (B, 1, 1, C, N)
         no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32) # non-empty objects
         true = tf.math.multiply_no_nan(true, no_na_mask)

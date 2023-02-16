@@ -426,5 +426,5 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
         mask = labelIm==label
         if mask.sum()>0:
             #w = -1# -1./max(1, 0.5 * (sigmas[i]**2))
-            d = np.sqrt((np.square(Y-center[0])+np.square(X-center[1])))
+            d = np.exp(-(np.square(Y-center[0])+np.square(X-center[1])))
             centerIm[mask] = d[mask]

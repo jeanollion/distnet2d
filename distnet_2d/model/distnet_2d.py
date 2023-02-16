@@ -12,6 +12,7 @@ from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorSampleWeightChannel
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, EuclideanDistanceLoss, get_edm_max_2d_fun
+from ..utils.lovasz_loss import lovasz_hinge_regression_per_obj, lovasz_hinge_motion_per_obj
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -51,14 +52,13 @@ DECODER_SETTINGS_DS = [
 
 class DistnetModel(Model):
     def __init__(self, *args, spatial_dims,
-        edm_loss_weight=1, contour_loss_weight=1, center_loss_weight=1, edm_contour_loss_weight=0.5, edm_center_loss_weight=0.1, displacement_loss_weight=1, center_displacement_loss_weight=0.1,
-        displacement_var_weight=1./10, displacement_var_max=50,
+        edm_loss_weight=1, contour_loss_weight=1, center_loss_weight=1, edm_contour_loss_weight=0, edm_center_loss_weight=1, displacement_loss_weight=1, center_displacement_loss_weight=0,
+        displacement_var_weight=1,
         category_loss_weight=1,
-        edm_loss=MeanSquaredError(),
+        edm_loss=MeanSquaredErrorSampleWeightChannel(),
         contour_loss = MeanSquaredError(),
-        center_loss = MeanSquaredError(),
-        displacement_loss = MeanSquaredErrorSampleWeightChannel(),
-        displacement_mean = False,
+        # center_loss = MeanSquaredError(),
+        # displacement_loss = MeanSquaredErrorSampleWeightChannel(),
         category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
         category_class_frequency_range=[1/10, 10],
         next = True,
@@ -77,7 +77,7 @@ class DistnetModel(Model):
         self.predict_contours = predict_contours
         self.predict_center = predict_center
         self.spatial_dims = spatial_dims
-        self.center_loss=center_loss
+        # self.center_loss=center_loss
         center_softargmax_beta = center_softargmax_beta
         self.center_spead = get_gaussian_spread_fun(center_sigma, spatial_dims[0], spatial_dims[1], objectwise=True)
         self.get_center = get_weighted_mean_2d_fun(spatial_dims)
@@ -103,7 +103,6 @@ class DistnetModel(Model):
         self.edm_center_weight = edm_center_loss_weight
         self.center_displacement_weight = center_displacement_loss_weight
         self.displacement_var_weight=displacement_var_weight
-        self.displacement_var_max=displacement_var_max
         self.edm_loss = edm_loss
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
@@ -113,10 +112,9 @@ class DistnetModel(Model):
             self.category_loss=weighted_loss_by_category(SparseCategoricalCrossentropy(), category_weights)
         else:
             self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
-        self.displacement_loss = displacement_loss
-        self.displacement_mean=displacement_mean
+        # self.displacement_loss = displacement_loss
 
-    def update_loss_weights(self, edm_weight=1, contour_weight=1, center_weight=1, displacement_weight=1, category_weight=1, normalize=True): # TODO: normalize per decoder head ?
+    def update_loss_weights(self, edm_weight=1, contour_weight=1, center_weight=1, displacement_weight=1, category_weight=1, normalize=False):
         sum = edm_weight + (contour_weight if self.predict_contours else 0) + (center_weight if self.predict_center else 0) + displacement_weight + category_weight if normalize else 1
         self.edm_weight = edm_weight / sum
         self.contour_weight=contour_weight / sum
@@ -137,10 +135,9 @@ class DistnetModel(Model):
         center_weight = self.center_weight
         inc = 1 if self.predict_contours else 0
         inc += 1 if self.predict_center else 0
+        weight_map = None
         if len(y) == 6 + inc: # y = edm, contour, center, dy, dX, cat, no_next, label_rank
-            label_rank, label_size, N = self._get_label_rank_and_size(y[-1]) # (B, Y, X, C, T, N) & (B, 1, 1, C, T, N)
-            if self.displacement_mean:
-                displacement_weight = displacement_weight / 2.
+            label_rank, label_size, N, weight_map = self._get_label_rank_and_size(y[-1]) # (B, Y, X, C, T, N) & (B, 1, 1, C, T, N)
         else :
             label_rank = None
             if self.predict_center and self.predict_contours:
@@ -154,7 +151,7 @@ class DistnetModel(Model):
             # compute loss
             losses = dict()
             inc=0
-            edm_loss = self.edm_loss(y[inc], y_pred[inc])
+            edm_loss = self.edm_loss(y[inc], y_pred[inc], sample_weight = weight_map)
             loss = edm_loss * edm_weight
             losses["edm"] = tf.reduce_mean(edm_loss)
 
@@ -190,17 +187,27 @@ class DistnetModel(Model):
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                 losses["edm_contour"] = tf.reduce_mean(contour_edm_loss)
 
-            if self.predict_center:
-                inc+=1
-                center_loss = self.center_loss(y[inc], y_pred[inc])
-                loss = loss + center_loss * center_weight
-                losses["center"] = tf.reduce_mean(center_loss)
+
 
             # displacement loss
             if label_rank is not None: # label rank is returned : object-wise loss
-                label_rank_sel = tf.concat([tf.tile(label_rank[..., fw:fw+1, :], [1,1,1,fw,1]), label_rank[..., fw+1:, :]], axis=-2)
-                label_size_sel = tf.concat([tf.tile(label_size[..., fw:fw+1, :], [1,1,1,fw,1]), label_size[..., fw+1:, :]], axis=-2)
-                if self.center_displacement_weight>0 or self.displacement_var_weight>0 or self.displacement_mean:
+                _, scale = self._get_mean_by_object(y[0], label_rank, label_size, project = True)
+                scale = scale * 0.5
+                if self.predict_center:
+                    inc+=1
+                    center_loss = lovasz_hinge_regression_per_obj(y[inc], y_pred[inc], scale, label_rank)
+                    loss = loss + center_loss * center_weight
+                    losses["center"] = tf.reduce_mean(center_loss)
+
+                label_rank_sel = tf.tile(label_rank[..., fw:fw+1, :], [1,1,1,fw,1])
+                label_size_sel = tf.tile(label_size[..., fw:fw+1, :], [1,1,1,fw,1])
+                scale_sel = tf.tile(scale[..., fw:fw+1], [1,1,1,fw])
+                if self.next:
+                    label_rank_sel = tf.concat([label_rank_sel, label_rank[..., fw+1:, :]], axis=-2)
+                    label_size_sel = tf.concat([label_size_sel, label_size[..., fw+1:, :]], axis=-2)
+                    scale_sel = tf.concat([scale_sel, scale[..., fw+1:]], axis=-1)
+
+                if self.center_displacement_weight>0 or self.displacement_var_weight>0:
                     dym_pred_center, dym_pred = self._get_mean_by_object(y_pred[1+inc], label_rank_sel, label_size_sel)
                     dxm_pred_center, dxm_pred = self._get_mean_by_object(y_pred[2+inc], label_rank_sel, label_size_sel)
 
@@ -255,28 +262,27 @@ class DistnetModel(Model):
                     edm_center_loss = edm_center_loss
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = tf.reduce_mean(edm_center_loss)
-                if self.displacement_var_weight>0: # enforce homogeneity : increase weight
-                    _, dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank_sel, label_size_sel)
-                    vary = dy2m_pred - tf.math.square(dym_pred)
-                    _, dx2m_pred = self._get_mean_by_object(tf.math.square(y_pred[2+inc]), label_rank_sel, label_size_sel)
-                    varx = dx2m_pred - tf.math.square(dxm_pred)
+                if self.displacement_var_weight>0: # enforce homogeneity : var -> 0
+                    dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank_sel, label_size_sel, project=False)
+                    vary = dy2m_pred - tf.math.square(dym_pred_center)
+                    dx2m_pred = self._get_mean_by_object(tf.math.square(y_pred[2+inc]), label_rank_sel, label_size_sel, project=False)
+                    varx = dx2m_pred - tf.math.square(dxm_pred_center)
                     var = vary + varx
-                    var = stop_gradient(var, parent_name = "DisplacementVAR") # we create a weight map -> no gradient
-                    if self.displacement_var_max>0:
-                        var = tf.math.minimum(var, self.displacement_var_max)
-                    displacement_wm = 1 + var * displacement_var_weight
-                else:
-                    displacement_wm = None
-                if self.displacement_mean:
-                    dm_loss = self.displacement_loss(y[1+inc], dym_pred, sample_weight=displacement_wm) + self.displacement_loss(y[2+inc], dxm_pred, sample_weight=displacement_wm)
-                    loss = loss + dm_loss * displacement_weight
-                    losses["displacement_mean"] = tf.reduce_mean(dm_loss)
-            else:
-                displacement_wm = None
+                    var = tf.reduce_mean(var, axis=-1) # mean among all objects
+                    var = tf.reduce_sum(var, axis=[1, 2, 3])
+                    var = tf.reduce_mean(var) # batch mean
+                    loss = loss + var * self.displacement_var_weight
+                    losses["displacement_var"] = var
+
+                d_loss = lovasz_hinge_motion_per_obj(y[1+inc], y_pred[1+inc], y[2+inc], y_pred[2+inc], scale_sel, label_rank_sel)
+                d_loss = tf.reduce_mean(d_loss) # batch mean
+                loss = loss + d_loss * displacement_weight
+                losses["displacement"] = d_loss
+
             # pixel-wise displacement loss
-            d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc], sample_weight=displacement_wm) + self.displacement_loss(y[2+inc], y_pred[2+inc], sample_weight=displacement_wm)
-            loss = loss + d_loss * displacement_weight
-            losses["displacement"] = tf.reduce_mean(d_loss)
+            # d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
+            # loss = loss + d_loss * displacement_weight
+            # losses["displacement"] = tf.reduce_mean(d_loss)
 
             # category loss
             cat_loss = 0
@@ -322,10 +328,16 @@ class DistnetModel(Model):
             return mean
 
     def _get_label_rank_and_size(self, labels):
-        N = tf.math.maximum(1, tf.math.reduce_max(labels)) # in case of empty image: 1
-        label_rank = tf.one_hot(labels-1, N, dtype=tf.float32) # B, Y, X, T, N
-        label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True) # B, 1, 1, T, N
-        return label_rank, label_size, N
+        N = tf.math.reduce_max(labels)
+        def null_im():
+            shape = tf.shape(labels)
+            return tf.zeros(shape = tf.shape(labels), dtype = tf.float32)[..., tf.newaxis], tf.zeros(shape = tf.concat([shape[:1], [1, 1], shape[-1:], [1]], 0), dtype=tf.float32), N+1, tf.divide(tf.ones(shape = tf.shape(labels), dtype=tf.float32), tf.cast(shape[1]*shape[2], tf.float32))
+        def non_null_im():
+            label_rank = tf.one_hot(labels, N+1, dtype=tf.float32) # B, Y, X, T, N+1 (includes background)
+            label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True) # B, 1, 1, T, N+1
+            weight_map = tf.reduce_sum(tf.math.divide_no_nan(label_rank, label_size), axis=-1, keepdims=False)
+            return label_rank[...,1:], label_size[...,1:], N, weight_map
+        return tf.cond(tf.equal(N, 0), null_im, non_null_im)
 
 # one encoder per input + one decoder + one last level of decoder per output + custom frame window size
 def get_distnet_2d_sep_out_fw(input_shape, # Y, X
@@ -338,6 +350,8 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
             decoder_center_settings : list = None,
+            attention : bool = True,
+            self_attention:bool = True,
             residual_combine_size:int = 3,
             frame_window:int = 1,
             predict_center = False,
@@ -357,19 +371,23 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         encoder_layers = []
         contraction_per_layer = []
         combine_residual_layer = []
+        no_residual_layer = []
         for l_idx, param_list in enumerate(encoder_settings):
             op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
-            combine_residual_layer.append(Combine(filters=residual_filters, kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
+            combine_residual_layer.append(Combine(filters=residual_filters, kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}") if residual_filters>0 else None)
+            no_residual_layer.append(residual_filters==0)
         # define feature operations
         feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
-        attention_op = Attention(positional_encoding="2D", name="Attention")
-        self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
-        self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
         combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
-        attention_combine = Combine(filters=attention_filters//2, name="AttentionCombine")
-        attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
+        if self_attention:
+            self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
+            self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
+        if attention:
+            attention_op = Attention(positional_encoding="2D", name="Attention")
+            attention_combine = Combine(filters=attention_filters//2, name="AttentionCombine")
+            attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
 
         # define decoder operations
         decoder_layers=[]
@@ -384,8 +402,9 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
 
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
-                decoder_out.append( decoder_sep_op(**param_list, output_names =seg_out, name="DecoderSegmentation", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out=activation_out ))
-                decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu") )
+                no_res = no_residual_layer[0]
+                decoder_out.append( decoder_sep_op(**param_list, output_names =seg_out, name="DecoderSegmentation", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", activation_out=activation_out, filters_out = n_chan if no_res else 1 ))
+                decoder_out.append( decoder_sep_op(**param_list, output_names = [f"Output{1+output_inc}_dy", f"Output{2+output_inc}_dx"], name="DecoderDisplacement", size_factor=contraction_per_layer[l_idx], conv_kernel_size=3, combine_kernel_size=combine_kernel_size, mode=upsampling_mode, activation="relu", filters_out = n_chan-1 if no_res else 1) )
                 cat_names = [f"Output_Category_{i}" for i in range(0, frame_window)]
                 if next:
                     cat_names += [f"Output_CategoryNext_{i}" for i in range(0, frame_window)]
@@ -418,18 +437,20 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             feature = downsampled[-1]
             for op in feature_convs:
                 feature = op(feature)
-            sa = self_attention_op([feature, feature])
-            feature = self_attention_skip_op([feature, sa])
+            if self_attention:
+                sa = self_attention_op([feature, feature])
+                feature = self_attention_skip_op([feature, sa])
             all_features.append(feature)
         combined_features = combine_features_op(all_features)
-        attention_result = []
-        for i in range(0, frame_window):
-            attention_result.append(attention_op([all_features[i], all_features[frame_window]]))
-        if next:
+        if attention:
+            attention_result = []
             for i in range(0, frame_window):
-                attention_result.append(attention_op([all_features[frame_window], all_features[frame_window+1+i]]))
-        attention = attention_combine(attention_result)
-        feature = attention_skip_op([attention, combined_features])
+                attention_result.append(attention_op([all_features[i], all_features[frame_window]]))
+            if next:
+                for i in range(0, frame_window):
+                    attention_result.append(attention_op([all_features[frame_window], all_features[frame_window+1+i]]))
+            attention = attention_combine(attention_result)
+            combined_features = attention_skip_op([attention, combined_features])
 
         residuals = []
         for l_idx in range(len(encoder_layers)): # arrange residuals and combine them except for first layer
@@ -437,12 +458,12 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             #grad_weight_op = WeigthedGradient(1./3, name=f"WeigthedGradient_{l_idx}")
             if l_idx>=1:
                 combine_residual_op = combine_residual_layer[l_idx]
-                res = combine_residual_op(res)
+                res = combine_residual_op(res) if combine_residual_op is not None else None
             #res = grad_weight_op(res) #
             residuals.append(res)
 
         residuals = residuals[::-1]
-        upsampled = [feature]
+        upsampled = [combined_features]
         for i, l in enumerate(decoder_layers[::-1]):
             up = l([upsampled[-1], residuals[i]])
             upsampled.append(up)
@@ -456,7 +477,7 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         dy, dx = decoder_out[1+d_inc]([ upsampled[-1], residuals_displacement ])
         cat = decoder_out[2+d_inc]([ upsampled[-1], residuals_displacement ])
         if predict_center:
-            upsampled_c = [feature]
+            upsampled_c = [combined_features]
             for i, l in enumerate(decoder_c_layers[::-1]):
                 up = l([upsampled_c[-1], None])
                 upsampled_c.append(up)
@@ -464,6 +485,128 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             seg = flatten_list([seg, center]) # concat lists
 
         outputs = flatten_list([seg, dy, dx, cat])
+        return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
+
+def get_distnet_2d_erf(input_shape, # Y, X
+            upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
+            downsampling_mode:str = "stride", #maxpool, stride, maxpool_and_stride
+            combine_kernel_size:int = 3,
+            skip_stop_gradient:bool = False,
+            predict_contours:bool = False,
+            encoder_settings:list = ENCODER_SETTINGS,
+            feature_settings: list = FEATURE_SETTINGS,
+            decoder_settings: list = DECODER_SETTINGS,
+            attention : bool = True,
+            self_attention:bool = True,
+            residual_combine_size:int = 3,
+            frame_window:int = 1,
+            predict_center = False,
+            edm_center_mode = "MEAN", # among MAX, MEAN, SKELETON or NONE
+            next:bool=True,
+            name: str="DiSTNet2D",
+            l2_reg: float=1e-5,
+    ):
+        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
+        assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
+        spatial_dims = ensure_multiplicity(2, input_shape)
+        n_chan = frame_window * (2 if next else 1) + 1
+        # define enconder operations
+        encoder_layers = []
+        contraction_per_layer = []
+        combine_residual_layer = []
+        no_residual_layer = []
+        for l_idx, param_list in enumerate(encoder_settings):
+            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
+            encoder_layers.append(op)
+            contraction_per_layer.append(contraction)
+            combine_residual_layer.append(Combine(filters=residual_filters, kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}") if residual_filters>0 else None)
+            no_residual_layer.append(residual_filters==0)
+        # define feature operations
+        feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
+        combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
+        if self_attention:
+            self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
+            self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
+        if attention:
+            attention_op = Attention(positional_encoding="2D", name="Attention")
+            attention_combine = Combine(filters=attention_filters//2, name="AttentionCombine")
+            attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
+
+        # define decoder operations
+        decoder_layers={"Seg":[], "Center":[], "Track":[], "Cat":[]}
+        decoder_out={"Seg":{}, "Center":{}, "Track":{}, "Cat":{}}
+        output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"], "Cat": ["Cat"]}
+        n_output_per_decoder = {"Seg": n_chan, "Center": n_chan if predict_center else 0, "Track": n_chan-1, "Cat": n_chan-1}
+        output_inc = 0
+        seg_out = ["Output0_EDM"]
+        activation_out = ["linear"]
+        if predict_contours:
+            output_inc += 1
+            seg_out += ["Output1_Contours"]
+            activation_out += ["sigmoid"] # sigmoid  ?
+
+        for l_idx, param_list in enumerate(decoder_settings):
+            if l_idx==0:
+                decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
+                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
+                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
+                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4, layer_idx=l_idx, name=f"DecoderCat")
+                if predict_center:
+                    decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="sigmoid", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
+            else:
+                for decoder_name, d_layers in decoder_layers.items():
+                    d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name=f"Decoder{decoder_name}") )
+        decoder_concat = dict()
+        oi = 0
+        for n, o_ns in output_per_decoder.items():
+            decoder_concat[n] = dict()
+            for o_n in o_ns:
+                decoder_concat[n][o_n] = tf.keras.layers.Concatenate(axis=-1, name = f"Output{oi}{o_n}", dtype="float32")
+                oi += 1
+        pick_conv_gen = lambda i, decoder_name, output_name: Conv2D(filters=attention_filters, kernel_size=1, padding='same', activation="relu", name=f"FeatureConv{decoder_name}{output_name}_{i}") # convolution to distinguish frames
+        # Create GRAPH
+        input = tf.keras.layers.Input(shape=spatial_dims+(n_chan,), name="Input")
+        inputs = tf.split(input, num_or_size_splits = n_chan, axis=-1)
+        all_downsampled = []
+        all_features = []
+        for i in inputs:
+            downsampled = [i]
+            for l in encoder_layers:
+                down, res = l(downsampled[-1])
+                downsampled.append(down)
+            all_downsampled.append(downsampled)
+            feature = downsampled[-1]
+            for op in feature_convs:
+                feature = op(feature)
+            if self_attention:
+                sa = self_attention_op([feature, feature])
+                feature = self_attention_skip_op([feature, sa])
+            all_features.append(feature)
+        combined_features = combine_features_op(all_features)
+        if attention:
+            attention_result = []
+            for i in range(0, frame_window):
+                attention_result.append(attention_op([all_features[i], all_features[frame_window]]))
+            if next:
+                for i in range(0, frame_window):
+                    attention_result.append(attention_op([all_features[frame_window], all_features[frame_window+1+i]]))
+            attention = attention_combine(attention_result)
+            combined_features = attention_skip_op([attention, combined_features])
+
+        outputs = []
+        for decoder_name, n_out in n_output_per_decoder.items():
+            d_layers = decoder_layers[decoder_name]
+            for output_name in output_per_decoder[decoder_name]:
+                d_out = decoder_out[decoder_name][output_name]
+                concat = decoder_concat[decoder_name][output_name]
+                frames = []
+                for i in range(n_out):
+                    up = pick_conv_gen(i, decoder_name, output_name)(combined_features)
+                    for i, l in enumerate(d_layers[::-1]):
+                        up = l([up, None]) # no residual
+                    frames.append(d_out([up, None])) # no residual
+                if n_out > 0:
+                    outputs.append(concat(frames))
         return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, name: str="EncoderLayer", layer_idx:int=1):
@@ -494,6 +637,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, n
 
 def decoder_op(
             filters: int,
+            filters_out: int = None,
             size_factor: int=2,
             conv_kernel_size:int=3,
             up_kernel_size:int=0,
@@ -501,21 +645,31 @@ def decoder_op(
             skip_combine_mode = "conv", # conv, sum
             combine_kernel_size = 1,
             activation: str="relu",
+            activation_out : str = None,
             res_1D:bool = False,
             n_conv:int = 1,
             name: str="DecoderLayer",
             layer_idx:int=1,
         ):
         name=f"{name}{layer_idx}"
-        up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
+        if n_conv==0 and activation_out is not None:
+            activation = activation_out
+        if n_conv>0 and activation_out is None:
+            activation_out = activation
+        if n_conv==0 and filters_out is not None:
+            filters = filters_out
+        if n_conv>0 and filters_out is None:
+            filters_out = filters
+
+        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True)
         if skip_combine_mode=="conv":
-            combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size) #, l2_reg=l2_reg
+            combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size)
         else:
             combine = None
         if res_1D:
-            convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}") for i in range(n_conv)]
+            convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}") for i in range(n_conv)]
         else:
-            convs = [Conv2D(filters=filters, kernel_size=conv_kernel_size, padding='same', activation=activation, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
+            convs = [Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         def op(input):
             down, res = input
             up = up_op(down)
@@ -547,7 +701,7 @@ def decoder_sep_op(
         filters_out = ensure_multiplicity(len(output_names), filters_out)
         if layer_idx>=0:
             name=f"{name}{layer_idx}"
-        up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
+        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True)
         combine_gen = lambda i: Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size)
         conv_out = [Conv2D(filters=f, kernel_size=conv_kernel_size, padding='same', activation=a, dtype="float32", name=f"{name}/{output_name}") for output_name, a, f in zip(output_names, activation_out, filters_out)]
         concat_out = [tf.keras.layers.Concatenate(axis=-1, name = output_name, dtype="float32") for output_name, a in zip(output_names, activation_out)]
@@ -560,7 +714,10 @@ def decoder_sep_op(
             else:
                 if not isinstance(res_list, (list, tuple)):
                     res_list = [res_list]
-                x_list = [combine_gen(i)([up, res]) for i, res in enumerate(res_list)]
+                if all(res is None for res in res_list):
+                    x_list = [up]*len(res_list)
+                else:
+                    x_list = [combine_gen(i)([up, res]) if res is not None else up for i, res in enumerate(res_list)]
             if len(x_list)==1:
                 return [id_out[i](conv_out[i](x_list[0])) for i in range(len(output_names))]
             else:
@@ -586,8 +743,8 @@ def decoder_sep2_op(
         ):
         if layer_idx>=0:
             name=f"{name}{layer_idx}"
-        up_op = lambda x : upsampling_block(x, filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True) # l2_reg=l2_reg
-        combine = [Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) for i, _ in enumerate(output_names) ] #, l2_reg=l2_reg
+        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True)
+        combine = [Combine(name = f"{name}/Combine{i}", filters=filters, kernel_size = combine_kernel_size) for i, _ in enumerate(output_names) ]
         conv_out = [Conv2D(filters=filters_out, kernel_size=conv_kernel_size, padding='same', activation=activation_out, name=output_name, dtype='float32') for output_name in output_names]
         if output_names is not None:
             output_concat = tf.keras.layers.Concatenate(axis=-1, name = output_name, dtype="float32")
@@ -595,15 +752,14 @@ def decoder_sep2_op(
             down, res_list = input
             assert len(res_list)==len(output_names), "decoder_sep2 : expected as many outputs as residuals"
             up = up_op(down)
-            output_list = [ conv_out[i](combine[i]([up, res])) for i, res in enumerate(res_list) ]
+            output_list = [ conv_out[i](combine[i]([up, res])) if res is not None else conv_out[i](up) for i, res in enumerate(res_list) ]
             if output_name is not None:
                 return output_concat(output_list)
             else:
                 return output_list
         return op
 
-def upsampling_block(
-            input,
+def upsampling_op(
             filters: int,
             parent_name:str,
             size_factor:int=2,
@@ -645,10 +801,12 @@ def upsampling_block(
                 use_bias=use_bias,
                 activation=activation
             )
-        x = upsample(input)
-        if conv is not None:
-            x = conv(x)
-        return x
+        def op(input):
+            x = upsample(input)
+            if conv is not None:
+                x = conv(x)
+            return x
+        return op
 
 def stop_gradient(input, parent_name:str, name:str="StopGradient"):
     if parent_name is not None and len(parent_name)>0:
