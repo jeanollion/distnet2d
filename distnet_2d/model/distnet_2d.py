@@ -153,7 +153,7 @@ class DistnetModel(Model):
             # compute loss
             losses = dict()
             inc=0
-            edm_loss = self.edm_loss(y[inc], y_pred[inc], sample_weight = weight_map)
+            edm_loss = self.edm_loss(y[inc], y_pred[inc])#, sample_weight = weight_map)
             loss = edm_loss * edm_weight
             losses["edm"] = tf.reduce_mean(edm_loss)
 
@@ -283,9 +283,10 @@ class DistnetModel(Model):
 
             #pixel-wise displacement loss
             if not self.displacement_loss_lovasz:
-                wm_sel = tf.tile(weight_map[..., fw:fw+1], [1,1,1,fw])
-                if self.next:
-                    wm_sel = tf.concat([wm_sel, weight_map[..., fw+1:]], axis=-1)
+                # wm_sel = tf.tile(weight_map[..., fw:fw+1], [1,1,1,fw])
+                # if self.next:
+                #     wm_sel = tf.concat([wm_sel, weight_map[..., fw+1:]], axis=-1)
+                wm_sel = None
                 d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc], sample_weight=wm_sel) + self.displacement_loss(y[2+inc], y_pred[2+inc], sample_weight=wm_sel)
                 loss = loss + d_loss * displacement_weight
                 losses["displacement"] = tf.reduce_mean(d_loss)
