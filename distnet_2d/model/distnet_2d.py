@@ -192,7 +192,7 @@ class DistnetModel(Model):
             # displacement loss
             if label_rank is not None: # label rank is returned : object-wise loss
                 _, scale = self._get_mean_by_object(y[0], label_rank, label_size, project = True)
-                scale = scale * 0.5
+                scale = tf.math.maximum(scale * 0.25, 1) # for lovasz_loss : we allow error for center/displacement according to the object dimension (mean edm)
                 if self.predict_center:
                     inc+=1
                     center_loss = lovasz_hinge_regression_per_obj(y[inc], y_pred[inc], scale, label_rank)

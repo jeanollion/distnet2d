@@ -25,12 +25,12 @@ def lovasz_grad(gt_sorted):
 # --------------------------- BINARY LOSSES ---------------------------
 
 def lovasz_hinge_regression_per_obj(true, pred, scale, labels):
-    d = tf.math.exp(tf.divide(-tf.math.square(true-pred), scale))
+    d = 2. * tf.math.exp(tf.divide(-tf.math.square(true-pred), scale)) - 1.
     d_o = tf.expand_dims(d, -1) * labels
     return lovasz_hinge(d_o, labels, ignore=0, per_object=True) # ignore=0  ?
 
 def lovasz_hinge_motion_per_obj(true_y, pred_y, true_x, pred_x, scale, labels):
-    d = tf.math.exp(tf.divide(-tf.math.square(true_y-pred_y)-tf.math.square(true_x-pred_x), scale))
+    d = 2. * tf.math.exp(tf.divide(-tf.math.square(true_y-pred_y)-tf.math.square(true_x-pred_x), scale)) - 1.
     d_o = tf.expand_dims(d, -1) * labels
     return lovasz_hinge(d_o, labels, ignore=0, per_object=True) # ignore=0  ?
 
