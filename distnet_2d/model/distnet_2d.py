@@ -291,7 +291,6 @@ class DistnetModel(Model):
             loss = loss + cat_loss * category_weight
             losses["category"] = tf.reduce_mean(cat_loss)
             losses["loss"] = loss
-            print(f"loss shape: {loss.shape.as_list()}")
             if mixed_precision:
                 loss = self.optimizer.get_scaled_loss(loss)
 
