@@ -58,7 +58,7 @@ class DistnetModel(Model):
         edm_loss=MeanSquaredErrorSampleWeightChannel(),
         contour_loss = MeanSquaredError(),
         # center_loss = MeanSquaredError(),
-        # displacement_loss = MeanSquaredErrorSampleWeightChannel(),
+        displacement_loss = MeanSquaredErrorSampleWeightChannel(),
         category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
         category_class_frequency_range=[1/10, 10],
         next = True,
@@ -73,6 +73,7 @@ class DistnetModel(Model):
         gradient_safe_mode = False,
         **kwargs):
         super().__init__(*args, **kwargs)
+        self.displacement_loss_lovasz = False
         self.gradient_safe_mode=gradient_safe_mode
         self.predict_contours = predict_contours
         self.predict_center = predict_center
@@ -112,7 +113,7 @@ class DistnetModel(Model):
             self.category_loss=weighted_loss_by_category(SparseCategoricalCrossentropy(), category_weights)
         else:
             self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
-        # self.displacement_loss = displacement_loss
+        self.displacement_loss = displacement_loss
 
     def update_loss_weights(self, edm_weight=1, contour_weight=1, center_weight=1, displacement_weight=1, category_weight=1, normalize=False):
         sum = edm_weight + (contour_weight if self.predict_contours else 0) + (center_weight if self.predict_center else 0) + displacement_weight + category_weight if normalize else 1
@@ -273,16 +274,20 @@ class DistnetModel(Model):
                     var = tf.reduce_mean(var) # batch mean
                     loss = loss + var * self.displacement_var_weight
                     losses["displacement_var"] = var
+                if self.displacement_loss_lovasz:
+                    d_loss = lovasz_hinge_motion_per_obj(y[1+inc], y_pred[1+inc], y[2+inc], y_pred[2+inc], scale_sel, label_rank_sel)
+                    d_loss = tf.reduce_mean(d_loss) # batch mean
+                    loss = loss + d_loss * displacement_weight
+                    losses["displacement"] = d_loss
 
-                d_loss = lovasz_hinge_motion_per_obj(y[1+inc], y_pred[1+inc], y[2+inc], y_pred[2+inc], scale_sel, label_rank_sel)
-                d_loss = tf.reduce_mean(d_loss) # batch mean
+            #pixel-wise displacement loss
+            if not self.displacement_loss_lovasz:
+                wm_sel = tf.tile(weight_map[..., fw:fw+1], [1,1,1,fw])
+                if self.next:
+                    wm_sel = tf.concat([wm_sel, weight_map[..., fw+1:]], axis=-1)
+                d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc], sample_weight=wm_sel) + self.displacement_loss(y[2+inc], y_pred[2+inc], sample_weight=wm_sel)
                 loss = loss + d_loss * displacement_weight
-                losses["displacement"] = d_loss
-
-            # pixel-wise displacement loss
-            # d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
-            # loss = loss + d_loss * displacement_weight
-            # losses["displacement"] = tf.reduce_mean(d_loss)
+                losses["displacement"] = tf.reduce_mean(d_loss)
 
             # category loss
             cat_loss = 0
@@ -602,16 +607,17 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for decoder_name, n_out in n_output_per_decoder.items():
             d_layers = decoder_layers[decoder_name]
             for output_name in output_per_decoder[decoder_name]:
-                d_out = decoder_out[decoder_name][output_name]
-                concat = decoder_concat[decoder_name][output_name]
-                frames = []
-                for i in range(n_out):
-                    up = pick_conv_gen(i, decoder_name, output_name)(combined_features)
-                    for i, l in enumerate(d_layers[::-1]):
-                        up = l([up, None]) # no residual
-                    frames.append(d_out([up, None])) # no residual
-                if n_out > 0:
-                    outputs.append(concat(frames))
+                if output_name in decoder_out[decoder_name]:
+                    d_out = decoder_out[decoder_name][output_name]
+                    concat = decoder_concat[decoder_name][output_name]
+                    frames = []
+                    for i in range(n_out):
+                        up = pick_conv_gen(i, decoder_name, output_name)(combined_features)
+                        for i, l in enumerate(d_layers[::-1]):
+                            up = l([up, None]) # no residual
+                        frames.append(d_out([up, None])) # no residual
+                    if n_out > 0:
+                        outputs.append(concat(frames))
         return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
