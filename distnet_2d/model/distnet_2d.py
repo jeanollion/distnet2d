@@ -266,14 +266,13 @@ class DistnetModel(Model):
                     loss = loss + edm_center_loss * edm_weight * self.edm_center_weight
                     losses["edm_center"] = tf.reduce_mean(edm_center_loss)
                 if self.displacement_var_weight>0: # enforce homogeneity : var -> 0
-                    dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank_sel, label_size_sel, project=False)
-                    vary = dy2m_pred - tf.math.square(dym_pred_center)
-                    dx2m_pred = self._get_mean_by_object(tf.math.square(y_pred[2+inc]), label_rank_sel, label_size_sel, project=False)
-                    varx = dx2m_pred - tf.math.square(dxm_pred_center)
+                    dy2m_pred = self._get_mean_by_object(tf.math.square(y_pred[1+inc]), label_rank_sel[...,1:], label_size_sel[...,1:], project=False)
+                    vary = dy2m_pred- tf.math.square(dym_pred_center[...,1:] )
+                    dx2m_pred = self._get_mean_by_object(tf.math.square(y_pred[2+inc]), label_rank_sel[...,1:], label_size_sel[...,1:], project=False)
+                    varx = dx2m_pred - tf.math.square(dxm_pred_center[...,1:] )
                     var = vary + varx
-                    var = tf.reduce_mean(var, axis=-1) # mean among all objects
-                    var = tf.reduce_sum(var, axis=[1, 2, 3])
-                    var = tf.reduce_mean(var) # batch mean
+                    var = tf.reduce_mean(var, axis=[0, -1]) # mean among all objects & batch
+                    var = tf.reduce_sum(var)
                     loss = loss + var * self.displacement_var_weight
                     losses["displacement_var"] = var
                 if self.displacement_loss_lovasz:
