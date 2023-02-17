@@ -13,7 +13,7 @@ from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorSampleWeightChannel
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, EuclideanDistanceLoss, get_edm_max_2d_fun
-from ..utils.lovasz_loss import lovasz_hinge_regression_per_obj, lovasz_hinge_motion_per_obj
+from ..utils.lovasz_loss import lovasz_hinge_regression_per_obj, lovasz_hinge_motion_per_obj, lovasz_hinge_regression, lovasz_hinge_motion
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -140,6 +140,7 @@ class DistnetModel(Model):
         weight_map = None
         if len(y) == 6 + inc: # y = edm, contour, center, dy, dX, cat, no_next, label_rank
             label_rank, label_size, N, weight_map = self._get_label_rank_and_size(y[-1]) # (B, Y, X, C, T, N) & (B, 1, 1, C, T, N)
+
         else :
             label_rank = None
             if self.predict_center and self.predict_contours:
@@ -189,14 +190,14 @@ class DistnetModel(Model):
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                 losses["edm_contour"] = tf.reduce_mean(contour_edm_loss)
 
-            # displacement loss
+            # object-wise loss
             if label_rank is not None: # label rank is returned : object-wise loss
                 _, scale = self._get_mean_by_object(y[0], label_rank, label_size, project = True)
                 scale = tf.math.maximum(scale * 0.25, 1) # for lovasz_loss : we allow error for center/displacement according to the object dimension (mean edm) (should it be max ?)
                 if self.predict_center:
+                    label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
                     inc+=1
-                    center_loss = lovasz_hinge_regression_per_obj(y[inc], y_pred[inc], scale, label_rank)
-                    #center_loss = tf.reduce_mean(center_loss) # batch mean
+                    center_loss = lovasz_hinge_regression(y[inc], y_pred[inc], scale, label_mask)
                     loss = loss + center_loss * center_weight
                     losses["center"] = center_loss
 
@@ -275,10 +276,11 @@ class DistnetModel(Model):
                     var = tf.reduce_sum(var)
                     loss = loss + var * self.displacement_var_weight
                     losses["displacement_var"] = var
-                if self.displacement_loss_lovasz:
-                    d_loss = lovasz_hinge_motion_per_obj(y[1+inc], y_pred[1+inc], y[2+inc], y_pred[2+inc], scale_sel, label_rank_sel)
-                    loss = loss + d_loss * displacement_weight
-                    losses["displacement"] = d_loss
+            if self.displacement_loss_lovasz:
+                label_mask_sel = tf.reduce_sum(label_mask_sel[...,1:], axis=-1, keepdims=False)
+                d_loss = lovasz_hinge_motion(y[1+inc], y_pred[1+inc], y[2+inc], y_pred[2+inc], scale_sel, label_mask_sel)
+                loss = loss + d_loss * displacement_weight
+                losses["displacement"] = d_loss
 
             #pixel-wise displacement loss
             if not self.displacement_loss_lovasz:
@@ -521,6 +523,8 @@ def get_distnet_2d_erf(input_shape, # Y, X
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
         spatial_dims = ensure_multiplicity(2, input_shape)
+        if isinstance(spatial_dims, tuple):
+            spatial_dims = list(spatial_dims)
         n_chan = frame_window * (2 if next else 1) + 1
         # define enconder operations
         encoder_layers = []
@@ -563,40 +567,39 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
-                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="tanh", factor = spatial_dims[0], filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
-                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="tanh", factor = spatial_dims[1], filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
+                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
+                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
                 decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4, layer_idx=l_idx, name=f"DecoderCat")
                 if predict_center:
                     decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="sigmoid", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name=f"Decoder{decoder_name}") )
-        decoder_concat = dict()
+        decoder_output_names = dict()
         oi = 0
         for n, o_ns in output_per_decoder.items():
-            decoder_concat[n] = dict()
+            decoder_output_names[n] = dict()
             for o_n in o_ns:
-                decoder_concat[n][o_n] = tf.keras.layers.Concatenate(axis=-1, name = f"Output{oi}{o_n}", dtype="float32")
+                decoder_output_names[n][o_n] = f"Output{oi}{o_n}"
                 oi += 1
         pick_conv_gen = lambda i, decoder_name, output_name: Conv2D(filters=attention_filters, kernel_size=1, padding='same', activation="relu", name=f"FeatureConv{decoder_name}{output_name}_{i}") # convolution to distinguish frames
         # Create GRAPH
-        input = tf.keras.layers.Input(shape=spatial_dims+(n_chan,), name="Input")
-        inputs = tf.split(input, num_or_size_splits = n_chan, axis=-1)
-        all_downsampled = []
-        all_features = []
-        for i in inputs:
-            downsampled = [i]
-            for l in encoder_layers:
-                down, res = l(downsampled[-1])
-                downsampled.append(down)
-            all_downsampled.append(downsampled)
-            feature = downsampled[-1]
-            for op in feature_convs:
-                feature = op(feature)
-            if self_attention:
-                sa = self_attention_op([feature, feature])
-                feature = self_attention_skip_op([feature, sa])
-            all_features.append(feature)
+        input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
+        input_merged = tf.expand_dims(tf.reshape(tf.transpose(input, perm=[0, 3, 1, 2]), [-1]+spatial_dims), -1) # shared encoder -> frames into batch dim
+        downsampled = [input_merged]
+        for l in encoder_layers:
+            down, res = l(downsampled[-1])
+            downsampled.append(down)
+        feature = downsampled[-1]
+        for op in feature_convs:
+            feature = op(feature)
+        if self_attention:
+            sa = self_attention_op([feature, feature])
+            feature = self_attention_skip_op([feature, sa])
+
+        target_shape = [-1, n_chan]+feature.shape.as_list()[-3:]
+        all_features = tf.split(tf.reshape(feature, target_shape), num_or_size_splits = n_chan, axis=1)
+        all_features = [tf.squeeze(f, 1) for f in all_features]
         combined_features = combine_features_op(all_features)
         if attention:
             attention_result = []
@@ -610,19 +613,21 @@ def get_distnet_2d_erf(input_shape, # Y, X
 
         outputs = []
         for decoder_name, n_out in n_output_per_decoder.items():
-            d_layers = decoder_layers[decoder_name]
-            for output_name in output_per_decoder[decoder_name]:
-                if output_name in decoder_out[decoder_name]:
-                    d_out = decoder_out[decoder_name][output_name]
-                    concat = decoder_concat[decoder_name][output_name]
-                    frames = []
-                    for i in range(n_out):
-                        up = pick_conv_gen(i, decoder_name, output_name)(combined_features)
-                        for i, l in enumerate(d_layers[::-1]):
+            if n_out>0:
+                d_layers = decoder_layers[decoder_name]
+                for output_name in output_per_decoder[decoder_name]:
+                    if output_name in decoder_out[decoder_name]:
+                        d_out = decoder_out[decoder_name][output_name]
+                        output_name = decoder_output_names[decoder_name][output_name]
+                        up = tf.concat([pick_conv_gen(i, decoder_name, output_name)(combined_features) for i in range(n_out)], axis=0) # shared decoder -> to batch dim
+                        for l in d_layers[::-1]:
                             up = l([up, None]) # no residual
-                        frames.append(d_out([up, None])) # no residual
-                    if n_out > 0:
-                        outputs.append(concat(frames))
+                        up = d_out([up, None]) # no residual # (N_OUT x B, Y, X, F)
+                        up = tf.reshape(up, shape = [n_out, -1]+up.shape.as_list()[-3:]) # (N_OUT, B, Y, X, F)
+                        up = tf.transpose(up, perm=[1, 2, 3, 4, 0])
+                        shape = up.shape.as_list()
+                        up = tf.reshape(up, [-1] + shape[1:-2] + [ shape[-1] * shape[-2] ] )
+                        outputs.append(up)
         return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
