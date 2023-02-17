@@ -57,11 +57,10 @@ def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False):
         losses = tf.map_fn(treat_image, (logits, labels), fn_output_signature=tf.float32)
         if per_object:
             losses = utrans(losses, shape)
-            losses = tf.reduce_sum(losses, axis=(-1, -2))
+            #losses = tf.reduce_sum(losses, axis=(-1, -2))
     else:
         losses = lovasz_hinge_flat(*flatten_binary_scores(logits, labels, ignore))
-    return losses
-
+    return tf.reduce_mean(losses)
 
 def lovasz_hinge_flat(logits, labels):
     """

@@ -1,4 +1,5 @@
 import tensorflow as tf
+import tensorflow_probability as tfp
 from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, Conv2DBNDrop, Conv2DTransposeBNDrop
 from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
@@ -154,7 +155,6 @@ class DistnetModel(Model):
             inc=0
             edm_loss = self.edm_loss(y[inc], y_pred[inc], sample_weight = weight_map)
             loss = edm_loss * edm_weight
-
             losses["edm"] = tf.reduce_mean(edm_loss)
 
             if self.predict_contours:
@@ -192,11 +192,11 @@ class DistnetModel(Model):
             # displacement loss
             if label_rank is not None: # label rank is returned : object-wise loss
                 _, scale = self._get_mean_by_object(y[0], label_rank, label_size, project = True)
-                scale = tf.math.maximum(scale * 0.25, 1) # for lovasz_loss : we allow error for center/displacement according to the object dimension (mean edm)
+                scale = tf.math.maximum(scale * 0.25, 1) # for lovasz_loss : we allow error for center/displacement according to the object dimension (mean edm) (should it be max ?)
                 if self.predict_center:
                     inc+=1
                     center_loss = lovasz_hinge_regression_per_obj(y[inc], y_pred[inc], scale, label_rank)
-                    center_loss = tf.reduce_mean(center_loss) # batch mean
+                    #center_loss = tf.reduce_mean(center_loss) # batch mean
                     loss = loss + center_loss * center_weight
                     losses["center"] = center_loss
 
@@ -223,8 +223,10 @@ class DistnetModel(Model):
                     # predicted  center coord per object
                     nan = tf.cast(float('NaN'), tf.float32)
                     d_pred_center = tf.stack([dym_pred_center, dxm_pred_center], -1) # (B, 1, 1, T-1, N, 2)
+                    d_pred_center = d_pred_center[...,1:,:] # remove background
                     center_pred = center_pred_ob if center_pred_ob is not None else edm_center_ob
                     assert center_pred is not None, "cannot compute center_displacement loss: no center"
+                    center_pred = center_pred[..., 1:,:] # remove background
                     prev_label = y[-2][...,:N] # (B, T-1, N) # trim from (B, T-1, n_label_max)
                     prev_label = prev_label[:, tf.newaxis, tf.newaxis] # (B, 1, 1, T-1, N)
                     has_prev = tf.math.greater(prev_label, 0)
@@ -276,7 +278,6 @@ class DistnetModel(Model):
                     losses["displacement_var"] = var
                 if self.displacement_loss_lovasz:
                     d_loss = lovasz_hinge_motion_per_obj(y[1+inc], y_pred[1+inc], y[2+inc], y_pred[2+inc], scale_sel, label_rank_sel)
-                    d_loss = tf.reduce_mean(d_loss) # batch mean
                     loss = loss + d_loss * displacement_weight
                     losses["displacement"] = d_loss
 
@@ -340,8 +341,12 @@ class DistnetModel(Model):
         def non_null_im():
             label_rank = tf.one_hot(labels, N+1, dtype=tf.float32) # B, Y, X, T, N+1 (includes background)
             label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=True) # B, 1, 1, T, N+1
-            weight_map = tf.reduce_sum(tf.math.divide_no_nan(label_rank, label_size), axis=-1, keepdims=False)
-            return label_rank[...,1:], label_size[...,1:], N, weight_map
+            object_sizes_flat = tf.reshape(label_size[...,1:], (-1,))
+            object_sizes_flat = tf.boolean_mask(object_sizes_flat, tf.not_equal(object_sizes_flat, 0))
+            # mean_size = tf.reduce_mean(object_sizes_flat)
+            median_size = tfp.stats.percentile(object_sizes_flat, 50.0, interpolation='midpoint')
+            weight_map = median_size * tf.reduce_sum(tf.math.divide_no_nan(label_rank, label_size), axis=-1, keepdims=False)
+            return label_rank, label_size, N, weight_map
         return tf.cond(tf.equal(N, 0), null_im, non_null_im)
 
 # one encoder per input + one decoder + one last level of decoder per output + custom frame window size
@@ -558,8 +563,8 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
-                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
-                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
+                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="tanh", factor = spatial_dims[0], filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
+                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="tanh", factor = spatial_dims[1], filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
                 decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4, layer_idx=l_idx, name=f"DecoderCat")
                 if predict_center:
                     decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="sigmoid", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
@@ -661,6 +666,7 @@ def decoder_op(
             activation_out : str = None,
             res_1D:bool = False,
             n_conv:int = 1,
+            factor:float = 1,
             name: str="DecoderLayer",
             layer_idx:int=1,
         ):
@@ -683,6 +689,7 @@ def decoder_op(
             convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         else:
             convs = [Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
+        f = tf.cast(factor, tf.float32)
         def op(input):
             down, res = input
             up = up_op(down)
@@ -693,6 +700,8 @@ def decoder_op(
                     up = up + res
             for c in convs:
                 up = c(up)
+            if factor!=1:
+                up = up * f
             return up
         return op
 
