@@ -277,7 +277,7 @@ class DistnetModel(Model):
                     loss = loss + var * self.displacement_var_weight
                     losses["displacement_var"] = var
             if self.displacement_loss_lovasz:
-                label_mask_sel = tf.reduce_sum(label_mask_sel[...,1:], axis=-1, keepdims=False)
+                label_mask_sel = tf.reduce_sum(label_rank_sel[...,1:], axis=-1, keepdims=False)
                 d_loss = lovasz_hinge_motion(y[1+inc], y_pred[1+inc], y[2+inc], y_pred[2+inc], scale_sel, label_mask_sel)
                 loss = loss + d_loss * displacement_weight
                 losses["displacement"] = d_loss
