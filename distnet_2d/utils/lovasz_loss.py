@@ -31,7 +31,7 @@ def lovasz_hinge_regression_per_obj(true, pred, scale, labels):
 
 def lovasz_hinge_regression(true, pred, scale, labels):
     d = 2. * tf.math.exp(tf.divide(-tf.math.square(true-pred), scale)) - 1.
-    return lovasz_hinge(d_o, labels, ignore=None, channel_axis=True)
+    return lovasz_hinge(d, labels, ignore=None, channel_axis=True)
 
 def lovasz_hinge_motion_per_obj(true_y, pred_y, true_x, pred_x, scale, labels):
     d = 2. * tf.math.exp(tf.divide(-tf.math.square(true_y-pred_y)-tf.math.square(true_x-pred_x), scale)) - 1.
@@ -40,8 +40,7 @@ def lovasz_hinge_motion_per_obj(true_y, pred_y, true_x, pred_x, scale, labels):
 
 def lovasz_hinge_motion(true_y, pred_y, true_x, pred_x, scale, labels):
     d = 2. * tf.math.exp(tf.divide(-tf.math.square(true_y-pred_y)-tf.math.square(true_x-pred_x), scale)) - 1.
-    d_o = tf.expand_dims(d, -1) * labels
-    return lovasz_hinge(d_o, labels, ignore=None, channel_axis=True)
+    return lovasz_hinge(d, labels, ignore=None, channel_axis=True)
 
 def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, channel_axis=False):
     """
