@@ -355,6 +355,8 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             self,
             kernel_size: int=3,
             dilation: int = 1,
+            dropout_rate : float = 0.3,
+            batch_norm : bool = True,
             activation:str = "relu",
             name: str="ResConv1D",
     ):
@@ -362,10 +364,12 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.kernel_size = kernel_size
         self.dilation = dilation
         self.activation=activation
+        self.dropout_rate=dropout_rate
+        self.batch_norm=batch_norm
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm})
       return config
 
     def build(self, input_shape):
@@ -384,7 +388,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             strides=1,
             padding='same',
             name=f"{self.name}/1_1x{self.kernel_size}",
-            activation=self.activation
+            activation="linear"
         )
         self.convY2 = tf.keras.layers.Conv2D(
             filters=input_channels,
@@ -405,14 +409,125 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             activation="linear"
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
+        if self.dropout_rate>0:
+            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+        if self.batch_norm:
+            self.bn1 = tf.keras.layers.BatchNormalization()
+            self.bn2 = tf.keras.layers.BatchNormalization()
         super().build(input_shape)
 
-    def call(self, input):
+    def call(self, input, is_training=True):
         x = self.convY1(input)
         x = self.convX1(x)
+        if self.batch_norm:
+            x = self.bn1(x, training = is_training)
+        x = self.activation_layer(x)
         x = self.convY2(x)
         x = self.convX2(x)
+        if self.batch_norm:
+            x = self.bn2(x, training = is_training)
+        if self.dropout_rate>0:
+            x = self.drop(x, training = is_training)
         return self.activation_layer(input + x)
+
+class Conv2DBNDrop(Layer):
+    def __init__(
+            self,
+            filters:int,
+            kernel_size: int=3,
+            dilation: int = 1,
+            strides: int = 1,
+            dropout_rate:float = 0.3,
+            batch_norm : bool = True,
+            activation:str = "relu",
+            name: str="ResConv1D",
+    ):
+        super().__init__(name=name)
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.activation=activation
+        self.dropout_rate=dropout_rate
+        self.batch_norm=batch_norm
+        self.strides=strides
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides})
+      return config
+
+    def build(self, input_shape):
+        self.conv = tf.keras.layers.Conv2D(
+            filters=self.filters,
+            kernel_size=self.kernel_size,
+            dilation_rate = self.dilation,
+            strides=self.strides,
+            padding='same',
+            name=f"{self.name}/{self.kernel_size}",
+            activation="linear"
+        )
+        self.activation_layer = tf.keras.activations.get(self.activation)
+        if self.dropout_rate>0:
+            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+        if self.batch_norm:
+            self.bn = tf.keras.layers.BatchNormalization()
+        super().build(input_shape)
+
+    def call(self, input, is_training=True):
+        x = self.conv(input)
+        if self.batch_norm:
+            x = self.bn(x, training = is_training)
+        if self.dropout_rate>0:
+            x = self.drop(x, training = is_training)
+        return self.activation_layer(x)
+
+class Conv2DTransposeBNDrop(Layer):
+    def __init__(
+            self,
+            filters:int,
+            kernel_size: int=3,
+            strides: int = 1,
+            dropout_rate:float = 0,
+            batch_norm : bool = True,
+            activation:str = "relu",
+            name: str="ResConv1D",
+    ):
+        super().__init__(name=name)
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.activation=activation
+        self.dropout_rate=dropout_rate
+        self.batch_norm=batch_norm
+        self.strides=strides
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides})
+      return config
+
+    def build(self, input_shape):
+        self.conv = tf.keras.layers.Conv2DTranspose(
+            filters=self.filters,
+            kernel_size=self.kernel_size,
+            strides=self.strides,
+            padding='same',
+            activation="linear",
+            name=f"{self.name}/tConv{self.kernel_size}x{self.kernel_size}",
+        )
+        self.activation_layer = tf.keras.activations.get(self.activation)
+        if self.dropout_rate>0:
+            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+        if self.batch_norm:
+            self.bn = tf.keras.layers.BatchNormalization()
+        super().build(input_shape)
+
+    def call(self, input, is_training=True):
+        x = self.conv(input)
+        if self.batch_norm:
+            x = self.bn(x, training = is_training)
+        if self.dropout_rate>0:
+            x = self.drop(x, training = is_training)
+        return self.activation_layer(x)
 
 ############### MOBILE NET LAYERS ############################################################
 ############### FROM https://github.com/Bisonai/mobilenetv3-tensorflow/blob/master/layers.py

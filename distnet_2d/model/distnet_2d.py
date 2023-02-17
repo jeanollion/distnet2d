@@ -1,5 +1,5 @@
 import tensorflow as tf
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, Conv2DBNDrop, Conv2DTransposeBNDrop
 from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -372,14 +372,16 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         contraction_per_layer = []
         combine_residual_layer = []
         no_residual_layer = []
+        last_out_filters = 1
         for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, last_input_filters =last_out_filters , layer_idx = l_idx)
+            last_out_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
             combine_residual_layer.append(Combine(filters=residual_filters, kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}") if residual_filters>0 else None)
             no_residual_layer.append(residual_filters==0)
         # define feature operations
-        feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
+        feature_convs, _, _, attention_filters, _ = parse_param_list(feature_settings, "FeatureSequence")
         combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
         if self_attention:
             self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
@@ -515,22 +517,25 @@ def get_distnet_2d_erf(input_shape, # Y, X
         contraction_per_layer = []
         combine_residual_layer = []
         no_residual_layer = []
+        last_input_filters = 1
         for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, residual_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, layer_idx = l_idx)
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
+            last_input_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
             combine_residual_layer.append(Combine(filters=residual_filters, kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}") if residual_filters>0 else None)
             no_residual_layer.append(residual_filters==0)
         # define feature operations
-        feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
-        combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
+        feature_convs, _, _, attention_filters, _ = parse_param_list(feature_settings, "FeatureSequence")
+        combine_filters = int(attention_filters * n_chan / 2.)
+        combine_features_op = Combine(filters=combine_filters, name="CombineFeatures")
         if self_attention:
             self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
             self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
         if attention:
             attention_op = Attention(positional_encoding="2D", name="Attention")
-            attention_combine = Combine(filters=attention_filters//2, name="AttentionCombine")
-            attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
+            attention_combine = Combine(filters=combine_filters, name="AttentionCombine")
+            attention_skip_op = Combine(filters=attention_filters, name="AttentionSkip")
 
         # define decoder operations
         decoder_layers={"Seg":[], "Center":[], "Track":[], "Cat":[]}
@@ -609,11 +614,11 @@ def get_distnet_2d_erf(input_shape, # Y, X
                     outputs.append(concat(frames))
         return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
 
-def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, name: str="EncoderLayer", layer_idx:int=1):
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
-    sequence, down_sequence, total_contraction, residual_filters = parse_param_list(param_list, name, ignore_stride=maxpool)
+    sequence, down_sequence, total_contraction, residual_filters, out_filters = parse_param_list(param_list, name, ignore_stride=maxpool, last_input_filters = last_input_filters if maxpool_and_stride else 0)
     assert total_contraction>1, "invalid parameters: no contraction specified"
     if maxpool:
         down_sequence = []
@@ -633,7 +638,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, n
         if skip_stop_gradient:
             res = stop_gradient(res, parent_name = name)
         return down, res
-    return op, total_contraction, residual_filters
+    return op, total_contraction, residual_filters, out_filters
 
 def decoder_op(
             filters: int,
@@ -644,6 +649,8 @@ def decoder_op(
             mode:str="tconv", # tconv, up_nn, up_bilinear
             skip_combine_mode = "conv", # conv, sum
             combine_kernel_size = 1,
+            batch_norm:bool = False,
+            dropout_rate:float=0,
             activation: str="relu",
             activation_out : str = None,
             res_1D:bool = False,
@@ -661,13 +668,13 @@ def decoder_op(
         if n_conv>0 and filters_out is None:
             filters_out = filters
 
-        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, use_bias=True)
+        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate)
         if skip_combine_mode=="conv":
             combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size)
         else:
             combine = None
         if res_1D:
-            convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}") for i in range(n_conv)]
+            convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         else:
             convs = [Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         def op(input):
@@ -767,7 +774,8 @@ def upsampling_op(
             mode:str="tconv", # tconv, up_nn, up_bilinera
             norm_layer:str=None,
             activation: str="relu",
-            #l2_reg: float=1e-5,
+            batch_norm:bool = False,
+            dropout_rate:float = 0,
             use_bias:bool = True,
             name: str="Upsampling2D",
         ):
@@ -777,30 +785,18 @@ def upsampling_op(
         if parent_name is not None and len(parent_name)>0:
             name = f"{parent_name}/{name}"
         if mode=="tconv":
-            upsample = tf.keras.layers.Conv2DTranspose(
-                filters,
-                kernel_size=kernel_size,
-                strides=size_factor,
-                padding='same',
-                activation=activation,
-                use_bias=use_bias,
-                # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
-                name=f"{name}/tConv{kernel_size}x{kernel_size}",
-            )
+            if batch_norm or dropout_rate>0:
+                upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/tConv{kernel_size}x{kernel_size}")
+            else:
+                upsample = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, name=f"{name}/tConv{kernel_size}x{kernel_size}")
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
             upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{name}/Upsample{kernel_size}x{kernel_size}_{interpolation}")
-            conv = tf.keras.layers.Conv2D(
-                filters=filters,
-                kernel_size=kernel_size,
-                strides=1,
-                padding='same',
-                name=f"{name}/Conv{kernel_size}x{kernel_size}",
-                # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
-                use_bias=use_bias,
-                activation=activation
-            )
+            if batch_norm or dropout_rate>0:
+                conv = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides=1, padding='same', name=f"{name}/Conv{kernel_size}x{kernel_size}", use_bias=use_bias, activation=activation )
+            else:
+                conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/Conv{kernel_size}x{kernel_size}", activation=activation )
         def op(input):
             x = upsample(input)
             if conv is not None:
@@ -813,7 +809,7 @@ def stop_gradient(input, parent_name:str, name:str="StopGradient"):
         name = f"{parent_name}/{name}"
     return tf.stop_gradient( input, name=name )
 
-def parse_param_list(param_list, name:str, ignore_stride:bool = False):
+def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stride:bool = False):
     total_contraction = 1
     if ignore_stride:
         param_list = [params.copy() for params in param_list]
@@ -838,31 +834,32 @@ def parse_param_list(param_list, name:str, ignore_stride:bool = False):
         residual_filters = 0
     if i<len(param_list):
         if i==len(param_list)-1:
-            down = [parse_params(**param_list[i], name=f"{name}/DownOp")]
+            params = param_list[i].copy()
+            filters = params.pop("filters")
+            out_filters = filters
+            if last_input_filters>0: # case of stride + maxpool -> out filters -= input filters
+                if residual_filters>0:
+                    last_input_filters=residual_filters # input of downscaler is the residual
+                filters -= last_input_filters
+            down = [parse_params(**params, filters=filters, name=f"{name}/DownOp")]
             total_contraction *= param_list[i].get("downscale", 1)
+
         else:
             raise ValueError("Only one downscale op allowed")
     else:
         down = None
-    return sequence, down, total_contraction, residual_filters
+        out_filters = residual_filters
+    return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, res_1D:bool = False, dilation:int=1, expand_filters:int=0, SE:bool=False, activation="relu", downscale:int=1, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, res_1D:bool = False, dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, batch_norm:bool=False, name:str=""):
     if res_1D:
-        return ResConv1D(kernel_size=kernel_size, dilation=dilation, activation=activation, name=f"{name}/ResConv1D{kernel_size}")
+        return ResConv1D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, name=f"{name}/ResConv1D{kernel_size}x{kernel_size}")
     assert filters > 0 , "filters must be > 0"
-    if expand_filters <= 0:
-        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
+    if dropout_rate>0 or batch_norm:
+        return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
     else:
-        return Bneck(
-            out_channels=filters,
-            exp_channels=expand_filters,
-            kernel_size=kernel_size,
-            stride=downscale,
-            use_se=SE,
-            act_layer=activation,
-            skip=True,
-            name=f"{name}/Bneck{kernel_size}x{kernel_size}f{expand_filters}"
-        )
+        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
+
 
 #####################################################################
 #################### LEGACY VERSION #################################
@@ -898,7 +895,7 @@ def get_distnet_2d_sep_out(input_shape,
             contraction_per_layer.append(contraction)
             combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
         # define feature operations
-        feature_convs, _, _, attention_filters = parse_param_list(feature_settings, "FeatureSequence")
+        feature_convs, _, _, attention_filters, _ = parse_param_list(feature_settings, "FeatureSequence")
         attention_op = Attention(positional_encoding="2D", name="Attention")
         self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
         self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
