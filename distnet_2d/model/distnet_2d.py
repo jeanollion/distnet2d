@@ -153,6 +153,7 @@ class DistnetModel(Model):
             inc=0
             edm_loss = self.edm_loss(y[inc], y_pred[inc], sample_weight = weight_map)
             loss = edm_loss * edm_weight
+
             losses["edm"] = tf.reduce_mean(edm_loss)
 
             if self.predict_contours:
@@ -187,8 +188,6 @@ class DistnetModel(Model):
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                 losses["edm_contour"] = tf.reduce_mean(contour_edm_loss)
 
-
-
             # displacement loss
             if label_rank is not None: # label rank is returned : object-wise loss
                 _, scale = self._get_mean_by_object(y[0], label_rank, label_size, project = True)
@@ -196,8 +195,9 @@ class DistnetModel(Model):
                 if self.predict_center:
                     inc+=1
                     center_loss = lovasz_hinge_regression_per_obj(y[inc], y_pred[inc], scale, label_rank)
+                    center_loss = tf.reduce_mean(center_loss) # batch mean
                     loss = loss + center_loss * center_weight
-                    losses["center"] = tf.reduce_mean(center_loss)
+                    losses["center"] = center_loss
 
                 label_rank_sel = tf.tile(label_rank[..., fw:fw+1, :], [1,1,1,fw,1])
                 label_size_sel = tf.tile(label_size[..., fw:fw+1, :], [1,1,1,fw,1])
@@ -291,6 +291,7 @@ class DistnetModel(Model):
             loss = loss + cat_loss * category_weight
             losses["category"] = tf.reduce_mean(cat_loss)
             losses["loss"] = loss
+            print(f"loss shape: {loss.shape.as_list()}")
             if mixed_precision:
                 loss = self.optimizer.get_scaled_loss(loss)
 
