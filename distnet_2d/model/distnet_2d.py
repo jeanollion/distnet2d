@@ -13,7 +13,7 @@ from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorSampleWeightChannel
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, EuclideanDistanceLoss, get_edm_max_2d_fun
-from ..utils.lovasz_loss import lovasz_hinge_regression_per_obj, lovasz_hinge_motion_per_obj, lovasz_hinge_regression, lovasz_hinge_motion
+from ..utils.lovasz_loss import lovasz_hinge_regression_per_obj, lovasz_hinge_motion_per_obj, lovasz_hinge_regression, lovasz_hinge_motion, lovasz_hinge
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -190,16 +190,18 @@ class DistnetModel(Model):
                 loss = loss + contour_edm_loss * edm_weight * self.edm_contour_weight
                 losses["edm_contour"] = tf.reduce_mean(contour_edm_loss)
 
+            if self.predict_center:
+                label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
+                inc+=1
+                center_loss = lovasz_hinge(2. * y[inc] - 1., y_pred[inc], channel_axis=True)
+                loss = loss + center_loss * center_weight
+                losses["center"] = center_loss
+
             # object-wise loss
             if label_rank is not None: # label rank is returned : object-wise loss
                 _, scale = self._get_mean_by_object(y[0], label_rank, label_size, project = True)
                 scale = tf.math.maximum(scale * 0.25, 1) # for lovasz_loss : we allow error for center/displacement according to the object dimension (mean edm) (should it be max ?)
-                if self.predict_center:
-                    label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
-                    inc+=1
-                    center_loss = lovasz_hinge_regression(y[inc], y_pred[inc], scale, label_mask)
-                    loss = loss + center_loss * center_weight
-                    losses["center"] = center_loss
+
 
                 label_rank_sel = tf.tile(label_rank[..., fw:fw+1, :], [1,1,1,fw,1])
                 label_size_sel = tf.tile(label_size[..., fw:fw+1, :], [1,1,1,fw,1])
@@ -278,7 +280,7 @@ class DistnetModel(Model):
                     losses["displacement_var"] = var
             if self.displacement_loss_lovasz:
                 label_mask_sel = tf.reduce_sum(label_rank_sel[...,1:], axis=-1, keepdims=False)
-                d_loss = lovasz_hinge_motion(y[1+inc], y_pred[1+inc], y[2+inc], y_pred[2+inc], scale_sel, label_mask_sel)
+                d_loss = lovasz_hinge_regression_per_obj(y[1+inc], y_pred[1+inc], scale_sel, label_rank_sel) + lovasz_hinge_regression_per_obj(y[2+inc], y_pred[2+inc], scale_sel, label_rank_sel)
                 loss = loss + d_loss * displacement_weight
                 losses["displacement"] = d_loss
 
