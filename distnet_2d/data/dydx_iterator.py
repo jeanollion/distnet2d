@@ -406,35 +406,36 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
 def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design choice: draw gaussian and use L2 regression ?
     if len(labels_map_centers)==0:
         return
+    Y, X = centerIm.shape
+    Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
+    sigmas = map_coordinates(edm, np.array(list(labels_map_centers.values())).T, prefilter=False)
 
     # point
-    for label, center in labels_map_centers.items(): # in case center prediction is a classification
+    for i, (label, center) in enumerate(labels_map_centers.items()): # in case center prediction is a classification
         if isnan(center[0]) or isnan(center[1]):
             pass
             # print(f"Warning label: {label} nan center")
         else:
-            drawn = False
-            for dy,dx in itertools.product(range(2), range(2)):
-                if int(center[0])==center[0]:
-                    dy = 0
-                if int(center[1])==center[1]:
-                    dx = 0
-                y = int(center[0])+dy
-                x = int(center[1])+dx
-                if labelIm[y, x] == label:
-                    drawn = True
-                    centerIm[y, x] = 1
-                if not drawn: # center is outside.. draw it anyway
-                    centerIm[int(center[0]+0.5), int(center[1]+0.5)] = 1
+            # drawn = False
+            # for dy,dx in itertools.product(range(2), range(2)):
+            #     if int(center[0])==center[0]:
+            #         dy = 0
+            #     if int(center[1])==center[1]:
+            #         dx = 0
+            #     y = int(center[0])+dy
+            #     x = int(center[1])+dx
+            #     if labelIm[y, x] == label:
+            #         drawn = True
+            #         centerIm[y, x] = 1
+            #     if not drawn: # center is outside.. draw it anyway
+            #         centerIm[int(center[0]+0.5), int(center[1]+0.5)] = 1
                     # print(f"Warning Label: {label} center {center} is outside")
-    # gaussian
-    # Y, X = centerIm.shape
-    # Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-    # sigmas = map_coordinates(edm, np.array(list(labels_map_centers.values())).T, prefilter=False)
-    # for i, center in enumerate(centers):
-    #     sigma_sq = max(1, 0.5 * (sigmas[i]**2))
-    #     d = np.square(center[0] - Y) + np.square(center[1] - X)
-    #     np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
+            #gaussian
+
+            sigma_sq = max(2, 0.125 * (sigmas[i]**2))
+            #sigma_sq = 2
+            d = np.square(center[0] - Y) + np.square(center[1] - X)
+            np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
     # distance to center
     # Y, X = centerIm.shape
     # Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')

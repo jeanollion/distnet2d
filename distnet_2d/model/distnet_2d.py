@@ -191,9 +191,10 @@ class DistnetModel(Model):
                 losses["edm_contour"] = tf.reduce_mean(contour_edm_loss)
 
             if self.predict_center:
-                label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
+                # label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
                 inc+=1
-                center_loss = lovasz_hinge(2. * y[inc] - 1., y_pred[inc], channel_axis=True)
+                center_bin = tf.cast(tf.math.greater_equal(y[inc], 0.5), tf.float32)
+                center_loss = lovasz_hinge(2. * y_pred[inc] - 1., center_bin, channel_axis=True)
                 loss = loss + center_loss * center_weight
                 losses["center"] = center_loss
 
