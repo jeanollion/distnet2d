@@ -410,6 +410,7 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
     # point
     for label, center in labels_map_centers.items(): # in case center prediction is a classification
         if isnan(center[0]) or isnan(center[1]):
+            pass
             # print(f"Warning label: {label} nan center")
         else:
             drawn = False
