@@ -79,7 +79,7 @@ class DistnetModel(Model):
         self.predict_contours = predict_contours
         self.predict_center = predict_center
         self.spatial_dims = spatial_dims
-        # self.center_loss=center_loss
+        self.center_loss=balanced_background_binary_crossentropy(min_class_frequency=1./(spatial_dims[0]*spatial_dims[1]), max_class_frequency=spatial_dims[0]*spatial_dims[1])
         center_softargmax_beta = center_softargmax_beta
         self.center_spead = get_gaussian_spread_fun(center_sigma, spatial_dims[0], spatial_dims[1], objectwise=True)
         self.get_center = get_weighted_mean_2d_fun(spatial_dims)
@@ -193,8 +193,10 @@ class DistnetModel(Model):
             if self.predict_center:
                 # label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
                 inc+=1
-                center_bin = tf.cast(tf.math.greater_equal(y[inc], 0.5), tf.float32)
-                center_loss = lovasz_hinge(2. * y_pred[inc] - 1., center_bin, channel_axis=True)
+                #center_bin = tf.cast(tf.math.greater_equal(y[inc], 0.5), tf.float32)
+                #center_loss = lovasz_hinge(2. * y_pred[inc] - 1., center_bin, channel_axis=True)
+                center_bin = tf.math.greater_equal(y[inc], 0.5)
+                center_loss = self.center_loss(center_bin, y_pred[inc]) # TODO also test sum with lovasz hinge loss ? or L2 instead of classification ? 
                 loss = loss + center_loss * center_weight
                 losses["center"] = center_loss
 

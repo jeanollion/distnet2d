@@ -432,7 +432,7 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
                     # print(f"Warning Label: {label} center {center} is outside")
             #gaussian
 
-            sigma_sq = max(2, 0.125 * (sigmas[i]**2))
+            sigma_sq = max(2, 0.25 * (sigmas[i]**2))
             #sigma_sq = 2
             d = np.square(center[0] - Y) + np.square(center[1] - X)
             np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
