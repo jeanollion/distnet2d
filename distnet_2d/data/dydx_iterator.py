@@ -408,7 +408,7 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
         return
     Y, X = centerIm.shape
     Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-    sigmas = map_coordinates(edm, np.array(list(labels_map_centers.values())).T, prefilter=False)
+    #sigmas = map_coordinates(edm, np.array(list(labels_map_centers.values())).T, prefilter=False)
 
     # point
     for i, (label, center) in enumerate(labels_map_centers.items()): # in case center prediction is a classification
@@ -432,8 +432,8 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
                     # print(f"Warning Label: {label} center {center} is outside")
             #gaussian
 
-            sigma_sq = max(2, 0.25 * (sigmas[i]**2))
-            #sigma_sq = 2
+            #sigma_sq = max(2, 0.25 * (sigmas[i]**2))
+            sigma_sq = 9
             d = np.square(center[0] - Y) + np.square(center[1] - X)
             np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
     # distance to center
