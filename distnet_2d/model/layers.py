@@ -430,6 +430,67 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             x = self.drop(x, training = is_training)
         return self.activation_layer(input + x)
 
+class ResConv2D(Layer):
+    def __init__(
+            self,
+            kernel_size: int=3,
+            dilation: int = 1,
+            dropout_rate : float = 0.3,
+            batch_norm : bool = True,
+            activation:str = "relu",
+            name: str="ResConv1D",
+    ):
+        super().__init__(name=name)
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.activation=activation
+        self.dropout_rate=dropout_rate
+        self.batch_norm=batch_norm
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm})
+      return config
+
+    def build(self, input_shape):
+        input_channels = int(input_shape[-1])
+        self.conv1 = tf.keras.layers.Conv2D(
+            filters=input_channels,
+            kernel_size=self.kernel_size,
+            strides=1,
+            padding='same',
+            name=f"{self.name}/1_{self.kernel_size}x{self.kernel_size}",
+            activation="linear"
+        )
+        self.conv2 = tf.keras.layers.Conv2D(
+            filters=input_channels,
+            kernel_size=self.kernel_size,
+            dilation_rate = self.dilation,
+            strides=1,
+            padding='same',
+            name=f"{self.name}/2_{self.kernel_size}x{self.kernel_size}",
+            activation="linear"
+        )
+        self.activation_layer = tf.keras.activations.get(self.activation)
+        if self.dropout_rate>0:
+            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+        if self.batch_norm:
+            self.bn1 = tf.keras.layers.BatchNormalization()
+            self.bn2 = tf.keras.layers.BatchNormalization()
+        super().build(input_shape)
+
+    def call(self, input, is_training=True):
+        x = self.conv1(input)
+        if self.batch_norm:
+            x = self.bn1(x, training = is_training)
+        x = self.activation_layer(x)
+        x = self.conv2(x)
+        if self.batch_norm:
+            x = self.bn2(x, training = is_training)
+        if self.dropout_rate>0:
+            x = self.drop(x, training = is_training)
+        return self.activation_layer(input + x)
+
 class Conv2DBNDrop(Layer):
     def __init__(
             self,

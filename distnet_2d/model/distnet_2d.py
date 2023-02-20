@@ -58,7 +58,7 @@ class DistnetModel(Model):
         category_loss_weight=1,
         edm_loss=MeanSquaredErrorSampleWeightChannel(),
         contour_loss = MeanSquaredError(),
-        center_loss = tf.keras.losses.BinaryFocalCrossentropy(alpha=0.99),
+        center_loss = MeanSquaredError(),#tf.keras.losses.BinaryFocalCrossentropy(alpha=0.99),
         displacement_loss = MeanSquaredErrorSampleWeightChannel(),
         category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
         category_class_frequency_range=[1/10, 10],
@@ -75,8 +75,8 @@ class DistnetModel(Model):
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_loss_lovasz = False
-        self.center_loss_l2 = MeanSquaredError()
-        self.center_l2_weight = 1
+        #self.center_loss_l2 = MeanSquaredError()
+        #self.center_l2_weight = 1
         self.gradient_safe_mode=gradient_safe_mode
         self.predict_contours = predict_contours
         self.predict_center = predict_center
@@ -195,15 +195,14 @@ class DistnetModel(Model):
             if self.predict_center:
                 # label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
                 inc+=1
-                #center_bin = tf.cast(tf.math.greater_equal(y[inc], 0.5), tf.float32)
-                center_bin = tf.math.greater_equal(y[inc], 0.5)
-                center_loss = self.center_loss(center_bin, y_pred[inc])
+                #center_bin = tf.math.greater_equal(y[inc], 0.5)
+                center_loss = self.center_loss(y[inc], y_pred[inc])
                 loss = loss + center_loss * center_weight
                 losses["center"] = center_loss
-                if self.center_l2_weight>0:
-                    center_loss_l2 = self.center_loss_l2(y[inc], y_pred[inc])
-                    loss = loss + center_loss_l2 * center_weight
-                    losses["center_l2"] = center_loss_l2
+                # if self.center_l2_weight>0:
+                #     center_loss_l2 = self.center_loss_l2(y[inc], y_pred[inc])
+                #     loss = loss + center_loss_l2 * center_weight
+                #     losses["center_l2"] = center_loss_l2
                 #center_loss_lh = lovasz_hinge(y_pred[inc], center_bin, channel_axis=True)
                 #classification ?
 

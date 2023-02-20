@@ -409,7 +409,7 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
     Y, X = centerIm.shape
     Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
     #sigmas = map_coordinates(edm, np.array(list(labels_map_centers.values())).T, prefilter=False)
-
+    centerIm.fill(-1)
     # point
     for i, (label, center) in enumerate(labels_map_centers.items()): # in case center prediction is a classification
         if isnan(center[0]) or isnan(center[1]):
@@ -433,15 +433,12 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
             #gaussian
 
             #sigma_sq = max(2, 0.25 * (sigmas[i]**2))
-            sigma_sq = 4
-            d = np.square(center[0] - Y) + np.square(center[1] - X)
-            np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
-    # distance to center
-    # Y, X = centerIm.shape
-    # Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-    # for i, (label, center) in enumerate(labels_map_centers.items()):
-    #     mask = labelIm==label
-    #     if mask.sum()>0:
-    #         #w = -1# -1./max(1, 0.5 * (sigmas[i]**2))
-    #         d = np.exp(-(np.square(Y-center[0])+np.square(X-center[1])))
-    #         centerIm[mask] = d[mask]
+            # sigma_sq = 4
+            # d = np.square(center[0] - Y) + np.square(center[1] - X)
+            # np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
+            # distance to center
+            mask = labelIm==label
+            if mask.sum()>0:
+                #w = -1# -1./max(1, 0.5 * (sigmas[i]**2))
+                d = np.square(Y-center[0])+np.square(X-center[1])
+                centerIm[mask] = d[mask]
