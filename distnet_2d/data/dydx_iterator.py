@@ -433,7 +433,7 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
             #gaussian
 
             #sigma_sq = max(2, 0.25 * (sigmas[i]**2))
-            sigma_sq = 9
+            sigma_sq = 4
             d = np.square(center[0] - Y) + np.square(center[1] - X)
             np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
     # distance to center
