@@ -200,7 +200,7 @@ class DistnetModel(Model):
                 # label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
                 inc+=1
                 #center_bin = tf.math.greater_equal(y[inc], 0.5)
-                center_pred_inside=tf.where(tf.math.greater(y[0], 0), y[inc], 0) # do not predict anything outside
+                center_pred_inside=tf.where(tf.math.greater(y[0], 0), y_pred[inc], 0) # do not predict anything outside
                 center_loss = self.center_loss(y[inc], center_pred_inside)
                 loss = loss + center_loss * center_weight
                 losses["center"] = center_loss
