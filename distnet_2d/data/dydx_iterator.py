@@ -213,6 +213,7 @@ class DyDxIterator(TrackingIterator):
         other_output_channels = [chan_idx for chan_idx in self.output_channels if chan_idx!=1 and chan_idx!=2]
         all_channels = [batch_by_channel[chan_idx] for chan_idx in other_output_channels]
         channel_inc = 0
+        edm[edm==0] = -1
         all_channels.insert(channel_inc, edm)
         if self.return_contours:
             channel_inc += 1
@@ -440,5 +441,5 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
             mask = labelIm==label
             if mask.sum()>0:
                 #w = -1# -1./max(1, 0.5 * (sigmas[i]**2))
-                d = np.square(Y-center[0])+np.square(X-center[1])
+                d = np.sqrt(np.square(Y-center[0])+np.square(X-center[1]))
                 centerIm[mask] = d[mask]
