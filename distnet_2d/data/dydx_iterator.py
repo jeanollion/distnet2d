@@ -410,7 +410,7 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design cho
     Y, X = centerIm.shape
     Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
     #sigmas = map_coordinates(edm, np.array(list(labels_map_centers.values())).T, prefilter=False)
-    centerIm.fill(-1)
+    #centerIm.fill(-1)
     # point
     for i, (label, center) in enumerate(labels_map_centers.items()): # in case center prediction is a classification
         if isnan(center[0]) or isnan(center[1]):

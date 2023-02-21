@@ -75,6 +75,7 @@ class DistnetModel(Model):
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_loss_lovasz = False
+        self.edm_lovasz_weight = 0
         #self.center_loss_l2 = MeanSquaredError()
         #self.center_l2_weight = 1
         self.gradient_safe_mode=gradient_safe_mode
@@ -159,7 +160,10 @@ class DistnetModel(Model):
             edm_loss = self.edm_loss(y[inc], y_pred[inc])#, sample_weight = weight_map)
             loss = edm_loss * edm_weight
             losses["edm"] = tf.reduce_mean(edm_loss)
-
+            if self.edm_lovasz_weight>0:
+                edm_loss_lh = self.lovasz_hinge(y_pred[inc], tf.math.greater(y[inc], 0))
+                loss = loss + edm_loss_lh * self.edm_lovasz_weight
+                losses["edm_lh"] = edm_loss_lh
             if self.predict_contours:
                 inc+=1
                 contour_loss = self.contour_loss(y[inc], y_pred[inc])
@@ -196,7 +200,8 @@ class DistnetModel(Model):
                 # label_mask = tf.reduce_sum(label_rank[...,1:], axis=-1, keepdims=False)
                 inc+=1
                 #center_bin = tf.math.greater_equal(y[inc], 0.5)
-                center_loss = self.center_loss(y[inc], y_pred[inc])
+                center_pred_inside=tf.where(tf.math.greater(y[0], 0), y[inc], 0)
+                center_loss = self.center_loss(y[inc], center_pred_inside) # do not predict anything outside
                 loss = loss + center_loss * center_weight
                 losses["center"] = center_loss
                 # if self.center_l2_weight>0:
