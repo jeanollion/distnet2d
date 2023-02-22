@@ -596,7 +596,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for n, o_ns in output_per_decoder.items():
             decoder_output_names[n] = dict()
             for o_n in o_ns:
-                decoder_output_names[n][o_n] = f"Output{oi}{o_n}"
+                decoder_output_names[n][o_n] = f"Output{oi}_{o_n}"
                 oi += 1
         pick_conv_gen = lambda i, decoder_name, output_name: Conv2D(filters=attention_filters, kernel_size=1, padding='same', activation="relu", name=f"FeatureConv{decoder_name}{output_name}_{i}") # convolution to distinguish frames
         # Create GRAPH
@@ -638,7 +638,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                 for output_name in output_per_decoder[decoder_name]:
                     if output_name in decoder_out[decoder_name]:
                         d_out = decoder_out[decoder_name][output_name]
-                        output_name = decoder_output_names[decoder_name][output_name]
+                        layer_output_name = decoder_output_names[decoder_name][output_name]
                         skip = skip_per_decoder[decoder_name]
                         up = tf.concat([pick_conv_gen(i, decoder_name, output_name)(combined_features) for i in range(n_out)], axis=0) # shared decoder -> to batch dim
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
@@ -647,7 +647,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         up = tf.reshape(up, shape = [n_out, -1]+up.shape.as_list()[-3:]) # (N_OUT, B, Y, X, F)
                         up = tf.transpose(up, perm=[1, 2, 3, 4, 0])
                         shape = up.shape.as_list()
-                        up = tf.reshape(up, [-1] + shape[1:-2] + [ shape[-1] * shape[-2] ], name = output_name )
+                        up = tf.keras.layers.Reshape( shape[1:-2] + [ shape[-1] * shape[-2] ], name = layer_output_name)(up) # use keras layer to name output
                         outputs.append(up)
         return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
 
