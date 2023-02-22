@@ -161,7 +161,7 @@ class DistnetModel(Model):
             loss = edm_loss * edm_weight
             losses["edm"] = tf.reduce_mean(edm_loss)
             if self.edm_lovasz_weight>0:
-                edm_loss_lh = self.lovasz_hinge(y_pred[inc], tf.math.greater(y[inc], 0))
+                edm_loss_lh = lovasz_hinge(y_pred[inc], tf.math.greater(y[inc], 0))
                 loss = loss + edm_loss_lh * self.edm_lovasz_weight
                 losses["edm_lh"] = edm_loss_lh
             if self.predict_contours:
