@@ -42,7 +42,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_motion:bool = True,
                 motion_loss = motion_loss + motion_loss_fun[d](center_ob_prev, center_ob_cur_trans)
 
             motion_loss = tf.divide(motion_loss, tf.cast(motion_range, motion_loss.dtype))
-
+            motion_loss = tf.cond(tf.math.is_nan(motion_loss), lambda : tf.cast(0, motion_loss.dtype), lambda : motion_loss)
         if motion_var: # enforce homogeneity : var -> 0
             dY2m = _get_mean_by_object(tf.math.square(dY), label_rank[...,1:,:], label_size[...,1:,:])
             vary = dY2m - tf.math.square(dYm)
