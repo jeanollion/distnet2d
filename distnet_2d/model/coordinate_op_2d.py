@@ -46,6 +46,13 @@ def get_weighted_mean_2d_fun(spatial_dims, two_channel_axes=True):
         return tf.math.divide(wsum, sum) # when no values should return nan # (B, 1, 1, T, C, 2)
     return wm
 
+def get_dist_to_center_2d_fun(spatial_dims, two_channel_axes=True):
+    wm = get_weighted_mean_2d_fun(spatial_dims, two_channel_axes)
+    #@tf.function
+    def fun(x, x_flat=None, label_rank=None):
+        return wm(tf.math.exp(-tf.math.square(x)))
+    return fun
+
 def get_skeleton_center_fun(spatial_dims, w = 0.1):
     wm = get_weighted_mean_2d_fun(spatial_dims, two_channel_axes=True)
     Y, X = _get_spatial_kernels(spatial_dims[0], spatial_dims[1], two_channel_axes=True)

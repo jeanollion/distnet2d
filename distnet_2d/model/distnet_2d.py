@@ -12,7 +12,7 @@ from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorSampleWeightChannel
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
-from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, EuclideanDistanceLoss, get_edm_max_2d_fun
+from .coordinate_op_2d import get_soft_argmax_2d_fun, get_weighted_mean_2d_fun, get_dist_to_center_2d_fun, get_skeleton_center_fun, get_gaussian_spread_fun, EuclideanDistanceLoss, get_edm_max_2d_fun
 from ..utils.lovasz_loss import lovasz_hinge_regression_per_obj, lovasz_hinge_motion_per_obj, lovasz_hinge_regression, lovasz_hinge_motion, lovasz_hinge
 
 ENCODER_SETTINGS = [
@@ -85,7 +85,7 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         center_softargmax_beta = center_softargmax_beta
         self.center_spead = get_gaussian_spread_fun(center_sigma, spatial_dims[0], spatial_dims[1], objectwise=True)
-        self.get_center = get_weighted_mean_2d_fun(spatial_dims)
+        self.get_center = get_dist_to_center_2d_fun(spatial_dims)
         self.edm_center_mode=edm_center_mode
         if edm_center_mode == "MAX":
             self.edm_to_center = get_edm_max_2d_fun(spatial_dims, center_edm_max_tolerance) #get_soft_argmax_2d_fun(beta=center_softargmax_beta)
@@ -647,7 +647,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         up = tf.reshape(up, shape = [n_out, -1]+up.shape.as_list()[-3:]) # (N_OUT, B, Y, X, F)
                         up = tf.transpose(up, perm=[1, 2, 3, 4, 0])
                         shape = up.shape.as_list()
-                        up = tf.reshape(up, [-1] + shape[1:-2] + [ shape[-1] * shape[-2] ] )
+                        up = tf.reshape(up, [-1] + shape[1:-2] + [ shape[-1] * shape[-2] ], name = output_name )
                         outputs.append(up)
         return DistnetModel([input], outputs, name=name, next = next, predict_contours = predict_contours, predict_center=predict_center, frame_window=frame_window, spatial_dims=spatial_dims, edm_center_mode=edm_center_mode)
 
