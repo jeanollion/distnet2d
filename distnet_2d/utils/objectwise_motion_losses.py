@@ -99,9 +99,9 @@ def _scatter_centers_frames(center, prev_idx, has_prev): # (F, N, 2) , (F, N), (
 
 def euclidean_distance_loss():
     def loss(true, pred): # (C, N, 2)
-        no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,0]), tf.math.is_nan(pred[...,0]))), tf.float32) # non-empty objects
-        true = tf.boolean_mask(true, no_na_mask) #(C, Neff, 2)
-        pred = tf.boolean_mask(pred, no_na_mask) #(C, Neff, 2)
+        no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32) # non-empty objects
+        true = tf.math.multiply_no_nan(true, no_na_mask)
+        pred = tf.math.multiply_no_nan(pred, no_na_mask)
         d = tf.math.reduce_sum(tf.math.square(true - pred), axis=-1, keepdims=False) #(C, Neff)
         return tf.math.reduce_mean(d)
     return loss
