@@ -80,7 +80,8 @@ def _get_label_rank_and_size(labels, batch_axis=False):
     return tf.cond(tf.equal(N, 0), null_im, non_null_im)
 
 def _get_mean_by_object(data, label_rank, label_size, batch_axis=False):
-    wsum = tf.math.reduce_sum(label_rank * tf.expand_dims(data, -1), axis=[1, 2] if batch_axis else [0, 1], keepdims = False)
+    data_ob = tf.math.multiply_no_nan(tf.expand_dims(data, -1), label_rank)
+    wsum = tf.math.reduce_sum(data_ob, axis=[1, 2] if batch_axis else [0, 1], keepdims = False)
     return tf.math.divide_no_nan(wsum, label_size) # (B) C, N
 
 # inverse of tf.gather
@@ -102,6 +103,8 @@ def euclidean_distance_loss():
         no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32) # non-empty objects
         true = tf.math.multiply_no_nan(true, no_na_mask)
         pred = tf.math.multiply_no_nan(pred, no_na_mask)
-        d = tf.math.reduce_sum(tf.math.square(true - pred), axis=-1, keepdims=False) #(C, Neff)
+        d = tf.math.reduce_sum(tf.math.square(true - pred), axis=[-2, -1], keepdims=False) #(C)
+        n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False)
+        d = tf.math.divide_no_nan(d, n_obj)
         return tf.math.reduce_mean(d)
     return loss
