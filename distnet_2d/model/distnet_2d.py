@@ -90,7 +90,7 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         self.contour_loss = MeanSquaredError()
         self.displacement_loss = displacement_loss
-        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1)-1, center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
+        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
