@@ -134,9 +134,9 @@ class DyDxIterator(TrackingIterator):
         if return_next:
             end_points = end_points + [n_frames + int(n_frames * i/self.frame_window + 0.5) for i in range(1, self.frame_window+1)]
         if pairs:
-            end_point_pairs = [[end_points[i], n_frames] for i in range(0, self.frame_window)]
+            end_point_pairs = [[end_points[i], end_points[i+1]] for i in range(0, self.frame_window)]
             if return_next:
-                end_point_pairs = end_point_pairs + [[n_frames, end_points[i+self.frame_window+1]] for i in range(0, self.frame_window)]
+                end_point_pairs = end_point_pairs + [[end_points[i+self.frame_window], end_points[i+self.frame_window+1]] for i in range(0, self.frame_window)]
             return end_point_pairs
         else:
             return end_points
@@ -150,7 +150,7 @@ class DyDxIterator(TrackingIterator):
             n_frames = self.frame_window
         assert labelIms.shape[-1]==prevlabelIms.shape[-1] and labelIms.shape[-1]==1+n_frames*(2 if return_next else 1), f"invalid channel number: labels: {labelIms.shape[-1]} prev labels: {prevlabelIms.shape[-1]} n_frames: {n_frames}"
         end_point_pairs = self._get_end_points(n_frames, True)
-        #print(f"n_frames: {n_frames}, nchan: {labelIms.shape[-1]}, frame_window: {self.frame_window}, return_next: {return_next}, end_points: {self._get_end_points(n_frames, False)}, end_point_pairs: {end_point_pairs}")
+        # print(f"n_frames: {n_frames}, nchan: {labelIms.shape[-1]}, frame_window: {self.frame_window}, return_next: {return_next}, end_points: {self._get_end_points(n_frames, False)}, end_point_pairs: {end_point_pairs}")
         for b in range(labelIms.shape[0]):
             prev_label_map.append(_compute_prev_label_map(labelIms[b], prevlabelIms[b], end_point_pairs))
         batch_by_channel[-666] = prev_label_map
@@ -203,11 +203,11 @@ class DyDxIterator(TrackingIterator):
         for i in range(labelIms.shape[0]):
             bidx = get_idx(i)
             for c in range(0, self.frame_window):
-                sel = [c, self.frame_window]
-                _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], center_mode=self.center_mode, centerIm=centerIm[i,...,self.frame_window] if self.return_center and c==0 else None, centerImPrev=centerIm[i,...,c] if self.return_center else None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, rankIm=labelIm[i,...,self.frame_window] if self.return_label_rank and c==0 else None, rankImPrev=labelIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None)
+                sel = [c, c+1]#[c, self.frame_window]
+                _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], center_mode=self.center_mode, centerIm=centerIm[i,...,self.frame_window] if self.return_center and sel[1]==self.frame_window else None, centerImPrev=centerIm[i,...,c] if self.return_center else None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, rankIm=labelIm[i,...,self.frame_window] if self.return_label_rank and sel[1]==self.frame_window else None, rankImPrev=labelIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None)
             if return_next:
                 for c in range(self.frame_window, 2*self.frame_window):
-                    sel = [self.frame_window, c+1]
+                    sel = [c, c+1]#[self.frame_window, c+1]
                     _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], center_mode=self.center_mode, centerIm=centerIm[i,...,c+1] if self.return_center else None, centerImPrev=None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, rankIm=labelIm[i,...,c+1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None)
 
         other_output_channels = [chan_idx for chan_idx in self.output_channels if chan_idx!=1 and chan_idx!=2]

@@ -32,26 +32,20 @@ def get_edm_max_2d_fun(spatial_dims = None, tolerance = 0.9, two_channel_axes=Tr
         return wm(tf.math.multiply_no_nan(x, mask))
     return sam
 
-def get_weighted_mean_2d_fun(spatial_dims, two_channel_axes=True):
-    Y, X = _get_spatial_kernels(spatial_dims[0], spatial_dims[1], two_channel_axes)
+def get_weighted_mean_2d_fun(spatial_dims, two_channel_axes=True, batch_axis=True, keepdims=True):
+    Y, X = _get_spatial_kernels(spatial_dims[0], spatial_dims[1], two_channel_axes, batch_axis)
+    axis = [1, 2] if batch_axis else [0, 1]
     #@tf.function
     def wm(x, x_flat=None, label_rank=None):
         # if spatial_dims is None:
         #     shape = tf.shape(x)
         #     Y, X = _get_spatial_kernels(shape[1], shape[2], two_channel_axes)
-        wsum_y = tf.reduce_sum(x * Y, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
-        wsum_x = tf.reduce_sum(x * X, axis=[1, 2], keepdims=True) # (B, 1, 1, T, C)
+        wsum_y = tf.reduce_sum(x * Y, axis=axis, keepdims=keepdims) # (B, 1, 1, T, C)
+        wsum_x = tf.reduce_sum(x * X, axis=axis, keepdims=keepdims) # (B, 1, 1, T, C)
         wsum = tf.stack([wsum_y, wsum_x], -1) # (B, 1, 1, T, C, 2)
-        sum = tf.expand_dims(tf.reduce_sum(x, axis=[1, 2], keepdims = True), -1) # (B, 1, 1, T, C, 1)
+        sum = tf.expand_dims(tf.reduce_sum(x, axis=axis, keepdims = keepdims), -1) # (B, 1, 1, T, C, 1)
         return tf.math.divide(wsum, sum) # when no values should return nan # (B, 1, 1, T, C, 2)
     return wm
-
-def get_dist_to_center_2d_fun(spatial_dims, two_channel_axes=True):
-    wm = get_weighted_mean_2d_fun(spatial_dims, two_channel_axes)
-    #@tf.function
-    def fun(x, x_flat=None, label_rank=None):
-        return wm(tf.math.exp(-tf.math.square(x)))
-    return fun
 
 def get_skeleton_center_fun(spatial_dims, w = 0.1):
     wm = get_weighted_mean_2d_fun(spatial_dims, two_channel_axes=True)
@@ -88,34 +82,14 @@ def get_gaussian_spread_fun(sigma, Y, X, objectwise=True):
         return exp
     return gs
 
-class EuclideanDistanceLoss(Loss):
-    def __init__(self, spatial_dims, objectwise=True, reduction=tf.keras.losses.Reduction.AUTO, name="euclidean_distance_loss"):
-        super().__init__(name=name, reduction=reduction)
-        self.sum_axis = [-1, -2] if objectwise else [-1]
-        self.im_scale = tf.cast(1./(spatial_dims[0]*spatial_dims[1]), tf.float32)
-        self.objectwise = objectwise
-
-    def call(self, true, pred): # (B, 1, 1, C, N, 2) or (B, 1, 1, C, 2), and (B, 1, 1, C, N)
-        no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32) # non-empty objects
-        true = tf.math.multiply_no_nan(true, no_na_mask)
-        pred = tf.math.multiply_no_nan(pred, no_na_mask)
-        d = tf.math.reduce_sum(tf.math.square(true - pred), axis=self.sum_axis, keepdims=False) #(B, 1, 1, C)
-        if self.objectwise: # normalize by object size / image size
-            n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False)
-            #object_size = object_size * no_na_mask[...,0]
-            #norm = tf.math.divide_no_nan(tf.reduce_sum(object_size, axis=-1, keepdims=False), n_obj) * im_scale #(B, 1, 1, C)
-            norm = tf.math.divide_no_nan(self.im_scale, n_obj)
-            # print(f"norm: {norm[0, 0, 0, 0].numpy()}, d: {d[0, 0, 0, 0].numpy()}")
-            d = tf.math.multiply_no_nan(d, norm)
-            d = tf.math.reduce_mean(d, axis=-1, keepdims=False) #(B, 1, 1)
-        return d
-
-def _get_spatial_kernels(Y, X, two_channel_axes=True):
+def _get_spatial_kernels(Y, X, two_channel_axes=True, batch_axis=True):
     Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')
+    if batch_axis:
+        Y, X = Y[tf.newaxis], X[tf.newaxis]
     if two_channel_axes:
-        return Y[tf.newaxis][..., tf.newaxis, tf.newaxis], X[tf.newaxis][..., tf.newaxis, tf.newaxis]
+        return Y[..., tf.newaxis, tf.newaxis], X[..., tf.newaxis, tf.newaxis]
     else:
-        return Y[tf.newaxis][..., tf.newaxis], X[tf.newaxis][..., tf.newaxis]
+        return Y[..., tf.newaxis], X[..., tf.newaxis]
 
 def _generate_kernel(sizeY, sizeX, C=1, O=0):
     kernel = np.meshgrid(np.arange(sizeY, dtype = np.float32), np.arange(sizeX, dtype = np.float32), indexing = 'ij') #(Y,X), (Y,X)
