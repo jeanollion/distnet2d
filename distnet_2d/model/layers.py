@@ -343,7 +343,7 @@ class WeigthedGradient(tf.keras.layers.Layer):
     @tf.custom_gradient
     def op(self, x):
         def grad(*dy):
-            if isinstance(dy, tuple) and len(dy)>1:
+            if isinstance(dy, tuple): #and len(dy)>1
                 return (y * self.weight for y in dy)
             else:
                 return dy * self.weight

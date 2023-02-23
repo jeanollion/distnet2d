@@ -1,10 +1,16 @@
 import tensorflow as tf
 from .coordinate_op_2d import get_weighted_mean_2d_fun
+from ..model.layers import WeigthedGradient
 
-def get_motion_losses(spatial_dims, motion_range:int, center_motion:bool = True, motion_var:bool=True):
+def get_motion_losses(spatial_dims, motion_range:int, motion_grad_weight:float, center_motion:bool = True, motion_var:bool=True, center_motion_l2:bool=False):
     nan = tf.cast(float('NaN'), tf.float32)
-    motion_loss_fun = [euclidean_distance_loss() for i in range(motion_range)]
+    motion_loss_fun = _distance_loss(center_motion_l2)
     center_fun = get_weighted_mean_2d_fun(spatial_dims, True, batch_axis = False, keepdims = False)
+    @tf.custom_gradient
+    def wgrad(x):
+        def grad(dy):
+            return dy * motion_grad_weight
+        return x, grad
     def fun(args):
         dY, dX, center, labels, prev_labels = args
         label_rank, label_size, N = _get_label_rank_and_size(labels, batch_axis=False)
@@ -13,6 +19,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_motion:bool = True,
         if center_motion: # center+motion coherence loss
             # predicted  center coord per object
             dm = tf.stack([dYm, dXm], -1) # (T-1, N, 2)
+            dm = wgrad(dm)
             center_values = tf.math.exp(-tf.math.square(center))
             center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(center_values, -1), label_rank))
             prev_labels = prev_labels[...,:N] # (T-1, N) # trim from (T-1, Nmax)
@@ -27,7 +34,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_motion:bool = True,
             center_ob_prev = center_ob[:-1] # (T-1, N, 2)
             center_ob_prev = tf.gather(center_ob_prev, indices=prev_idx, batch_dims=1, axis=1) # (T-1, N, 2)
             center_ob_prev = tf.where(has_prev_, center_ob_prev, nan)
-            motion_loss = motion_loss_fun[0](center_ob_prev, center_ob_cur_trans)
+            motion_loss = motion_loss_fun(center_ob_prev, center_ob_cur_trans)
 
             for d in range(1, motion_range):
                 # remove first frame
@@ -39,7 +46,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_motion:bool = True,
                 dm = dm[:-1] # (T-1-d, N, 2)
                 center_ob_cur_trans = _scatter_centers_frames(center_ob_cur_trans, prev_idx, has_prev) # move indices of translated center to match indices of previous frame. average centers in case of division
                 center_ob_cur_trans = center_ob_cur_trans - dm # translate
-                motion_loss = motion_loss + motion_loss_fun[d](center_ob_prev, center_ob_cur_trans)
+                motion_loss = motion_loss + motion_loss_fun(center_ob_prev, center_ob_cur_trans)
 
             motion_loss = tf.divide(motion_loss, tf.cast(motion_range, motion_loss.dtype))
             motion_loss = tf.cond(tf.math.is_nan(motion_loss), lambda : tf.cast(0, motion_loss.dtype), lambda : motion_loss)
@@ -98,12 +105,13 @@ def _scatter_centers(args): # (N, 2) , (N), (N)
 def _scatter_centers_frames(center, prev_idx, has_prev): # (F, N, 2) , (F, N), (F, N)
     return tf.map_fn(_scatter_centers, (center, prev_idx, has_prev), fn_output_signature=center.dtype)
 
-def euclidean_distance_loss():
+def _distance_loss(l2=False):
     def loss(true, pred): # (C, N, 2)
         no_na_mask = tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32) # non-empty objects
         true = tf.math.multiply_no_nan(true, no_na_mask)
         pred = tf.math.multiply_no_nan(pred, no_na_mask)
-        d = tf.math.reduce_sum(tf.math.square(true - pred), axis=[-2, -1], keepdims=False) #(C)
+        d = tf.math.square(true - pred) if l2 else tf.math.abs(true - pred)
+        d = tf.math.reduce_sum(d, axis=[-2, -1], keepdims=False) #(C)
         n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False)
         d = tf.math.divide_no_nan(d, n_obj)
         return tf.math.reduce_mean(d)

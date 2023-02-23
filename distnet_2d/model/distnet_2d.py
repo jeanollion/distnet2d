@@ -12,7 +12,7 @@ from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorSampleWeightChannel
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
-from ..utils.lovasz_loss import lovasz_hinge_regression_per_obj, lovasz_hinge_regression, lovasz_hinge
+from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
 
 ENCODER_SETTINGS = [
@@ -55,9 +55,10 @@ class DistnetModel(Model):
     def __init__(self, *args, spatial_dims,
         edm_loss_weight=1, edm_lovasz_loss_weight=1,
         contour_loss_weight = 1,
-        center_loss_weight=1,
-        displacement_loss_weight=1, displacement_var_weight=1,
-        center_displacement_loss_weight=1,
+        center_loss_weight=1, center_lovasz_loss_weight=1e-6,
+        displacement_loss_weight=1, displacement_lovasz_loss_weight=0, displacement_var_weight=1e-3,
+        center_displacement_loss_weight=1e-3,
+        displacement_grad_weight:float=1e-1,
         category_loss_weight=1,
         edm_loss=MeanSquaredErrorSampleWeightChannel(),
         center_loss = MeanSquaredError(),
@@ -69,11 +70,13 @@ class DistnetModel(Model):
         predict_contours = False,
         predict_center = False,
         gradient_safe_mode = False,
+        gradient_log_dir:str=None,
         **kwargs):
         super().__init__(*args, **kwargs)
-        self.displacement_loss_lovasz = False
+        self.displacement_lovasz_weight = displacement_lovasz_loss_weight
         self.edm_weight = edm_loss_weight
         self.edm_lovasz_weight = edm_lovasz_loss_weight
+        self.center_lovasz_weight = center_lovasz_loss_weight
         self.contour_weight = contour_loss_weight
         self.center_weight = center_loss_weight
         self.displacement_weight = displacement_loss_weight
@@ -90,7 +93,7 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         self.contour_loss = MeanSquaredError()
         self.displacement_loss = displacement_loss
-        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
+        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), motion_grad_weight=displacement_grad_weight, center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
@@ -98,7 +101,10 @@ class DistnetModel(Model):
             self.category_loss=weighted_loss_by_category(SparseCategoricalCrossentropy(), category_weights)
         else:
             self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
-
+        if gradient_log_dir is not None:
+            self.grad_writer = tf.summary.create_file_writer(gradient_log_dir)
+        else:
+            self.grad_writer = None
     def train_step(self, data):
         fw = self.frame_window
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
@@ -123,7 +129,7 @@ class DistnetModel(Model):
                 assert len(y) == 5, f"invalid number of output. Expected: 5 actual {len(y)}"
             else:
                 assert len(y) == 4, f"invalid number of output. Expected: 4 actual {len(y)}"
-        with tf.GradientTape() as tape:
+        with tf.GradientTape(persistent=self.grad_writer is not None) as tape:
             y_pred = self(x, training=True)  # Forward pass
             # compute loss
             losses = dict()
@@ -132,9 +138,10 @@ class DistnetModel(Model):
             loss = edm_loss * edm_weight
             losses["edm"] = edm_loss
             if self.edm_lovasz_weight>0:
-                edm_loss_lh = lovasz_hinge(y_pred[inc], tf.math.greater(y[inc], 0))
+                edm_loss_lh = lovasz_hinge(y_pred[inc], tf.math.greater(y[inc], 0), channel_axis=True)
                 loss = loss + edm_loss_lh * self.edm_lovasz_weight
                 losses["edm_lh"] = edm_loss_lh
+
             if self.predict_contours:
                 inc+=1
                 contour_loss = self.contour_loss(y[inc], y_pred[inc])
@@ -147,22 +154,25 @@ class DistnetModel(Model):
                 center_loss = self.center_loss(y[inc], center_pred_inside)
                 loss = loss + center_loss * center_weight
                 losses["center"] = center_loss
+                if self.center_lovasz_weight>0 and labels is not None:
+                    c_pred = tf.math.exp(-y_pred[inc])
+                    c_true = tf.math.exp(-y[inc])
+                    score = 1. - 2. * tf.math.abs(c_pred - c_true)
+                    center_loss_lh = lovasz_hinge(score, labels, per_label=True, channel_axis=True)
+                    loss = loss + center_loss_lh * self.center_lovasz_weight
+                    losses["center_lh"] = center_loss_lh
 
-            if self.displacement_loss_lovasz:
-                label_mask_sel = tf.reduce_sum(label_rank_sel[...,1:], axis=-1, keepdims=False)
-                d_loss = lovasz_hinge_regression_per_obj(y[1+inc], y_pred[1+inc], scale_sel, label_rank_sel) + lovasz_hinge_regression_per_obj(y[2+inc], y_pred[2+inc], scale_sel, label_rank_sel)
-                loss = loss + d_loss * displacement_weight
-                losses["displacement"] = d_loss
+            if self.displacement_lovasz_weight>0:
+                score_y = 2. * tf.math.exp(-tf.math.square(y[1+inc]-y_pred[1+inc])) - 1.
+                score_x = 2. * tf.math.exp(-tf.math.square(y[2+inc]-y_pred[2+inc])) - 1.
+                d_loss = lovasz_hinge(score_y, labels[...,1:], per_label=True, channel_axis=True) + lovasz_hinge(score_x, labels[...,1:], per_label=True, channel_axis=True)
+                loss = loss + d_loss * self.displacement_lovasz_weight
+                losses["displacement_lh"] = d_loss
 
-            #pixel-wise displacement loss
-            if not self.displacement_loss_lovasz:
-                # wm_sel = tf.tile(weight_map[..., fw:fw+1], [1,1,1,fw])
-                # if self.next:
-                #     wm_sel = tf.concat([wm_sel, weight_map[..., fw+1:]], axis=-1)
-                wm_sel = None
-                d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc], sample_weight=wm_sel) + self.displacement_loss(y[2+inc], y_pred[2+inc], sample_weight=wm_sel)
-                loss = loss + d_loss * displacement_weight
-                losses["displacement"] = d_loss
+            #regression displacement loss
+            d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
+            loss = loss + d_loss * displacement_weight
+            losses["displacement"] = d_loss
 
             if displacement_var_weight>0 or center_displacement_weight>0:
                 motion_losses = self.motion_losses(y_pred[1+inc], y_pred[2+inc], y_pred[inc], labels, prev_labels)
@@ -184,8 +194,20 @@ class DistnetModel(Model):
             if mixed_precision:
                 loss = self.optimizer.get_scaled_loss(loss)
 
-        # Compute gradients
+
         trainable_vars = self.trainable_variables
+        if self.grad_writer is not None:
+            trainable_vars_tape = [t for t in trainable_vars if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY")) and "/kernel" in t.name]
+            with self.grad_writer.as_default(step=self._train_counter):
+                for loss_name, loss_value in losses.items():
+                    grad = tape.gradient(loss_value, trainable_vars_tape)
+                    if mixed_precision:
+                        grad = self.optimizer.get_unscaled_gradients(grad)
+                    for v, g in zip(trainable_vars_tape, grad):
+                        if g is not None:
+                            #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
+                            print(f"layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
+        # Compute gradients
         if not self.gradient_safe_mode:
             grad = tape.gradient(loss, trainable_vars)
             if mixed_precision:
@@ -207,8 +229,6 @@ class DistnetModel(Model):
             # printlosses={k:v.numpy() for k,v in losses.items()}
             # print(f"losses: {printlosses}")
             return losses
-
-
 
 # one encoder per input + one decoder + one last level of decoder per output + custom frame window size
 def get_distnet_2d_sep_out_fw(input_shape, # Y, X

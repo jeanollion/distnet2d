@@ -24,25 +24,7 @@ def lovasz_grad(gt_sorted):
 
 # --------------------------- BINARY LOSSES ---------------------------
 
-def lovasz_hinge_regression_per_obj(true, pred, scale, labels):
-    d = 2. * tf.math.exp(tf.divide(-tf.math.square(true-pred), scale)) - 1.
-    d_o = tf.expand_dims(d, -1) * labels
-    return lovasz_hinge(d_o, labels, ignore=0, per_object=True) # ignore=0  ?
-
-def lovasz_hinge_regression(true, pred, scale, labels):
-    d = 2. * tf.math.exp(tf.divide(-tf.math.square(true-pred), scale)) - 1.
-    return lovasz_hinge(d, labels, ignore=None, channel_axis=True)
-
-def lovasz_hinge_motion_per_obj(true_y, pred_y, true_x, pred_x, scale, labels):
-    d = 2. * tf.math.exp(tf.divide(-tf.math.square(true_y-pred_y)-tf.math.square(true_x-pred_x), scale)) - 1.
-    d_o = tf.expand_dims(d, -1) * labels
-    return lovasz_hinge(d_o, labels, ignore=0, per_object=True) # ignore=0  ?
-
-def lovasz_hinge_motion(true_y, pred_y, true_x, pred_x, scale, labels):
-    d = 2. * tf.math.exp(tf.divide(-tf.math.square(true_y-pred_y)-tf.math.square(true_x-pred_x), scale)) - 1.
-    return lovasz_hinge(d, labels, ignore=None, channel_axis=True)
-
-def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, channel_axis=False):
+def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, per_label=False, channel_axis=False):
     """
     Binary Lovasz hinge loss
       logits: [B, H, W] Variable, logits at each pixel (between -\infty and +\infty) [B, H, W, C, N] if per_object or [B, H, W, C] if channel axis
@@ -62,11 +44,27 @@ def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, 
             log, lab = tf.expand_dims(log, 0), tf.expand_dims(lab, 0)
             log, lab = flatten_binary_scores(log, lab, ignore)
             return lovasz_hinge_flat(log, lab)
+
+        def treat_image_per_label(log_lab):
+            log, lab = log_lab
+            log, lab = tf.expand_dims(log, 0), tf.expand_dims(lab, 0)
+            log, lab = flatten_binary_scores(log, lab, ignore)
+            unique_labs, _ = tf.unique(lab)
+            unique_labs = tf.boolean_mask(unique_labs, tf.math.greater(unique_labs, 0), name='valid_labels')
+            def treat_label(label):
+                valid = tf.equal(lab, label)
+                vscores = tf.boolean_mask(log, valid, name='valid_scores')
+                vlabels = tf.boolean_mask(lab, valid, name='valid_labels')
+                return lovasz_hinge_flat(vscores, vlabels)
+            loss_per_label = tf.map_fn(treat_label, unique_labs, fn_output_signature=tf.float32)
+            return tf.reduce_mean(loss_per_label)
         shape = tf.shape(labels)
         if per_object or channel_axis:
             labels = trans(labels, shape)
             logits = trans(logits, shape)
-        losses = tf.map_fn(treat_image, (logits, labels), fn_output_signature=tf.float32)
+        if per_label:
+            assert not per_object, "per label is incompatible with per object option"
+        losses = tf.map_fn(treat_image_per_label if per_label else treat_image, (logits, labels), fn_output_signature=tf.float32)
         # if per_object or or:
         #     losses = utrans(losses, shape)
     else:
