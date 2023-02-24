@@ -11,6 +11,7 @@ import sys
 import itertools
 import edt
 from random import random
+from .medoid import get_medoid
 
 class DyDxIterator(TrackingIterator):
     def __init__(self,
@@ -28,7 +29,7 @@ class DyDxIterator(TrackingIterator):
         return_contours = False,
         contour_sigma = 0.5,
         return_center = False,
-        center_mode = "GEOMETRICAL", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON"
+        center_mode = "GEOMETRICAL", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
         return_label_rank = False,
         output_float16=False,
         **kwargs):
@@ -309,6 +310,8 @@ def _get_labels_and_centers(labelIm, edm, center_mode = "GEOMETRICAL"):
         wsum=np.sum(lm_coords_ob * lm_coords_dinv, 0, keepdims=False) # N_ob, 2
         sum=np.sum(lm_coords_dinv, 0, keepdims=False) # N_ob, 1
         centers = wsum / sum # N_ob, 2
+    elif center_mode == "MEDOID":
+        centers = [get_medoid(*np.where(labelIm == l)) for l in labels]
     else:
         raise ValueError(f"Invalid center mode: {center_mode}")
     return dict(zip(labels, centers))
