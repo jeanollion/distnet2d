@@ -44,6 +44,7 @@ def get_weighted_mean_2d_fun(spatial_dims, two_channel_axes=True, batch_axis=Tru
         wsum_x = tf.reduce_sum(x * X, axis=axis, keepdims=keepdims) # (B, 1, 1, T, C)
         wsum = tf.stack([wsum_y, wsum_x], -1) # (B, 1, 1, T, C, 2)
         sum = tf.expand_dims(tf.reduce_sum(x, axis=axis, keepdims = keepdims), -1) # (B, 1, 1, T, C, 1)
+        #sum = tf.stop_gradient(sum)
         return tf.math.divide(wsum, sum) # when no values should return nan # (B, 1, 1, T, C, 2)
     return wm
 
@@ -81,6 +82,21 @@ def get_gaussian_spread_fun(sigma, Y, X, objectwise=True):
             exp = tf.reduce_sum(exp, -1) #(B, Y, X, C)
         return exp
     return gs
+
+def get_center_distance_spread_fun(Y, X):
+    kernel = _generate_kernel(Y, X, O=1)  # (Y, X, 1, 1, 2)
+    kernel = tf.constant(kernel, dtype=tf.float32) # (Y, X, 1, 2) or  (Y, X, 1, 1, 2)
+    zero = tf.constant(0, dtype=tf.float32)
+
+    #@tf.function
+    def fun(x, label_rank): # (1, 1, C, N, 2) , (1, 1, C, N)
+        d = tf.math.reduce_sum(tf.math.square(x - kernel), axis=-1, keepdims=False) #(B, Y, X, C) or (B, Y, X, C, N)
+        d = tf.where(tf.math.is_nan(d), zero, d) # some centers are NaN
+        d = tf.math.multiply_no_nan(d, label_rank) # remove distances outside objects
+        d = tf.reduce_sum(d, -1) #(B, Y, X, C)
+        d = tf.math.sqrt(d)
+        return d
+    return fun
 
 def _get_spatial_kernels(Y, X, two_channel_axes=True, batch_axis=True):
     Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')

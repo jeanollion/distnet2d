@@ -55,10 +55,9 @@ class DistnetModel(Model):
     def __init__(self, *args, spatial_dims,
         edm_loss_weight=1, edm_lovasz_loss_weight=1,
         contour_loss_weight = 1,
-        center_loss_weight=1, center_lovasz_loss_weight=1e-6,
+        center_loss_weight=1, center_lovasz_loss_weight=1,
         displacement_loss_weight=1, displacement_lovasz_loss_weight=0, displacement_var_weight=1e-3,
-        center_displacement_loss_weight=1e-3,
-        displacement_grad_weight:float=1e-1,
+        center_displacement_loss_weight=1e-3, center_displacement_grad_weight_ratio:float=1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
         category_loss_weight=1,
         edm_loss=MeanSquaredErrorSampleWeightChannel(),
         center_loss = MeanSquaredError(),
@@ -93,7 +92,7 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         self.contour_loss = MeanSquaredError()
         self.displacement_loss = displacement_loss
-        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), motion_grad_weight=displacement_grad_weight, center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
+        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), grad_weight_ratio=center_displacement_grad_weight_ratio, center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
@@ -155,9 +154,23 @@ class DistnetModel(Model):
                 loss = loss + center_loss * center_weight
                 losses["center"] = center_loss
                 if self.center_lovasz_weight>0 and labels is not None:
-                    c_pred = tf.math.exp(-y_pred[inc])
-                    c_true = tf.math.exp(-y[inc])
-                    score = 1. - 2. * tf.math.abs(c_pred - c_true)
+                    # @tf.custom_gradient
+                    # def p_pred(x):
+                    #     def grad(dy):
+                    #         p = tf.boolean_mask(tf.math.abs(dy), tf.math.not_equal(dy, 0.))
+                    #         print(f"pred grad: \n{tf.math.reduce_mean(p)}")
+                    #         return dy
+                    #     return x, grad
+                    # pred = p_pred(y_pred[inc])
+                    score = 2. * tf.math.exp(-tf.math.square(y_pred[inc] - y[inc])) - 1.
+                    #@tf.custom_gradient
+                    # def p_score(x):
+                    #     def grad(dy):
+                    #         p = tf.boolean_mask(tf.math.abs(dy), tf.math.not_equal(dy, 0.))
+                    #         print(f"score grad: \n{tf.math.reduce_mean(p)}")
+                    #         return dy
+                    #     return x, grad
+                    # score = p_score(score)
                     center_loss_lh = lovasz_hinge(score, labels, per_label=True, channel_axis=True)
                     loss = loss + center_loss_lh * self.center_lovasz_weight
                     losses["center_lh"] = center_loss_lh
@@ -193,7 +206,6 @@ class DistnetModel(Model):
             losses["loss"] = loss
             if mixed_precision:
                 loss = self.optimizer.get_scaled_loss(loss)
-
 
         trainable_vars = self.trainable_variables
         if self.grad_writer is not None:
