@@ -405,7 +405,6 @@ def get_distnet_2d_erf(input_shape, # Y, X
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
             attention : bool = True,
-            self_attention:bool = True,
             frame_window:int = 1,
             next:bool=True,
             predict_center = False,
@@ -433,9 +432,6 @@ def get_distnet_2d_erf(input_shape, # Y, X
         feature_convs, _, _, attention_filters, _ = parse_param_list(feature_settings, "FeatureSequence")
         combine_filters = int(attention_filters * n_chan / 2.)
         combine_features_op = Combine(filters=combine_filters, name="CombineFeatures")
-        if self_attention:
-            self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
-            self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
         if attention:
             attention_op = Attention(positional_encoding="2D", name="Attention")
             attention_combine = Combine(filters=combine_filters, name="AttentionCombine")
@@ -488,10 +484,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
         feature = downsampled[-1]
         for op in feature_convs:
             feature = op(feature)
-        if self_attention:
-            sa = self_attention_op([feature, feature])
-            feature = self_attention_skip_op([feature, sa])
-
+        
         target_shape = [-1, n_chan]+feature.shape.as_list()[-3:]
         all_features = tf.split(tf.reshape(feature, target_shape), num_or_size_splits = n_chan, axis=1)
         all_features = [tf.squeeze(f, 1) for f in all_features]
@@ -779,6 +772,13 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
     elif op =="res2d" or op == "resconv2d":
         return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
     assert filters > 0 , "filters must be > 0"
+    if op=="selfattention":
+        self_attention_op = Attention(positional_encoding="2D", name=f"{name}/SelfAttention")
+        self_attention_skip_op = Combine(filters=filters, name=f"{name}/SelfAttentionSkip")
+        def op(x):
+            sa = self_attention_op([x, x])
+            return self_attention_skip_op([x, sa])
+        return op
     if dropout_rate>0 or batch_norm:
         return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
     else:
