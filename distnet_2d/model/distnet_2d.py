@@ -1,6 +1,6 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, Conv2DBNDrop, Conv2DTransposeBNDrop
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop
 from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -567,7 +567,7 @@ def decoder_op(
             dropout_rate:float=0,
             activation: str="relu",
             activation_out : str = None,
-            res_1D:bool = False,
+            op:str = "conv",
             n_conv:int = 1,
             factor:float = 1,
             name: str="DecoderLayer",
@@ -588,8 +588,11 @@ def decoder_op(
             combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size)
         else:
             combine = None
-        if res_1D:
+        op = op.lower().replace("_", "")
+        if op == "res1d" or op=="resconv1d":
             convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
+        elif op == "res2d" or op=="resconv2d":
+            convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, name=f"{name}/ResConv2D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         else:
             convs = [Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         f = tf.cast(factor, tf.float32)
@@ -769,9 +772,12 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, res_1D:bool = False, dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, batch_norm:bool=False, name:str=""):
-    if res_1D:
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, batch_norm:bool=False, name:str=""):
+    op = op.lower().replace("_", "")
+    if op =="res1d" or op=="resconv1d":
         return ResConv1D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, name=f"{name}/ResConv1D{kernel_size}x{kernel_size}")
+    elif op =="res2d" or op == "resconv2d":
+        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
     assert filters > 0 , "filters must be > 0"
     if dropout_rate>0 or batch_norm:
         return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
