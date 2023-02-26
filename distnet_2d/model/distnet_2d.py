@@ -183,7 +183,9 @@ class DistnetModel(Model):
                 losses["displacement_lh"] = d_loss
 
             #regression displacement loss
-            d_loss = self.displacement_loss(y[1+inc], y_pred[1+inc]) + self.displacement_loss(y[2+inc], y_pred[2+inc])
+            dy_inside=tf.where(tf.math.greater(y[0], 0), y_pred[1+inc], 0) # do not predict anything outside
+            dx_inside=tf.where(tf.math.greater(y[0], 0), y_pred[2+inc], 0) # do not predict anything outside
+            d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
             loss = loss + d_loss * displacement_weight
             losses["displacement"] = d_loss
 
