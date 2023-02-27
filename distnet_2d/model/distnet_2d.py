@@ -53,7 +53,7 @@ DECODER_SETTINGS_DS = [
 
 class DistnetModel(Model):
     def __init__(self, *args, spatial_dims,
-        edm_loss_weight=1, edm_lovasz_loss_weight=1,
+        edm_loss_weight=1, edm_lovasz_loss_weight=1, edm_lovasz_label_loss_weight=0,
         contour_loss_weight = 1,
         center_loss_weight=1, center_lovasz_loss_weight=1,
         displacement_loss_weight=1, displacement_lovasz_loss_weight=0, displacement_var_weight=1e-3,
@@ -75,8 +75,9 @@ class DistnetModel(Model):
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
         self.edm_weight = edm_loss_weight
         self.edm_lovasz_weight = edm_lovasz_loss_weight
-        self.center_lovasz_weight = center_lovasz_loss_weight
+        self.edm_lovasz_label_weight = edm_lovasz_label_loss_weight
         self.contour_weight = contour_loss_weight
+        self.center_lovasz_weight = center_lovasz_loss_weight
         self.center_weight = center_loss_weight
         self.displacement_weight = displacement_loss_weight
         self.displacement_var_weight=displacement_var_weight
@@ -132,14 +133,21 @@ class DistnetModel(Model):
             y_pred = self(x, training=True)  # Forward pass
             # compute loss
             losses = dict()
+            loss = 0
             inc=0
-            edm_loss = self.edm_loss(y[inc], y_pred[inc])#, sample_weight = weight_map)
-            loss = edm_loss * edm_weight
-            losses["edm"] = edm_loss
+            if edm_weight>0:
+                edm_loss = self.edm_loss(y[inc], y_pred[inc])#, sample_weight = weight_map)
+                loss = edm_loss * edm_weight
+                losses["edm"] = edm_loss
             if self.edm_lovasz_weight>0:
                 edm_loss_lh = lovasz_hinge(y_pred[inc], tf.math.greater(y[inc], 0), channel_axis=True)
                 loss = loss + edm_loss_lh * self.edm_lovasz_weight
                 losses["edm_lh"] = edm_loss_lh
+            if self.edm_lovasz_label_weight>0 and labels is not None:
+                edm_score = 2. * tf.math.exp(-tf.math.square(y[0]-y_pred[0])) - 1.
+                edm_loss_lh = lovasz_hinge(edm_score, labels, per_label=True, channel_axis=True)
+                loss = loss + edm_loss_lh * self.edm_lovasz_label_weight
+                losses["edm_lh_label"] = edm_loss_lh
 
             if self.predict_contours:
                 inc+=1
@@ -149,10 +157,11 @@ class DistnetModel(Model):
 
             if self.predict_center:
                 inc+=1
-                center_pred_inside=tf.where(tf.math.greater(y[0], 0), y_pred[inc], 0) # do not predict anything outside
-                center_loss = self.center_loss(y[inc], center_pred_inside)
-                loss = loss + center_loss * center_weight
-                losses["center"] = center_loss
+                if center_weight>0:
+                    center_pred_inside=tf.where(tf.math.greater(y[0], 0), y_pred[inc], 0) # do not predict anything outside
+                    center_loss = self.center_loss(y[inc], center_pred_inside)
+                    loss = loss + center_loss * center_weight
+                    losses["center"] = center_loss
                 if self.center_lovasz_weight>0 and labels is not None:
                     # @tf.custom_gradient
                     # def p_pred(x):
@@ -183,11 +192,12 @@ class DistnetModel(Model):
                 losses["displacement_lh"] = d_loss
 
             #regression displacement loss
-            dy_inside=tf.where(tf.math.greater(y[0], 0), y_pred[1+inc], 0) # do not predict anything outside
-            dx_inside=tf.where(tf.math.greater(y[0], 0), y_pred[2+inc], 0) # do not predict anything outside
-            d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
-            loss = loss + d_loss * displacement_weight
-            losses["displacement"] = d_loss
+            if displacement_weight>0:
+                dy_inside=tf.where(tf.math.greater(y[0], 0), y_pred[1+inc], 0) # do not predict anything outside
+                dx_inside=tf.where(tf.math.greater(y[0], 0), y_pred[2+inc], 0) # do not predict anything outside
+                d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
+                loss = loss + d_loss * displacement_weight
+                losses["displacement"] = d_loss
 
             if displacement_var_weight>0 or center_displacement_weight>0:
                 motion_losses = self.motion_losses(y_pred[1+inc], y_pred[2+inc], y_pred[inc], labels, prev_labels)
@@ -484,7 +494,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
         feature = downsampled[-1]
         for op in feature_convs:
             feature = op(feature)
-        
+
         target_shape = [-1, n_chan]+feature.shape.as_list()[-3:]
         all_features = tf.split(tf.reshape(feature, target_shape), num_or_size_splits = n_chan, axis=1)
         all_features = [tf.squeeze(f, 1) for f in all_features]
