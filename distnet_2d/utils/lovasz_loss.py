@@ -50,13 +50,15 @@ def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, 
             log, lab = tf.expand_dims(log, 0), tf.expand_dims(lab, 0)
             log, lab = flatten_binary_scores(log, lab, ignore)
             unique_labs, _ = tf.unique(lab)
-            unique_labs = tf.boolean_mask(unique_labs, tf.math.greater(unique_labs, 0), name='unique_labels')
+            unique_labs = tf.boolean_mask(unique_labs, tf.math.greater(unique_labs, 0))
             def treat_label(label):
                 valid = tf.equal(lab, label)
-                vscores = tf.boolean_mask(log, valid, name='valid_scores_label')
-                vlabels = tf.boolean_mask(lab, valid, name='valid_labels_label')
+                vscores = tf.boolean_mask(log, valid)
+                vlabels = tf.boolean_mask(lab, valid)
                 return lovasz_hinge_flat(vscores, vlabels)
-            loss_per_label = tf.map_fn(treat_label, unique_labs, fn_output_signature=tf.float32)
+            loss_per_label = tf.cond(tf.equal(tf.shape(unique_labs)[0], 0),
+                           lambda: tf.cast(0, tf.float32),
+                           lambda: tf.map_fn(treat_label, unique_labs, fn_output_signature=tf.float32) )
             return tf.reduce_mean(loss_per_label)
         shape = tf.shape(labels)
         if per_object or channel_axis:
@@ -83,18 +85,16 @@ def lovasz_hinge_flat(logits, labels):
         labelsf = tf.cast(labels, logits.dtype)
         signs = 2. * labelsf - 1.
         errors = 1. - logits * tf.stop_gradient(signs)
-        errors_sorted, perm = tf.nn.top_k(errors, k=tf.shape(errors)[0], name="descending_sort")
+        errors_sorted, perm = tf.nn.top_k(errors, k=tf.shape(errors)[0])
         gt_sorted = tf.gather(labelsf, perm)
         grad = lovasz_grad(gt_sorted)
-        loss = tf.tensordot(tf.nn.relu(errors_sorted), tf.stop_gradient(grad), 1, name="lovasz_hinge_loss_non_void")
+        loss = tf.tensordot(tf.nn.relu(errors_sorted), tf.stop_gradient(grad), 1)
         return loss
 
     # deal with the void prediction case (only void pixels)
     loss = tf.cond(tf.equal(tf.shape(logits)[0], 0),
                    lambda: tf.reduce_sum(logits) * 0.,
-                   compute_loss,
-                   name="lovasz_hinge_loss"
-                   )
+                   compute_loss)
     return loss
 
 
@@ -108,6 +108,6 @@ def flatten_binary_scores(scores, labels, ignore=None):
     if ignore is None:
         return scores, labels
     valid = tf.not_equal(labels, ignore)
-    vscores = tf.boolean_mask(scores, valid, name='valid_scores')
-    vlabels = tf.boolean_mask(labels, valid, name='valid_labels')
+    vscores = tf.boolean_mask(scores, valid)
+    vlabels = tf.boolean_mask(labels, valid)
     return vscores, vlabels
