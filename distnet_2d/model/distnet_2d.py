@@ -222,7 +222,7 @@ class DistnetModel(Model):
                 if center_displacement_weight>0:
                     center_motion_loss = motion_losses[0] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
                     losses["center_displacement"] = center_motion_loss
-                    center_motion_loss_norm = tf.divide_no_nan(center_displacement_weight, tf.stop_gradient(center_motion_loss))
+                    center_motion_loss_norm = tf.math.divide_no_nan(center_displacement_weight, tf.stop_gradient(center_motion_loss))
                     loss = loss + center_motion_loss * center_motion_loss_norm
                 if displacement_var_weight>0:
                     var_loss = motion_losses[1] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
