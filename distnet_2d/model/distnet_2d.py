@@ -1,3 +1,5 @@
+# gradient accumulation code from : # from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
+
 import tensorflow as tf
 import tensorflow_probability as tfp
 from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop
@@ -14,6 +16,7 @@ from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_catego
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
+from ..utils.agc import adaptive_clip_grad
 
 ENCODER_SETTINGS = [
     [ # l1 = 128 -> 64
@@ -70,6 +73,7 @@ class DistnetModel(Model):
         predict_center = False,
         gradient_safe_mode = False,
         gradient_log_dir:str=None,
+        accum_steps=1, use_agc=False, agc_clip_factor=0.01, agc_eps=1e-3, agc_exclude_output=False,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
@@ -101,11 +105,34 @@ class DistnetModel(Model):
             self.category_loss=weighted_loss_by_category(SparseCategoricalCrossentropy(), category_weights)
         else:
             self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
+
+        # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
+        self.use_grad_acc = accum_steps>1
+        if self.use_grad_acc:
+            self.accum_steps = tf.constant(accum_steps, dtype=tf.int32, name="accum_steps")
+            self.accum_step_counter = tf.Variable(0, dtype=tf.int32, trainable=False, name="accum_counter",
+                                                  synchronization=tf.VariableSynchronization.ON_READ,
+                                                  aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA,
+                                                  )
+            self.first_call = True
+            self.gradient_accumulation = None
+            self.reinit_grad_accum()
+        self.use_agc = use_agc
+        self.agc_clip_factor = agc_clip_factor
+        self.agc_eps = agc_eps
+        self.agc_exclude_output=agc_exclude_output
         if gradient_log_dir is not None:
             self.grad_writer = tf.summary.create_file_writer(gradient_log_dir)
         else:
             self.grad_writer = None
+
     def train_step(self, data):
+        if self.use_grad_acc:
+            if self.first_call:
+                self.reinit_grad_accum()
+                self.first_call = False
+            self.accum_step_counter.assign_add(1)
+
         fw = self.frame_window
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
@@ -214,6 +241,7 @@ class DistnetModel(Model):
             for i in range(self.frame_window * (2 if self.next else 1)):
                 cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
             loss = loss + cat_loss * category_weight
+            loss = loss / tf.cast(self.accum_steps, tf.float32)
             losses["category"] = cat_loss
             losses["loss"] = loss
             if mixed_precision:
@@ -233,10 +261,22 @@ class DistnetModel(Model):
                             print(f"layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
         # Compute gradients
         if not self.gradient_safe_mode:
-            grad = tape.gradient(loss, trainable_vars)
+            gradients = tape.gradient(loss, trainable_vars, unconnected_gradients=tf.UnconnectedGradients.ZERO)
             if mixed_precision:
-                grad = self.optimizer.get_unscaled_gradients(grad)
-            self.optimizer.apply_gradients(zip(grad, trainable_vars)) #Update weights
+                gradients = self.optimizer.get_unscaled_gradients(gradients)
+            if self.use_agc:
+                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if self.agc_exclude_output else None)
+            if self.use_grad_acc:
+                # Accumulate batch gradients
+                for i in range(len(self.gradient_accumulation)):
+                    self.gradient_accumulation[i].assign_add(gradients[i], read_value=False)
+
+                # If accum_step_counter reach the accum_steps then we apply accumulated gradients to update the variables
+                # otherwise do nothing
+                tf.cond(tf.equal(self.accum_step_counter, self.accum_steps), true_fn=self.apply_accu_gradients,
+                        false_fn=lambda: None)
+            else:
+                self.optimizer.apply_gradients(zip(gradients, trainable_vars)) #Update weights
             return losses
         else:
             grads_and_vars=self.optimizer._compute_gradients(loss, var_list=self.trainable_variables, tape=tape)
@@ -253,6 +293,26 @@ class DistnetModel(Model):
             # printlosses={k:v.numpy() for k,v in losses.items()}
             # print(f"losses: {printlosses}")
             return losses
+
+    def apply_accu_gradients(self):
+        # apply accumulated gradients
+        self.optimizer.apply_gradients(zip(self.gradient_accumulation, self.trainable_variables))
+
+        # reset
+        self.accum_step_counter.assign(0)
+        for i in range(len(self.gradient_accumulation)):
+            self.gradient_accumulation[i].assign(
+                tf.zeros_like(self.trainable_variables[i], dtype=tf.float32), read_value=False)
+
+    def reinit_grad_accum(self):
+        # reinitialize gradient accumulator
+        self.gradient_accumulation = [
+            tf.Variable(tf.zeros_like(v, dtype=tf.float32), trainable=False,
+            name="accum_" + str(i),
+            synchronization=tf.VariableSynchronization.ON_READ,
+            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA,
+            ) for i, v in enumerate(self.trainable_variables)
+        ]
 
 # one encoder per input + one decoder + one last level of decoder per output + custom frame window size
 def get_distnet_2d_sep_out_fw(input_shape, # Y, X
