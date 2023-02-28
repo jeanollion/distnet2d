@@ -61,7 +61,7 @@ class DistnetModel(Model):
         contour_loss_weight = 1,
         center_loss_weight=1, center_lovasz_loss_weight=1,
         displacement_loss_weight=1, displacement_lovasz_loss_weight=0, displacement_var_weight=1e-3,
-        center_displacement_loss_weight=1e-3, center_displacement_grad_weight_ratio:float=1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
+        center_displacement_loss_weight=1e-1, center_displacement_grad_weight_ratio:float=1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
         category_loss_weight=1,
         edm_loss=MeanSquaredErrorSampleWeightChannel(),
         center_loss = MeanSquaredError(),
@@ -222,7 +222,8 @@ class DistnetModel(Model):
                 if center_displacement_weight>0:
                     center_motion_loss = motion_losses[0] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
                     losses["center_displacement"] = center_motion_loss
-                    loss = loss + center_motion_loss * center_displacement_weight
+                    center_motion_loss_norm = tf.divide_no_nan(center_displacement_weight, tf.stop_gradient(center_motion_loss))
+                    loss = loss + center_motion_loss * center_motion_loss_norm
                 if displacement_var_weight>0:
                     var_loss = motion_losses[1] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
                     losses["displacement_var"] = var_loss
