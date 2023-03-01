@@ -19,6 +19,8 @@ def compute_norm(x, axis, keepdims):
     return tf.math.sqrt(tf.math.reduce_sum(tf.math.square(x), axis=axis, keepdims=keepdims))
 
 def unitwise_norm(x):
+    if isinstance(x, tf.IndexedSlices):
+        x = tf.convert_to_tensor(x.values)
     shape = x.shape.as_list()
     if len(shape) <= 1:  # Scalars and vectors
         axis = None
@@ -36,17 +38,23 @@ def unitwise_norm(x):
         raise ValueError(f"Got a parameter with shape not in [1, 2, 4, 5]! {x}")
     return compute_norm(x, axis, keepdims)
 
-def adaptive_clip_grad(parameters, gradients, learning_rate, clip_factor=0.01, eps=1e-3, grad_eps = 1e-6, exclude_keywords=None):
+def adaptive_clip_grad(parameters, gradients, clip_factor=0.01, eps=1e-3, grad_eps = 1e-6, grad_scale=1., exclude_keywords=None):
     new_grads = []
     for (params, grads) in zip(parameters, gradients):
-        if params is None or grads is None or exclude_gradient(params.name, exclude_keywords):
+        if params is None or grads is None:
+            new_grads.append(grads)
+        elif exclude_gradient(params.name, exclude_keywords):
+            if grad_scale!=1.:
+                grads = tf.math.multiply(grads, grad_scale)
             new_grads.append(grads)
         else:
+            if grad_scale!=1.:
+                grads = tf.math.multiply(grads, grad_scale)
             p_norm = unitwise_norm(params)
             max_norm = tf.math.maximum(p_norm, eps) * clip_factor
             grad_norm = unitwise_norm(grads)
             clipped_grad = grads * (max_norm / tf.math.maximum(grad_norm, grad_eps))
-            new_grad = tf.where(grad_norm * learning_rate < max_norm, grads, clipped_grad)
+            new_grad = tf.where(grad_norm < max_norm, grads, clipped_grad)
             new_grads.append(new_grad)
     return new_grads
 

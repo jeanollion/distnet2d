@@ -34,9 +34,10 @@ class GradientAccumulator():
 
     def accumulate_gradients(self, gradients):
         for i in range(len(self.gradient_accumulation)):
-            self.gradient_accumulation[i].assign_add(gradients[i], read_value=False)
+            if gradients[i] is not None:
+                self.gradient_accumulation[i].assign_add(gradients[i], read_value=False)
 
-    def apply_gradients():
+    def apply_gradients(self):
         # If accum_step_counter reach the accum_steps then we apply accumulated gradients to update the variables
         # otherwise do nothing
         tf.cond(tf.equal(self.accum_step_counter, self.accum_steps), true_fn=self.apply_accu_gradients,
