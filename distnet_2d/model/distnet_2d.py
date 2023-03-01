@@ -612,6 +612,8 @@ def decoder_op(
             combine_kernel_size:int = 1,
             batch_norm:bool = False,
             dropout_rate:float=0,
+            batch_norm_up:bool = False,
+            dropout_rate_up:float=0,
             activation: str="relu",
             activation_out : str = None,
             op:str = "conv",
@@ -630,7 +632,7 @@ def decoder_op(
         if n_conv>0 and filters_out is None:
             filters_out = filters
 
-        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate)
+        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up)
         if skip_combine_mode=="conv":
             combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size)
         else:
