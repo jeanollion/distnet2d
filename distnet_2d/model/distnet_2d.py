@@ -223,7 +223,7 @@ class DistnetModel(Model):
                     center_motion_loss = motion_losses[0] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
                     losses["center_displacement"] = center_motion_loss
                     #center_motion_loss_norm = tf.math.divide_no_nan(center_displacement_weight, tf.stop_gradient(center_motion_loss))
-                    loss = loss + center_motion_loss * center_displacement_weight
+                    #loss = loss + center_motion_loss * center_displacement_weight
                 if displacement_var_weight>0:
                     var_loss = motion_losses[1] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
                     losses["displacement_var"] = var_loss
@@ -249,22 +249,36 @@ class DistnetModel(Model):
                     gradients = tape.gradient(loss_value, trainable_vars_tape)
                     if mixed_precision:
                         gradients = self.optimizer.get_unscaled_gradients(grad)
-                    if self.use_agc:
-                        gradients = adaptive_clip_grad(trainable_vars_tape, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
                     for v, g in zip(trainable_vars_tape, gradients):
                         if g is not None:
                             #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
                             print(f"layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
+                    if self.use_agc:
+                        gradients = adaptive_clip_grad(trainable_vars_tape, gradients, self.optimizer.learning_rate, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
+                        for v, g in zip(trainable_vars_tape, gradients):
+                            if g is not None:
+                                #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
+                                print(f"AGC: layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
+
         # Compute gradients
         if not self.gradient_safe_mode:
-            gradients = tape.gradient(loss, trainable_vars, unconnected_gradients=tf.UnconnectedGradients.ZERO)
+            gradients = tape.gradient(loss, trainable_vars)
             if mixed_precision:
                 gradients = self.optimizer.get_unscaled_gradients(gradients)
             if self.use_agc:
-                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
+                gradients = adaptive_clip_grad(self.trainable_variables, gradients, self.optimizer.learning_rate, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
+            if center_displacement_weight>0:
+                gradients_cm = tape.gradient(center_motion_loss, trainable_vars)
+                if mixed_precision:
+                    gradients_cm = self.optimizer.get_unscaled_gradients(gradients_cm)
+                if self.use_agc:
+                    gradients_cm = adaptive_clip_grad(self.trainable_variables, gradients_cm, self.optimizer.learning_rate, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
             if self.use_grad_acc:
                 # Accumulate batch gradients
-                self.gradient_accumulator.accumulate_and_apply_gradients(gradients)
+                self.gradient_accumulator.accumulate_gradients(gradients)
+                if center_displacement_weight>0:
+                    self.gradient_accumulator.accumulate_gradients(gradients_cm)
+                self.gradient_accumulator.apply_gradients()
             else:
                 self.optimizer.apply_gradients(zip(gradients, trainable_vars)) #Update weights
             return losses

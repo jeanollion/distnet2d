@@ -36,7 +36,7 @@ def unitwise_norm(x):
         raise ValueError(f"Got a parameter with shape not in [1, 2, 4, 5]! {x}")
     return compute_norm(x, axis, keepdims)
 
-def adaptive_clip_grad(parameters, gradients, clip_factor=0.01, eps=1e-3, grad_eps = 1e-6, exclude_keywords=None):
+def adaptive_clip_grad(parameters, gradients, learning_rate, clip_factor=0.01, eps=1e-3, grad_eps = 1e-6, exclude_keywords=None):
     new_grads = []
     for (params, grads) in zip(parameters, gradients):
         if params is None or grads is None or exclude_gradient(params.name, exclude_keywords):
@@ -46,7 +46,7 @@ def adaptive_clip_grad(parameters, gradients, clip_factor=0.01, eps=1e-3, grad_e
             max_norm = tf.math.maximum(p_norm, eps) * clip_factor
             grad_norm = unitwise_norm(grads)
             clipped_grad = grads * (max_norm / tf.math.maximum(grad_norm, grad_eps))
-            new_grad = tf.where(grad_norm < max_norm, grads, clipped_grad)
+            new_grad = tf.where(grad_norm * learning_rate < max_norm, grads, clipped_grad)
             new_grads.append(new_grad)
     return new_grads
 
