@@ -114,7 +114,7 @@ class DistnetModel(Model):
         self.use_agc = use_agc
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
-        self.agc_exclude_output=agc_exclude_output
+        self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
         if gradient_log_dir is not None:
             self.grad_writer = tf.summary.create_file_writer(gradient_log_dir)
         else:
@@ -222,8 +222,8 @@ class DistnetModel(Model):
                 if center_displacement_weight>0:
                     center_motion_loss = motion_losses[0] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
                     losses["center_displacement"] = center_motion_loss
-                    center_motion_loss_norm = tf.math.divide_no_nan(center_displacement_weight, tf.stop_gradient(center_motion_loss))
-                    loss = loss + center_motion_loss * center_motion_loss_norm
+                    #center_motion_loss_norm = tf.math.divide_no_nan(center_displacement_weight, tf.stop_gradient(center_motion_loss))
+                    loss = loss + center_motion_loss * center_displacement_weight
                 if displacement_var_weight>0:
                     var_loss = motion_losses[1] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
                     losses["displacement_var"] = var_loss
@@ -246,10 +246,12 @@ class DistnetModel(Model):
             trainable_vars_tape = [t for t in trainable_vars if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY")) and "/kernel" in t.name]
             with self.grad_writer.as_default(step=self._train_counter):
                 for loss_name, loss_value in losses.items():
-                    grad = tape.gradient(loss_value, trainable_vars_tape)
+                    gradients = tape.gradient(loss_value, trainable_vars_tape)
                     if mixed_precision:
-                        grad = self.optimizer.get_unscaled_gradients(grad)
-                    for v, g in zip(trainable_vars_tape, grad):
+                        gradients = self.optimizer.get_unscaled_gradients(grad)
+                    if self.use_agc:
+                        gradients = adaptive_clip_grad(trainable_vars_tape, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
+                    for v, g in zip(trainable_vars_tape, gradients):
                         if g is not None:
                             #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
                             print(f"layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
@@ -259,7 +261,7 @@ class DistnetModel(Model):
             if mixed_precision:
                 gradients = self.optimizer.get_unscaled_gradients(gradients)
             if self.use_agc:
-                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if self.agc_exclude_output else None)
+                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
             if self.use_grad_acc:
                 # Accumulate batch gradients
                 self.gradient_accumulator.accumulate_and_apply_gradients(gradients)
