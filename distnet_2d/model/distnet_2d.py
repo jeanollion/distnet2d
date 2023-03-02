@@ -277,8 +277,11 @@ class DistnetModel(Model):
             gradients = tape.gradient(loss, self.trainable_variables)
             if mixed_precision:
                 gradients = self.optimizer.get_unscaled_gradients(gradients)
-            self.optimizer.apply_gradients(zip(gradients, self.trainable_variables)) #Update weights
-
+            if not self.use_grad_acc:
+                self.optimizer.apply_gradients(zip(gradients, self.trainable_variables)) #Update weights
+            else:
+                self.gradient_accumulator.accumulate_gradients(gradients)
+                self.gradient_accumulator.apply_gradients()
         else:
             for n, l in losses.items():
                 w = float(loss_weights[n]) / self.accum_steps
