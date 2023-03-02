@@ -61,7 +61,7 @@ class DistnetModel(Model):
         contour_loss_weight = 1,
         center_loss_weight=1, center_lovasz_loss_weight=1,
         displacement_loss_weight=1, displacement_lovasz_loss_weight=0, displacement_var_weight=1e-3,
-        center_displacement_loss_weight=1e-1, center_displacement_grad_weight_ratio:float=1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
+        center_displacement_loss_weight=1e-1, center_displacement_grad_weight_center:float=1e-1, center_displacement_grad_weight_displacement:float=1e-1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
         category_loss_weight=1,
         edm_loss=MeanSquaredErrorSampleWeightChannel(),
         center_loss = MeanSquaredError(),
@@ -74,7 +74,7 @@ class DistnetModel(Model):
         predict_center = False,
         gradient_safe_mode = False,
         gradient_log_dir:str=None,
-        accum_steps=1, use_agc=False, agc_clip_factor=1e-2, agc_eps=1e-3, agc_exclude_output=False,
+        accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
@@ -98,7 +98,7 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         self.contour_loss = MeanSquaredError()
         self.displacement_loss = displacement_loss
-        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), grad_weight_ratio=center_displacement_grad_weight_ratio, center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
+        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
@@ -291,7 +291,7 @@ class DistnetModel(Model):
                 if mixed_precision:
                     gradients = self.optimizer.get_unscaled_gradients(gradients)
                 gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords, grad_scale = w)
-                self.gradient_accumulator.accumulate_gradients(gradients)
+                self.gradient_accumulator.accumulate_gradients(gradients, scale=False)
             self.gradient_accumulator.apply_gradients()
             losses["loss"] = loss
         return losses

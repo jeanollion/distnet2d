@@ -39,26 +39,39 @@ def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, 
         elif channel_axis:
             trans = lambda x, shape: tf.reshape(tf.transpose(x, perm=[0, 3, 1, 2]), tf.concat([[-1], shape[1:3]], 0))
             utrans = lambda x, shape: tf.reshape(x, tf.concat([shape[:1], shape[-1:]], 0))
+
         def treat_image(log_lab):
             log, lab = log_lab
             log, lab = tf.expand_dims(log, 0), tf.expand_dims(lab, 0)
             log, lab = flatten_binary_scores(log, lab, ignore)
             return lovasz_hinge_flat(log, lab)
 
+        @tf.function
         def treat_image_per_label(log_lab):
             log, lab = log_lab
             log, lab = tf.expand_dims(log, 0), tf.expand_dims(lab, 0)
             log, lab = flatten_binary_scores(log, lab, ignore)
             unique_labs, _ = tf.unique(lab)
-            unique_labs = tf.boolean_mask(unique_labs, tf.math.greater(unique_labs, 0))
-            def treat_label(label):
-                valid = tf.equal(lab, label)
-                vscores = tf.boolean_mask(log, valid)
-                vlabels = tf.boolean_mask(lab, valid)
-                return lovasz_hinge_flat(vscores, vlabels)
-            loss_per_label = tf.cond(tf.equal(tf.shape(unique_labs)[0], 0),
-                           lambda: tf.cast(0, tf.float32),
-                           lambda: tf.map_fn(treat_label, unique_labs, fn_output_signature=tf.float32) )
+            accum = 0.
+            for label in unique_labs:
+                if label>0:
+                    valid = tf.equal(lab, label)
+                    vscores = tf.boolean_mask(log, valid)
+                    vlabels = tf.boolean_mask(lab, valid)
+                    accum = accum + lovasz_hinge_flat(vscores, vlabels)
+            if tf.shape(unique_labs)[0]>1:
+                accum = accum / tf.cast(tf.shape(unique_labs)[0]-1, tf.float32)
+            return accum
+            #unique_labs = tf.boolean_mask(unique_labs, tf.math.greater(unique_labs, 0))
+            # unique_labs = unique_labs[unique_labs != 0]
+            # def treat_label(label):
+            #     valid = tf.equal(lab, label)
+            #     vscores = tf.boolean_mask(log, valid)
+            #     vlabels = tf.boolean_mask(lab, valid)
+            #     return lovasz_hinge_flat(vscores, vlabels)
+            # loss_per_label = tf.cond(tf.equal(tf.shape(unique_labs)[0], 0),
+            #                lambda: tf.convert_to_tensor([0.], tf.float32),
+            #                lambda: tf.map_fn(treat_label, unique_labs, fn_output_signature=tf.float32) )
             return tf.reduce_mean(loss_per_label)
         shape = tf.shape(labels)
         if per_object or channel_axis:

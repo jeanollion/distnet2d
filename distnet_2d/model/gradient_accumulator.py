@@ -10,6 +10,7 @@ class GradientAccumulator():
                                               )
         self.first_call = True
         self.gradient_accumulation = None
+        self.scale = tf.cast(1./accum_steps, tf.float32)
         self.reinit_grad_accum()
 
     def apply_accu_gradients(self):
@@ -32,9 +33,11 @@ class GradientAccumulator():
             ) for i, v in enumerate(self.model.trainable_variables)
         ]
 
-    def accumulate_gradients(self, gradients):
+    def accumulate_gradients(self, gradients, scale=True):
         for i in range(len(self.gradient_accumulation)):
             if gradients[i] is not None:
+                if scale:
+                    gradient[i] = self.scale * gradient[i]
                 self.gradient_accumulation[i].assign_add(gradients[i], read_value=False)
 
     def apply_gradients(self):

@@ -2,16 +2,21 @@ import tensorflow as tf
 from .coordinate_op_2d import get_weighted_mean_2d_fun, get_center_distance_spread_fun
 from ..model.layers import WeigthedGradient
 
-def get_motion_losses(spatial_dims, motion_range:int, grad_weight_ratio:float, center_motion:bool = True, motion_var:bool=True):
+def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_motion:bool = True, motion_var:bool=True):
     nan = tf.cast(float('NaN'), tf.float32)
     #motion_loss_fun = _center_spread_loss(spatial_dims)
     motion_loss_fun = _distance_loss()
     center_fun = get_weighted_mean_2d_fun(spatial_dims, True, batch_axis = False, keepdims = False)
     @tf.custom_gradient
-    def wgrad(x):
+    def wgrad_c(x):
         def grad(dy):
-            #print(f"grad: {dy}")
-            return dy * grad_weight_ratio
+            return dy * center_displacement_grad_weight_center
+        return x, grad
+    @tf.custom_gradient
+    def wgrad_d(x):
+        def grad(dy):
+            #print(f"grad displacement: {dy}")
+            return dy * center_displacement_grad_weight_displacement
         return x, grad
     def fun(args):
         dY, dX, center, labels, prev_labels = args
@@ -21,10 +26,11 @@ def get_motion_losses(spatial_dims, motion_range:int, grad_weight_ratio:float, c
         if center_motion: # center+motion coherence loss
             # predicted  center coord per object
             dm = tf.stack([dYm, dXm], -1) # (T-1, N, 2)
-            dm=wgrad(dm)
+            dm=wgrad_d(dm)
             center_values = tf.math.exp(-center)
             #center_values = tf.math.exp(-tf.math.square(center)) # numerical instability on gradients
             center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(center_values, -1), label_rank))
+            center_ob = wgrad_c(center_ob)
             prev_labels = prev_labels[...,:N] # (T-1, N) # trim from (T-1, Nmax)
             has_prev = tf.math.greater(prev_labels, 0)
             prev_idx = tf.cast(has_prev, tf.int32) * (prev_labels-1)
