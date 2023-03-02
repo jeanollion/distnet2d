@@ -392,6 +392,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.convY1 = conv_fun(
             filters=input_channels,
             kernel_size=(self.kernel_size, 1),
+            kernel_initializer="he_normal",
             strides=1,
             padding='same',
             name=f"{self.name}/1_{self.kernel_size}x1",
@@ -400,6 +401,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.convX1 = conv_fun(
             filters=input_channels,
             kernel_size=(1,self.kernel_size),
+            kernel_initializer="he_normal",
             strides=1,
             padding='same',
             name=f"{self.name}/1_1x{self.kernel_size}",
@@ -408,6 +410,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.convY2 = conv_fun(
             filters=input_channels,
             kernel_size=(self.kernel_size, 1),
+            kernel_initializer="he_normal",
             dilation_rate = (self.dilation, 1),
             strides=1,
             padding='same',
@@ -417,6 +420,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.convX2 = conv_fun(
             filters=input_channels,
             kernel_size=(1,self.kernel_size),
+            kernel_initializer="he_normal",
             dilation_rate = (1, self.dilation),
             strides=1,
             padding='same',
@@ -437,14 +441,14 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         x = self.convX1(x)
         if self.batch_norm:
             x = self.bn1(x, training = is_training)
-        x = self.activation_layer(x) * self.gamma
+        x = self.activation_layer(x) #* self.gamma
         x = self.convY2(x)
         x = self.convX2(x)
         if self.batch_norm:
             x = self.bn2(x, training = is_training)
         if self.dropout_rate>0:
             x = self.drop(x, training = is_training)
-        return self.activation_layer(input + x) * self.gamma
+        return self.activation_layer(input + x) #* self.gamma
 
 class ResConv2D(Layer):
     def __init__(
@@ -476,6 +480,7 @@ class ResConv2D(Layer):
         self.conv1 = conv_fun(
             filters=input_channels,
             kernel_size=self.kernel_size,
+            kernel_initializer="he_normal",
             strides=1,
             padding='same',
             name=f"{self.name}/1_{self.kernel_size}x{self.kernel_size}",
@@ -484,6 +489,7 @@ class ResConv2D(Layer):
         self.conv2 = conv_fun(
             filters=input_channels,
             kernel_size=self.kernel_size,
+            kernel_initializer="he_normal",
             dilation_rate = self.dilation,
             strides=1,
             padding='same',
@@ -503,13 +509,13 @@ class ResConv2D(Layer):
         x = self.conv1(input)
         if self.batch_norm:
             x = self.bn1(x, training = is_training)
-        x = self.activation_layer(x) * self.gamma
+        x = self.activation_layer(x) #* self.gamma
         x = self.conv2(x)
         if self.batch_norm:
             x = self.bn2(x, training = is_training)
         if self.dropout_rate>0:
             x = self.drop(x, training = is_training)
-        return self.activation_layer(input + x) * self.gamma
+        return self.activation_layer(input + x) #* self.gamma
 
 class Conv2DBNDrop(Layer):
     def __init__(
@@ -621,6 +627,7 @@ def _standardize_weight(weight, gain, eps):
 
 def get_gamma(activation):
     if activation.lower()=="relu":
+        return 1.
         return 1. / ( (0.5 * (1 - 1 / np.pi)) ** 0.5)
     elif activation.lower()=="sliu":
         return .5595
@@ -631,10 +638,10 @@ def get_gamma(activation):
         #raise ValueError(f"activation {activation} not supported yet")
 
 class WSConv2D(tf.keras.layers.Conv2D):
-    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, **kwargs):
+    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, kernel_initializer="he_normal", **kwargs):
         activation = kwargs.pop("activation", "linear") # bypass activation
         gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
-        super().__init__(kernel_initializer="he_normal", *args, **kwargs)
+        super().__init__(kernel_initializer=kernel_initializer, *args, **kwargs)
         self.eps = eps
         self.use_gain = use_gain
         self.activation_layer = tf.keras.activations.get(activation)
@@ -684,7 +691,7 @@ class WSConv2D(tf.keras.layers.Conv2D):
         if self.dropout_rate>0:
             x = self.dropout(x, training = is_training)
         if self.activation_layer is not None:
-            x = self.activation_layer(x) * self.gamma
+            x = self.activation_layer(x) #* self.gamma
         return x
 
 class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
@@ -791,7 +798,7 @@ class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
         if self.dropout_rate>0:
             x = self.dropout(x, training = is_training)
         if self.activation is not None:
-            return self.activation(outputs) * self.gamma
+            return self.activation(outputs) #* self.gamma
         return outputs
 
 ############### MOBILE NET LAYERS ############################################################
