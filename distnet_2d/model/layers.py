@@ -620,9 +620,10 @@ def _standardize_weight(weight, gain, eps):
     mean = tf.math.reduce_mean(weight, axis=(0, 1, 2), keepdims=True)
     var = tf.math.reduce_mean(tf.math.square(weight-mean), axis=(0, 1, 2), keepdims=True)
     fan_in = np.prod(weight.shape[:-1])
-    weight = (weight - mean) / tf.math.sqrt(var * fan_in + eps)
+    scale = tf.math.sqrt(tf.math.maximum(var * fan_in, eps))
     if gain is not None:
-        weight = weight * gain
+        scale = scale * gain
+    weight = (weight - mean) / scale
     return weight
 
 def get_gamma(activation):
