@@ -638,7 +638,7 @@ def get_gamma(activation):
         #raise ValueError(f"activation {activation} not supported yet")
 
 class WSConv2D(tf.keras.layers.Conv2D):
-    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, kernel_initializer="he_normal", **kwargs):
+    def __init__(self, *args, eps=1e-4, use_gain=False, dropout_rate = 0, kernel_initializer="he_normal", **kwargs):
         activation = kwargs.pop("activation", "linear") # bypass activation
         gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
         super().__init__(kernel_initializer=kernel_initializer, *args, **kwargs)
@@ -695,7 +695,7 @@ class WSConv2D(tf.keras.layers.Conv2D):
         return x
 
 class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
-    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, **kwargs):
+    def __init__(self, *args, eps=1e-4, use_gain=False, dropout_rate = 0, **kwargs):
         activation = kwargs.get("activation", "linear")
         gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
         super().__init__(kernel_initializer="he_normal", *args, **kwargs)
