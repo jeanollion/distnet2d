@@ -627,7 +627,8 @@ def get_gamma(activation):
     elif activation.lower()=="linear":
         return 1.
     else:
-        raise ValueError(f"activation {activation} not supported yet")
+        return 1.
+        #raise ValueError(f"activation {activation} not supported yet")
 
 class WSConv2D(tf.keras.layers.Conv2D):
     def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, **kwargs):
