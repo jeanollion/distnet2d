@@ -392,7 +392,6 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.convY1 = conv_fun(
             filters=input_channels,
             kernel_size=(self.kernel_size, 1),
-            kernel_initializer="he_normal",
             strides=1,
             padding='same',
             name=f"{self.name}/1_{self.kernel_size}x1",
@@ -401,7 +400,6 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.convX1 = conv_fun(
             filters=input_channels,
             kernel_size=(1,self.kernel_size),
-            kernel_initializer="he_normal",
             strides=1,
             padding='same',
             name=f"{self.name}/1_1x{self.kernel_size}",
@@ -410,7 +408,6 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.convY2 = conv_fun(
             filters=input_channels,
             kernel_size=(self.kernel_size, 1),
-            kernel_initializer="he_normal",
             dilation_rate = (self.dilation, 1),
             strides=1,
             padding='same',
@@ -420,7 +417,6 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.convX2 = conv_fun(
             filters=input_channels,
             kernel_size=(1,self.kernel_size),
-            kernel_initializer="he_normal",
             dilation_rate = (1, self.dilation),
             strides=1,
             padding='same',
@@ -480,7 +476,6 @@ class ResConv2D(Layer):
         self.conv1 = conv_fun(
             filters=input_channels,
             kernel_size=self.kernel_size,
-            kernel_initializer="he_normal",
             strides=1,
             padding='same',
             name=f"{self.name}/1_{self.kernel_size}x{self.kernel_size}",
@@ -489,7 +484,6 @@ class ResConv2D(Layer):
         self.conv2 = conv_fun(
             filters=input_channels,
             kernel_size=self.kernel_size,
-            kernel_initializer="he_normal",
             dilation_rate = self.dilation,
             strides=1,
             padding='same',
