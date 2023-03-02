@@ -620,7 +620,7 @@ def _standardize_weight(weight, gain, eps):
     mean = tf.math.reduce_mean(weight, axis=(0, 1, 2), keepdims=True)
     var = tf.math.reduce_mean(tf.math.square(weight-mean), axis=(0, 1, 2), keepdims=True)
     fan_in = np.prod(weight.shape[:-1])
-    weight = (weight - mean) * tf.math.rsqrt(tf.math.maximum(var * fan_in, eps))
+    weight = (weight - mean) / tf.math.sqrt(var * fan_in + eps)
     if gain is not None:
         weight = weight * gain
     return weight
@@ -638,7 +638,7 @@ def get_gamma(activation):
         #raise ValueError(f"activation {activation} not supported yet")
 
 class WSConv2D(tf.keras.layers.Conv2D):
-    def __init__(self, *args, eps=1e-4, use_gain=False, dropout_rate = 0, kernel_initializer="he_normal", **kwargs):
+    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, kernel_initializer="he_normal", **kwargs):
         activation = kwargs.pop("activation", "linear") # bypass activation
         gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
         super().__init__(kernel_initializer=kernel_initializer, *args, **kwargs)
@@ -663,23 +663,23 @@ class WSConv2D(tf.keras.layers.Conv2D):
         if self.dropout_rate>0:
             self.dropout = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
 
-    # def convolution_op(self, inputs, kernel): # original code modified to used standardized weights
-    #     if self.padding == "causal":
-    #         tf_padding = "VALID"  # Causal padding handled in `call`.
-    #     elif isinstance(self.padding, str):
-    #         tf_padding = self.padding.upper()
-    #     else:
-    #         tf_padding = self.padding
-    #
-    #     return tf.nn.convolution(
-    #         inputs,
-    #         _standardize_weight(kernel, self.gain, self.eps),
-    #         strides=list(self.strides),
-    #         padding=tf_padding,
-    #         dilations=list(self.dilation_rate),
-    #         data_format=self._tf_data_format,
-    #         name=self.__class__.__name__,
-    #     )
+    def convolution_op(self, inputs, kernel): # original code modified to used standardized weights
+        if self.padding == "causal":
+            tf_padding = "VALID"  # Causal padding handled in `call`.
+        elif isinstance(self.padding, str):
+            tf_padding = self.padding.upper()
+        else:
+            tf_padding = self.padding
+
+        return tf.nn.convolution(
+            inputs,
+            _standardize_weight(kernel, self.gain, self.eps),
+            strides=list(self.strides),
+            padding=tf_padding,
+            dilations=list(self.dilation_rate),
+            data_format=self._tf_data_format,
+            name=self.__class__.__name__,
+        )
 
     def get_config(self):
         config = super().get_config().copy()
@@ -687,7 +687,6 @@ class WSConv2D(tf.keras.layers.Conv2D):
         return config
 
     def call(self, input, is_training=True):
-        self.kernel.assign(_standardize_weight(self.kernel, self.gain, self.eps))
         x = super().call(input)
         if self.dropout_rate>0:
             x = self.dropout(x, training = is_training)
@@ -696,7 +695,7 @@ class WSConv2D(tf.keras.layers.Conv2D):
         return x
 
 class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
-    def __init__(self, *args, eps=1e-4, use_gain=False, dropout_rate = 0, **kwargs):
+    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, **kwargs):
         activation = kwargs.get("activation", "linear")
         gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
         super().__init__(kernel_initializer="he_normal", *args, **kwargs)
@@ -725,85 +724,82 @@ class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
         config.update({"eps":self.eps, "use_gain": self.use_gain, "dropout_rate":self.dropout_rate, "gamma":self.gamma})
         return config
 
-    def call(self, input, is_training=True):
-        self.kernel.assign(_standardize_weight(self.kernel, self.gain, self.eps))
-        x = super().call(input)
-    # def call(self, inputs, is_training=True): # code from TF2.11 modified to use standardized weights + apply dropout: https://github.com/keras-team/keras/blob/v2.11.0/keras/layers/convolutional/conv2d_transpose.py#L34-L362
-    #     inputs_shape = tf.shape(inputs)
-    #     batch_size = inputs_shape[0]
-    #     if self.data_format == "channels_first":
-    #         h_axis, w_axis = 2, 3
-    #     else:
-    #         h_axis, w_axis = 1, 2
-    #
-    #     height, width = None, None
-    #     if inputs.shape.rank is not None:
-    #         dims = inputs.shape.as_list()
-    #         height = dims[h_axis]
-    #         width = dims[w_axis]
-    #     height = height if height is not None else inputs_shape[h_axis]
-    #     width = width if width is not None else inputs_shape[w_axis]
-    #
-    #     kernel_h, kernel_w = self.kernel_size
-    #     stride_h, stride_w = self.strides
-    #
-    #     if self.output_padding is None:
-    #         out_pad_h = out_pad_w = None
-    #     else:
-    #         out_pad_h, out_pad_w = self.output_padding
-    #
-    #     # Infer the dynamic output shape:
-    #     out_height = conv_utils.deconv_output_length(
-    #         height,
-    #         kernel_h,
-    #         padding=self.padding,
-    #         output_padding=out_pad_h,
-    #         stride=stride_h,
-    #         dilation=self.dilation_rate[0],
-    #     )
-    #     out_width = conv_utils.deconv_output_length(
-    #         width,
-    #         kernel_w,
-    #         padding=self.padding,
-    #         output_padding=out_pad_w,
-    #         stride=stride_w,
-    #         dilation=self.dilation_rate[1],
-    #     )
-    #     if self.data_format == "channels_first":
-    #         output_shape = (batch_size, self.filters, out_height, out_width)
-    #     else:
-    #         output_shape = (batch_size, out_height, out_width, self.filters)
-    #
-    #     output_shape_tensor = tf.stack(output_shape)
-    #     outputs = backend.conv2d_transpose(
-    #         inputs,
-    #         _standardize_weight(self.kernel, self.gain, self.eps),
-    #         output_shape_tensor,
-    #         strides=self.strides,
-    #         padding=self.padding,
-    #         data_format=self.data_format,
-    #         dilation_rate=self.dilation_rate,
-    #     )
-    #
-    #     if not tf.executing_eagerly() and inputs.shape.rank:
-    #         # Infer the static output shape:
-    #         out_shape = self.compute_output_shape(inputs.shape)
-    #         outputs.set_shape(out_shape)
-    #
-    #     if self.use_bias:
-    #         outputs = tf.nn.bias_add(
-    #             outputs,
-    #             self.bias,
-    #             data_format=conv_utils.convert_data_format(
-    #                 self.data_format, ndim=4
-    #             ),
-    #         )
-    #
-    #     if self.dropout_rate>0:
-    #         x = self.dropout(x, training = is_training)
-    #     if self.activation is not None:
-    #         return self.activation(outputs) #* self.gamma
-    #     return outputs
+    def call(self, inputs, is_training=True): # code from TF2.11 modified to use standardized weights + apply dropout: https://github.com/keras-team/keras/blob/v2.11.0/keras/layers/convolutional/conv2d_transpose.py#L34-L362
+        inputs_shape = tf.shape(inputs)
+        batch_size = inputs_shape[0]
+        if self.data_format == "channels_first":
+            h_axis, w_axis = 2, 3
+        else:
+            h_axis, w_axis = 1, 2
+
+        height, width = None, None
+        if inputs.shape.rank is not None:
+            dims = inputs.shape.as_list()
+            height = dims[h_axis]
+            width = dims[w_axis]
+        height = height if height is not None else inputs_shape[h_axis]
+        width = width if width is not None else inputs_shape[w_axis]
+
+        kernel_h, kernel_w = self.kernel_size
+        stride_h, stride_w = self.strides
+
+        if self.output_padding is None:
+            out_pad_h = out_pad_w = None
+        else:
+            out_pad_h, out_pad_w = self.output_padding
+
+        # Infer the dynamic output shape:
+        out_height = conv_utils.deconv_output_length(
+            height,
+            kernel_h,
+            padding=self.padding,
+            output_padding=out_pad_h,
+            stride=stride_h,
+            dilation=self.dilation_rate[0],
+        )
+        out_width = conv_utils.deconv_output_length(
+            width,
+            kernel_w,
+            padding=self.padding,
+            output_padding=out_pad_w,
+            stride=stride_w,
+            dilation=self.dilation_rate[1],
+        )
+        if self.data_format == "channels_first":
+            output_shape = (batch_size, self.filters, out_height, out_width)
+        else:
+            output_shape = (batch_size, out_height, out_width, self.filters)
+
+        output_shape_tensor = tf.stack(output_shape)
+        outputs = backend.conv2d_transpose(
+            inputs,
+            _standardize_weight(self.kernel, self.gain, self.eps),
+            output_shape_tensor,
+            strides=self.strides,
+            padding=self.padding,
+            data_format=self.data_format,
+            dilation_rate=self.dilation_rate,
+        )
+
+        if not tf.executing_eagerly() and inputs.shape.rank:
+            # Infer the static output shape:
+            out_shape = self.compute_output_shape(inputs.shape)
+            outputs.set_shape(out_shape)
+
+        if self.use_bias:
+            outputs = tf.nn.bias_add(
+                outputs,
+                self.bias,
+                data_format=conv_utils.convert_data_format(
+                    self.data_format, ndim=4
+                ),
+            )
+
+        if self.dropout_rate>0:
+            x = self.dropout(x, training = is_training)
+        if self.activation is not None:
+            return self.activation(outputs) #* self.gamma
+        return outputs
 
 ############### MOBILE NET LAYERS ############################################################
 ############### FROM https://github.com/Bisonai/mobilenetv3-tensorflow/blob/master/layers.py
