@@ -1,10 +1,11 @@
 from tensorflow import pad
 from tensorflow.keras.layers import Layer, GlobalAveragePooling2D, Reshape, Conv2D, Multiply, Conv3D, UpSampling2D
-from tensorflow.keras import Model
+from tensorflow.keras import Model, backend
 from ..utils.helpers import ensure_multiplicity, get_nd_gaussian_kernel
 from tensorflow.python.keras.engine.input_spec import InputSpec
 import tensorflow as tf
 import numpy as np
+from keras.utils import conv_utils
 
 class ReflectionPadding2D(Layer):
   def __init__(self, paddingYX=(1, 1), **kwargs):
@@ -301,6 +302,7 @@ class Combine(Layer):
             self,
             filters: int,
             kernel_size: int=1,
+            weight_scaled:bool = False,
             activation: str="relu",
             #l2_reg: float=1e-5,
             name: str="Combine",
@@ -308,23 +310,33 @@ class Combine(Layer):
         self.activation = activation
         self.filters= filters
         self.kernel_size=kernel_size
+        self.weight_scaled = weight_scaled
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size})
+      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "weight_scaled":self.weight_scaled})
       return config
 
     def build(self, input_shape):
         self.concat = tf.keras.layers.Concatenate(axis=-1, name = "Concat")
-        self.combine_conv = Conv2D(
-            filters=self.filters,
-            kernel_size=self.kernel_size,
-            padding='same',
-            activation=self.activation,
-            use_bias=True,
-            # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
-            name="Conv1x1")
+        if self.weight_scaled:
+            self.combine_conv = WSConv2D(
+                filters=self.filters,
+                kernel_size=self.kernel_size,
+                padding='same',
+                activation=self.activation,
+                use_bias=True,
+                name="Conv1x1")
+        else:
+            self.combine_conv = Conv2D(
+                filters=self.filters,
+                kernel_size=self.kernel_size,
+                padding='same',
+                activation=self.activation,
+                use_bias=True,
+                # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
+                name="Conv1x1")
         super().build(input_shape)
 
     def call(self, input):
@@ -356,6 +368,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             kernel_size: int=3,
             dilation: int = 1,
             dropout_rate : float = 0.3,
+            weight_scaled : bool = False,
             batch_norm : bool = True,
             activation:str = "relu",
             name: str="ResConv1D",
@@ -366,15 +379,17 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
+        self.weight_scaled=weight_scaled
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled})
       return config
 
     def build(self, input_shape):
         input_channels = int(input_shape[-1])
-        self.convY1 = tf.keras.layers.Conv2D(
+        conv_fun = WSConv2D if self.weight_scaled else tf.keras.layers.Conv2D
+        self.convY1 = conv_fun(
             filters=input_channels,
             kernel_size=(self.kernel_size, 1),
             strides=1,
@@ -382,7 +397,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             name=f"{self.name}/1_{self.kernel_size}x1",
             activation=self.activation
         )
-        self.convX1 = tf.keras.layers.Conv2D(
+        self.convX1 = conv_fun(
             filters=input_channels,
             kernel_size=(1,self.kernel_size),
             strides=1,
@@ -390,7 +405,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             name=f"{self.name}/1_1x{self.kernel_size}",
             activation="linear"
         )
-        self.convY2 = tf.keras.layers.Conv2D(
+        self.convY2 = conv_fun(
             filters=input_channels,
             kernel_size=(self.kernel_size, 1),
             dilation_rate = (self.dilation, 1),
@@ -399,7 +414,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             name=f"{self.name}/2_{self.kernel_size}x1",
             activation=self.activation
         )
-        self.convX2 = tf.keras.layers.Conv2D(
+        self.convX2 = conv_fun(
             filters=input_channels,
             kernel_size=(1,self.kernel_size),
             dilation_rate = (1, self.dilation),
@@ -409,6 +424,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             activation="linear"
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
+        self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
@@ -421,14 +437,14 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         x = self.convX1(x)
         if self.batch_norm:
             x = self.bn1(x, training = is_training)
-        x = self.activation_layer(x)
+        x = self.activation_layer(x) * self.gamma
         x = self.convY2(x)
         x = self.convX2(x)
         if self.batch_norm:
             x = self.bn2(x, training = is_training)
         if self.dropout_rate>0:
             x = self.drop(x, training = is_training)
-        return self.activation_layer(input + x)
+        return self.activation_layer(input + x) * self.gamma
 
 class ResConv2D(Layer):
     def __init__(
@@ -437,6 +453,7 @@ class ResConv2D(Layer):
             dilation: int = 1,
             dropout_rate : float = 0.3,
             batch_norm : bool = True,
+            weight_scaled:bool = False,
             activation:str = "relu",
             name: str="ResConv1D",
     ):
@@ -446,15 +463,17 @@ class ResConv2D(Layer):
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
+        self.weight_scaled = weight_scaled
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled})
       return config
 
     def build(self, input_shape):
         input_channels = int(input_shape[-1])
-        self.conv1 = tf.keras.layers.Conv2D(
+        conv_fun = WSConv2D if self.weight_scaled else tf.keras.layers.Conv2D
+        self.conv1 = conv_fun(
             filters=input_channels,
             kernel_size=self.kernel_size,
             strides=1,
@@ -462,7 +481,7 @@ class ResConv2D(Layer):
             name=f"{self.name}/1_{self.kernel_size}x{self.kernel_size}",
             activation="linear"
         )
-        self.conv2 = tf.keras.layers.Conv2D(
+        self.conv2 = conv_fun(
             filters=input_channels,
             kernel_size=self.kernel_size,
             dilation_rate = self.dilation,
@@ -471,6 +490,7 @@ class ResConv2D(Layer):
             name=f"{self.name}/2_{self.kernel_size}x{self.kernel_size}",
             activation="linear"
         )
+        self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
@@ -483,13 +503,13 @@ class ResConv2D(Layer):
         x = self.conv1(input)
         if self.batch_norm:
             x = self.bn1(x, training = is_training)
-        x = self.activation_layer(x)
+        x = self.activation_layer(x) * self.gamma
         x = self.conv2(x)
         if self.batch_norm:
             x = self.bn2(x, training = is_training)
         if self.dropout_rate>0:
             x = self.drop(x, training = is_training)
-        return self.activation_layer(input + x)
+        return self.activation_layer(input + x) * self.gamma
 
 class Conv2DBNDrop(Layer):
     def __init__(
@@ -589,6 +609,189 @@ class Conv2DTransposeBNDrop(Layer):
         if self.dropout_rate>0:
             x = self.drop(x, training = is_training)
         return self.activation_layer(x)
+
+def _standardize_weight(weight, gain, eps):
+    mean = tf.math.reduce_mean(weight, axis=(0, 1, 2), keepdims=True)
+    var = tf.math.reduce_mean(tf.math.square(weight-mean), axis=(0, 1, 2), keepdims=True)
+    fan_in = np.prod(weight.shape[:-1])
+    weight = (weight - mean) / tf.math.sqrt(var * fan_in + eps)
+    if gain is not None:
+        weight = weight * gain
+    return weight
+
+def get_gamma(activation):
+    if activation.lower()=="relu":
+        return 1. / ( (0.5 * (1 - 1 / np.pi)) ** 0.5)
+    elif activation.lower()=="sliu":
+        return .5595
+    elif activation.lower()=="linear":
+        return 1.
+    else:
+        raise ValueError(f"activation {activation} not supported yet")
+
+class WSConv2D(tf.keras.layers.Conv2D):
+    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, **kwargs):
+        activation = kwargs.pop("activation", "linear") # bypass activation
+        gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
+        super().__init__(kernel_initializer="he_normal", *args, **kwargs)
+        self.eps = eps
+        self.use_gain = use_gain
+        self.activation_layer = tf.keras.activations.get(activation)
+        self.dropout_rate = dropout_rate
+        self.gamma = gamma
+
+    def build(self, input_shape):
+        super().build(input_shape)
+        if self.use_gain:
+            self.gain = self.add_weight(
+                name="gain",
+                shape=(self.kernel.shape[-1],),
+                initializer="ones",
+                trainable=True,
+                dtype=self.dtype,
+            )
+        else:
+            self.gain = None
+        if self.dropout_rate>0:
+            self.dropout = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+
+    def convolution_op(self, inputs, kernel): # original code modified to used standardized weights
+        if self.padding == "causal":
+            tf_padding = "VALID"  # Causal padding handled in `call`.
+        elif isinstance(self.padding, str):
+            tf_padding = self.padding.upper()
+        else:
+            tf_padding = self.padding
+
+        return tf.nn.convolution(
+            inputs,
+            _standardize_weight(kernel, self.gain, self.eps),
+            strides=list(self.strides),
+            padding=tf_padding,
+            dilations=list(self.dilation_rate),
+            data_format=self._tf_data_format,
+            name=self.__class__.__name__,
+        )
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"eps":self.eps, "use_gain": self.use_gain, "activation_layer":tf.keras.activations.serialize(self.activation_layer), "dropout_rate":self.dropout_rate, "gamma":self.gamma})
+        return config
+
+    def call(self, input, is_training=True):
+        x = super().call(input)
+        if self.dropout_rate>0:
+            x = self.dropout(x, training = is_training)
+        if self.activation_layer is not None:
+            x = self.activation_layer(x) * self.gamma
+        return x
+
+class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
+    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, **kwargs):
+        activation = kwargs.get("activation", "linear")
+        gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
+        super().__init__(kernel_initializer="he_normal", *args, **kwargs)
+        self.eps = eps
+        self.use_gain = use_gain
+        self.dropout_rate = dropout_rate
+        self.gamma = gamma
+
+    def build(self, input_shape):
+        super().build(input_shape)
+        if self.use_gain:
+            self.gain = self.add_weight(
+                name="gain",
+                shape=(self.kernel.shape[-1],),
+                initializer="ones",
+                trainable=True,
+                dtype=self.dtype,
+            )
+        else:
+            self.gain = None
+        if self.dropout_rate>0:
+            self.dropout = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"eps":self.eps, "use_gain": self.use_gain, "dropout_rate":self.dropout_rate, "gamma":self.gamma})
+        return config
+
+    def call(self, inputs, is_training=True): # code from TF2.11 modified to use standardized weights + apply dropout: https://github.com/keras-team/keras/blob/v2.11.0/keras/layers/convolutional/conv2d_transpose.py#L34-L362
+        inputs_shape = tf.shape(inputs)
+        batch_size = inputs_shape[0]
+        if self.data_format == "channels_first":
+            h_axis, w_axis = 2, 3
+        else:
+            h_axis, w_axis = 1, 2
+
+        height, width = None, None
+        if inputs.shape.rank is not None:
+            dims = inputs.shape.as_list()
+            height = dims[h_axis]
+            width = dims[w_axis]
+        height = height if height is not None else inputs_shape[h_axis]
+        width = width if width is not None else inputs_shape[w_axis]
+
+        kernel_h, kernel_w = self.kernel_size
+        stride_h, stride_w = self.strides
+
+        if self.output_padding is None:
+            out_pad_h = out_pad_w = None
+        else:
+            out_pad_h, out_pad_w = self.output_padding
+
+        # Infer the dynamic output shape:
+        out_height = conv_utils.deconv_output_length(
+            height,
+            kernel_h,
+            padding=self.padding,
+            output_padding=out_pad_h,
+            stride=stride_h,
+            dilation=self.dilation_rate[0],
+        )
+        out_width = conv_utils.deconv_output_length(
+            width,
+            kernel_w,
+            padding=self.padding,
+            output_padding=out_pad_w,
+            stride=stride_w,
+            dilation=self.dilation_rate[1],
+        )
+        if self.data_format == "channels_first":
+            output_shape = (batch_size, self.filters, out_height, out_width)
+        else:
+            output_shape = (batch_size, out_height, out_width, self.filters)
+
+        output_shape_tensor = tf.stack(output_shape)
+        outputs = backend.conv2d_transpose(
+            inputs,
+            _standardize_weight(self.kernel, self.gain, self.eps),
+            output_shape_tensor,
+            strides=self.strides,
+            padding=self.padding,
+            data_format=self.data_format,
+            dilation_rate=self.dilation_rate,
+        )
+
+        if not tf.executing_eagerly() and inputs.shape.rank:
+            # Infer the static output shape:
+            out_shape = self.compute_output_shape(inputs.shape)
+            outputs.set_shape(out_shape)
+
+        if self.use_bias:
+            outputs = tf.nn.bias_add(
+                outputs,
+                self.bias,
+                data_format=conv_utils.convert_data_format(
+                    self.data_format, ndim=4
+                ),
+            )
+
+        if self.dropout_rate>0:
+            x = self.dropout(x, training = is_training)
+        if self.activation is not None:
+            return self.activation(outputs) * self.gamma
+        return outputs
 
 ############### MOBILE NET LAYERS ############################################################
 ############### FROM https://github.com/Bisonai/mobilenetv3-tensorflow/blob/master/layers.py

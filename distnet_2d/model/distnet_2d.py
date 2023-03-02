@@ -2,7 +2,7 @@
 
 import tensorflow as tf
 import tensorflow_probability as tfp
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose
 from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -465,6 +465,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
             combine_kernel_size:int = 3,
             skip_stop_gradient:bool = True,
             skip_connections:bool = False,
+            skip_combine_mode:str="conv", #conv, wsconv
             predict_contours:bool = False,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
@@ -518,15 +519,15 @@ def get_distnet_2d_erf(input_shape, # Y, X
 
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
-                decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
-                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
-                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
-                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4, layer_idx=l_idx, name=f"DecoderCat")
+                decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
+                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
+                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
+                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4, layer_idx=l_idx, name=f"DecoderCat")
                 if predict_center:
-                    decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
+                    decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode="conv", combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name=f"Decoder{decoder_name}") )
+                    d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name=f"Decoder{decoder_name}") )
         decoder_output_names = dict()
         oi = 0
         for n, o_ns in output_per_decoder.items():
@@ -618,16 +619,18 @@ def decoder_op(
             size_factor: int=2,
             conv_kernel_size:int=3,
             up_kernel_size:int=0,
-            mode:str="tconv", # tconv, up_nn, up_bilinear
-            skip_combine_mode:str = "conv", # conv, sum
+            mode:str="tconv", # tconv, up_nn, up_bilinear,
+            skip_combine_mode:str = "conv", # conv, sum, wsconv
             combine_kernel_size:int = 1,
             batch_norm:bool = False,
+            weight_scaled:bool = False,
             dropout_rate:float=0,
             batch_norm_up:bool = False,
+            weight_scaled_up:bool = False,
             dropout_rate_up:float=0,
             activation: str="relu",
             activation_out : str = None,
-            op:str = "conv",
+            op:str = "conv", # conv
             n_conv:int = 1,
             factor:float = 1,
             name: str="DecoderLayer",
@@ -643,18 +646,20 @@ def decoder_op(
         if n_conv>0 and filters_out is None:
             filters_out = filters
 
-        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up)
-        if skip_combine_mode=="conv":
-            combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size)
+        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up)
+        if skip_combine_mode.lower()=="conv" or skip_combine_mode.lower()=="wsconv":
+            combine = Combine(name = name, filters=filters, kernel_size = combine_kernel_size, weight_scaled=skip_combine_mode.lower()=="wsconv")
         else:
             combine = None
         op = op.lower().replace("_", "")
         if op == "res1d" or op=="resconv1d":
-            convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
+            convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         elif op == "res2d" or op=="resconv2d":
-            convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/ResConv2D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
+            convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/ResConv2D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         else:
-            if batch_norm or dropout_rate>0:
+            if weight_scaled or dropout_rate>0:
+                convs = [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
+            elif batch_norm or dropout_rate>0:
                 convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
             else:
                 convs = [Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
@@ -759,6 +764,7 @@ def upsampling_op(
             norm_layer:str=None,
             activation: str="relu",
             batch_norm:bool = False,
+            weight_scaled:bool = False,
             dropout_rate:float = 0,
             use_bias:bool = True,
             name: str="Upsampling2D",
@@ -769,7 +775,9 @@ def upsampling_op(
         if parent_name is not None and len(parent_name)>0:
             name = f"{parent_name}/{name}"
         if mode=="tconv":
-            if batch_norm or dropout_rate>0:
+            if weight_scaled or dropout_rate>0:
+                upsample = WSConv2DTranspose(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, dropout_rate=dropout_rate, padding='same', name=f"{name}/tConv{kernel_size}x{kernel_size}")
+            elif batch_norm:
                 upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/tConv{kernel_size}x{kernel_size}")
             else:
                 upsample = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, name=f"{name}/tConv{kernel_size}x{kernel_size}")
@@ -835,12 +843,12 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, batch_norm:bool=False, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
-        return ResConv1D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, name=f"{name}/ResConv1D{kernel_size}x{kernel_size}")
+        return ResConv1D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled = weight_scaled, batch_norm=batch_norm, name=f"{name}/ResConv1D{kernel_size}x{kernel_size}")
     elif op =="res2d" or op == "resconv2d":
-        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
+        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention":
         self_attention_op = Attention(positional_encoding="2D", name=f"{name}/SelfAttention")
@@ -849,7 +857,9 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
             sa = self_attention_op([x, x])
             return self_attention_skip_op([x, sa])
         return op
-    if dropout_rate>0 or batch_norm:
+    if weight_scaled or dropout_rate>0:
+        return WSConv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, activation=activation, dropout_rate=dropout_rate, padding='same', name=f"{name}/Conv{kernel_size}x{kernel_size}")
+    elif dropout_rate>0 or batch_norm:
         return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, name=f"{name}/Conv{kernel_size}x{kernel_size}")
     else:
         return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
