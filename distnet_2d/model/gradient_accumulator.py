@@ -37,7 +37,7 @@ class GradientAccumulator():
         for i in range(len(self.gradient_accumulation)):
             if gradients[i] is not None:
                 if scale:
-                    gradient[i] = self.scale * gradient[i]
+                    gradients[i] = self.scale * gradients[i]
                 self.gradient_accumulation[i].assign_add(gradients[i], read_value=False)
 
     def apply_gradients(self):
