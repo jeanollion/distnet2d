@@ -293,6 +293,7 @@ class DistnetModel(Model):
                 self.gradient_accumulator.accumulate_gradients(gradients)
         if self.use_grad_acc or len(loss_per_group)>1:
             self.gradient_accumulator.apply_gradients()
+        tape.reset()
         return losses
         # gradient safe mode
         # def t_fn():# if any of the gradients are NaN, set loss metric to NaN
