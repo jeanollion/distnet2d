@@ -74,7 +74,7 @@ class DistnetModel(Model):
         predict_center = False,
         gradient_safe_mode = False,
         gradient_log_dir:str=None,
-        accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False,
+        accum_steps=1, use_agc=False, agc_per_loss=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
@@ -113,6 +113,7 @@ class DistnetModel(Model):
         if self.use_grad_acc or use_agc:
             self.gradient_accumulator = GradientAccumulator(accum_steps, self)
         self.use_agc = use_agc
+        self.agc_per_loss=agc_per_loss
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
         self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
@@ -120,6 +121,7 @@ class DistnetModel(Model):
             self.grad_writer = tf.summary.create_file_writer(gradient_log_dir)
         else:
             self.grad_writer = None
+        self.loss_groups = [["edm", "edm_lh", "edm_lh_label", "contour", "center", "center_lh", "displacement", "displacement_lh", "displacement_var", "category"], ["center_displacement"]]
 
     def train_step(self, data):
         if self.use_grad_acc:
@@ -148,34 +150,31 @@ class DistnetModel(Model):
                 assert len(y) == 5, f"invalid number of output. Expected: 5 actual {len(y)}"
             else:
                 assert len(y) == 4, f"invalid number of output. Expected: 4 actual {len(y)}"
-        with tf.GradientTape(persistent=self.use_agc or self.grad_writer is not None) as tape:
+
+        with tf.GradientTape(persistent=(self.use_agc and len(self.loss_groups)>1) or self.grad_writer is not None) as tape:
             y_pred = self(x, training=True)  # Forward pass
             # compute loss
             losses = dict()
             loss_weights = dict()
-            loss = 0
+
             inc=0
             if edm_weight>0:
                 edm_loss = self.edm_loss(y[inc], y_pred[inc])#, sample_weight = weight_map)
-                loss = edm_loss * edm_weight
                 losses["edm"] = edm_loss
                 loss_weights["edm"] = edm_weight
             if self.edm_lovasz_weight>0:
                 edm_loss_lh = lovasz_hinge(y_pred[inc], tf.math.greater(y[inc], 0), channel_axis=True)
-                loss = loss + edm_loss_lh * self.edm_lovasz_weight
                 losses["edm_lh"] = edm_loss_lh
                 loss_weights["edm_lh"] = self.edm_lovasz_weight
             if self.edm_lovasz_label_weight>0 and labels is not None:
                 edm_score = 2. * tf.math.exp(-tf.math.square(y[0]-y_pred[0])) - 1.
                 edm_loss_lh = lovasz_hinge(edm_score, labels, per_label=True, channel_axis=True)
-                loss = loss + edm_loss_lh * self.edm_lovasz_label_weight
                 losses["edm_lh_label"] = edm_loss_lh
                 loss_weights["edm_lh_label"] = self.edm_lovasz_label_weight
 
             if self.predict_contours:
                 inc+=1
                 contour_loss = self.contour_loss(y[inc], y_pred[inc])
-                loss = loss + contour_loss * contour_weight
                 losses["contour"] = contour_loss
                 loss_weights["contour"] = contour_weight
 
@@ -184,7 +183,6 @@ class DistnetModel(Model):
                 if center_weight>0:
                     center_pred_inside=tf.where(tf.math.greater(y[0], 0), y_pred[inc], 0) # do not predict anything outside
                     center_loss = self.center_loss(y[inc], center_pred_inside)
-                    loss = loss + center_loss * center_weight
                     losses["center"] = center_loss
                     loss_weights["center"] = center_weight
 
@@ -207,7 +205,6 @@ class DistnetModel(Model):
                     #     return x, grad
                     # score = p_score(score)
                     center_loss_lh = lovasz_hinge(score, labels, per_label=True, channel_axis=True)
-                    loss = loss + center_loss_lh * self.center_lovasz_weight
                     losses["center_lh"] = center_loss_lh
                     loss_weights["center_lh"] = self.center_lovasz_weight
 
@@ -215,7 +212,6 @@ class DistnetModel(Model):
                 score_y = 2. * tf.math.exp(-tf.math.square(y[1+inc]-y_pred[1+inc])) - 1.
                 score_x = 2. * tf.math.exp(-tf.math.square(y[2+inc]-y_pred[2+inc])) - 1.
                 d_loss = lovasz_hinge(score_y, labels[...,1:], per_label=True, channel_axis=True) + lovasz_hinge(score_x, labels[...,1:], per_label=True, channel_axis=True)
-                loss = loss + d_loss * self.displacement_lovasz_weight
                 losses["displacement_lh"] = d_loss
                 loss_weights["displacement_lh"] = self.displacement_lovasz_weight
 
@@ -224,7 +220,6 @@ class DistnetModel(Model):
                 dy_inside=tf.where(tf.math.greater(y[0], 0), y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(tf.math.greater(y[0], 0), y_pred[2+inc], 0) # do not predict anything outside
                 d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
-                loss = loss + d_loss * displacement_weight
                 losses["displacement"] = d_loss
                 loss_weights["displacement"] = displacement_weight
 
@@ -240,60 +235,62 @@ class DistnetModel(Model):
                     var_loss = motion_losses[1] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
                     losses["displacement_var"] = var_loss
                     loss_weights["displacement_var"] = displacement_var_weight
-                    loss = loss + var_loss * displacement_var_weight
             # category loss
             cat_loss = 0
             for i in range(self.frame_window * (2 if self.next else 1)):
                 cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
-            loss = loss + cat_loss * category_weight
             losses["category"] = cat_loss
             loss_weights["category"] = category_weight
+
+            losses["loss"] = 0.
+            loss_per_group = []
+            for g in self.loss_groups:
+                loss = 0.
+                for n in g:
+                    if n in losses:
+                        loss = loss + losses[n] * loss_weights[n]
+                losses["loss"] = losses["loss"] + loss
+                if mixed_precision:
+                    loss = self.optimizer.get_scaled_loss(loss)
+                if self.use_agc or len(loss_per_group)==0:
+                    loss_per_group.append(loss)
+                else:
+                    loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
 
         if self.grad_writer is not None:
             trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY")) and "/kernel" in t.name]
             with self.grad_writer.as_default(step=self._train_counter):
                 for loss_name, loss_value in losses.items():
-                    w = loss_weights[loss_name]
-                    gradients = tape.gradient(loss_value, trainable_vars_tape)
-                    if mixed_precision:
-                        gradients = self.optimizer.get_unscaled_gradients(grad)
-                    for v, g in zip(trainable_vars_tape, gradients):
-                        if g is not None:
-                            g = g * w
-                            #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
-                            print(f"layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
-                    if self.use_agc:
-                        gradients = adaptive_clip_grad(trainable_vars_tape, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords, grad_scale = w)
+                    if loss_name != "loss" :
+                        w = loss_weights[loss_name]
+                        gradients = tape.gradient(loss_value, trainable_vars_tape)
+                        if mixed_precision:
+                            gradients = self.optimizer.get_unscaled_gradients(grad)
                         for v, g in zip(trainable_vars_tape, gradients):
                             if g is not None:
+                                g = g * w
                                 #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
-                                print(f"AGC: layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
+                                print(f"layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
+                        if self.use_agc:
+                            gradients = adaptive_clip_grad(trainable_vars_tape, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords, grad_scale = w)
+                            for v, g in zip(trainable_vars_tape, gradients):
+                                if g is not None:
+                                    #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
+                                    print(f"AGC: layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
 
         # Compute gradients
-        if not self.use_agc:
-            losses["loss"] = loss
-            if mixed_precision: # within tape ?
-                loss = self.optimizer.get_scaled_loss(loss)
+        for loss in loss_per_group:
             gradients = tape.gradient(loss, self.trainable_variables)
             if mixed_precision:
                 gradients = self.optimizer.get_unscaled_gradients(gradients)
-            if not self.use_grad_acc:
+            if self.use_agc:
+                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
+            if not self.use_grad_acc and len(loss_per_group)==1:
                 self.optimizer.apply_gradients(zip(gradients, self.trainable_variables)) #Update weights
             else:
                 self.gradient_accumulator.accumulate_gradients(gradients)
-                self.gradient_accumulator.apply_gradients()
-        else:
-            for n, l in losses.items():
-                w = float(loss_weights[n]) / self.accum_steps
-                if mixed_precision: # within tape ?
-                    l = self.optimizer.get_scaled_loss(l)
-                gradients = tape.gradient(l, self.trainable_variables)
-                if mixed_precision:
-                    gradients = self.optimizer.get_unscaled_gradients(gradients)
-                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords, grad_scale = w)
-                self.gradient_accumulator.accumulate_gradients(gradients, scale=False)
+        if self.use_grad_acc or len(loss_per_group)>1:
             self.gradient_accumulator.apply_gradients()
-            losses["loss"] = loss
         return losses
         # gradient safe mode
         # def t_fn():# if any of the gradients are NaN, set loss metric to NaN
@@ -760,7 +757,7 @@ def upsampling_op(
             parent_name:str,
             size_factor:int=2,
             kernel_size: int=0,
-            mode:str="tconv", # tconv, up_nn, up_bilinera
+            mode:str="tconv", # tconv, up_nn, up_bilinear
             norm_layer:str=None,
             activation: str="relu",
             batch_norm:bool = False,
@@ -786,9 +783,9 @@ def upsampling_op(
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
             upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{name}/Upsample{kernel_size}x{kernel_size}_{interpolation}")
             if batch_norm or dropout_rate>0:
-                conv = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides=1, padding='same', name=f"{name}/Conv{kernel_size}x{kernel_size}", use_bias=use_bias, activation=activation )
-            else:
                 conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/Conv{kernel_size}x{kernel_size}", activation=activation )
+            else:
+                conv = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides=1, padding='same', name=f"{name}/Conv{kernel_size}x{kernel_size}", use_bias=use_bias, activation=activation )
         def op(input):
             x = upsample(input)
             if conv is not None:
