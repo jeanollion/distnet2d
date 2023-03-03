@@ -74,7 +74,7 @@ class DistnetModel(Model):
         predict_center = False,
         gradient_safe_mode = False,
         gradient_log_dir:str=None,
-        accum_steps=1, use_agc=False, agc_per_loss=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False,
+        accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
@@ -113,7 +113,6 @@ class DistnetModel(Model):
         if self.use_grad_acc or use_agc:
             self.gradient_accumulator = GradientAccumulator(accum_steps, self)
         self.use_agc = use_agc
-        self.agc_per_loss=agc_per_loss
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
         self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
@@ -246,16 +245,19 @@ class DistnetModel(Model):
             loss_per_group = []
             for g in self.loss_groups:
                 loss = 0.
+                loss_count = 0
                 for n in g:
                     if n in losses:
                         loss = loss + losses[n] * loss_weights[n]
-                losses["loss"] = losses["loss"] + loss
-                if mixed_precision:
-                    loss = self.optimizer.get_scaled_loss(loss)
-                if self.use_agc or len(loss_per_group)==0:
-                    loss_per_group.append(loss)
-                else:
-                    loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
+                        loss_count = loss_count + 1
+                if loss_count>0:
+                    losses["loss"] = losses["loss"] + loss
+                    if mixed_precision:
+                        loss = self.optimizer.get_scaled_loss(loss)
+                    if self.use_agc or len(loss_per_group)==0:
+                        loss_per_group.append(loss)
+                    else:
+                        loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
 
         if self.grad_writer is not None:
             trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY")) and "/kernel" in t.name]
