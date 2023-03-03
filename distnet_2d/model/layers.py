@@ -818,7 +818,9 @@ class WeightedSum(tf.keras.layers.Layer):
     def build(self, input_shape):
         assert isinstance(input_shape, (list, tuple)), "input should be a list or tuple of tensor"
         for i, shape in enumerate(input_shape[1:]):
-            assert shape == input_shape[0], f"all shape should be equal. Shape at {i+2}/{len(input_shape)} is {shape} which differs from {input_shape[0]}"
+            assert len(shape)==len(input_shape[0]), "ranks differ"
+            for j in range(1, len(input_shape[0])):
+                assert shape[j] == input_shape[0][j], f"all shape should be equal. Shape at {i+2}/{len(input_shape)} is {shape} which differs from {input_shape[0]}"
         super().build(input_shape)
         self.weight = self.add_weight(
             name="weight",
