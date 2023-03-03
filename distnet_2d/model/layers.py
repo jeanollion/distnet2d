@@ -367,6 +367,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             self,
             kernel_size: int=3,
             dilation: int = 1,
+            weighted_sum : bool = False,
             dropout_rate : float = 0.3,
             weight_scaled : bool = False,
             batch_norm : bool = True,
@@ -380,10 +381,11 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.weight_scaled=weight_scaled
+        self.weighted_sum=weighted_sum
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum})
       return config
 
     def build(self, input_shape):
@@ -430,6 +432,8 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         if self.batch_norm:
             self.bn1 = tf.keras.layers.BatchNormalization()
             self.bn2 = tf.keras.layers.BatchNormalization()
+        if self.weighted_sum:
+            self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
 
     def call(self, input, is_training=True):
@@ -444,13 +448,17 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             x = self.bn2(x, training = is_training)
         if self.dropout_rate>0:
             x = self.drop(x, training = is_training)
-        return self.activation_layer(input + x) #* self.gamma
+        if self.weighted_sum:
+            return self.ws([input, x])
+        else:
+            return self.activation_layer(input + x)
 
 class ResConv2D(Layer):
     def __init__(
             self,
             kernel_size: int=3,
             dilation: int = 1,
+            weighted_sum : bool = False,
             dropout_rate : float = 0.3,
             batch_norm : bool = True,
             weight_scaled:bool = False,
@@ -464,10 +472,11 @@ class ResConv2D(Layer):
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.weight_scaled = weight_scaled
+        self.weighted_sum = weighted_sum
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum})
       return config
 
     def build(self, input_shape):
@@ -497,6 +506,8 @@ class ResConv2D(Layer):
         if self.batch_norm:
             self.bn1 = tf.keras.layers.BatchNormalization()
             self.bn2 = tf.keras.layers.BatchNormalization()
+        if self.weighted_sum:
+            self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
 
     def call(self, input, is_training=True):
@@ -509,7 +520,10 @@ class ResConv2D(Layer):
             x = self.bn2(x, training = is_training)
         if self.dropout_rate>0:
             x = self.drop(x, training = is_training)
-        return self.activation_layer(input + x) #* self.gamma
+        if self.weighted_sum:
+            return self.ws([input, x])
+        else:
+            return self.activation_layer(input + x)
 
 class Conv2DBNDrop(Layer):
     def __init__(
@@ -795,6 +809,38 @@ class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
         if self.activation is not None:
             return self.activation(outputs) #* self.gamma
         return outputs
+
+class WeightedSum(tf.keras.layers.Layer):
+    def __init__(self, per_channel=True, **kwargs):
+        super().__init__(**kwargs)
+        self.per_channel = per_channel
+    def build(self, input_shape):
+        assert isinstance(input_shape, (list, tuple)), "input should be a list or tuple of tensor"
+        for i, shape in enumerate(input_shape[1:]):
+            assert shape == input_shape[0], f"all shape should be equal. Shape at {i+1} is {shape} which differs from {input_shape[0]}"
+        super().build(input_shape)
+        self.weight = self.add_weight(
+            name="weight",
+            shape=(len(input_shape), input_shape[0][-1]) if self.per_channel else (len(input_shape),),
+            dtype=self.dtype,
+            initializer=tf.constant_initializer(1./len(input_shape)), # "ones"
+            trainable=True
+        )
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"per_channel":self.per_channel})
+        return config
+
+    def call(self, inputs):
+        if self.per_channel:
+            weights = self.weight[:,tf.newaxis, tf.newaxis, tf.newaxis] # N,  B, Y, X, C
+        else:
+            weights = self.weight # N
+        result = tf.cast(0, inputs[0].dtype)
+        for i, input in enumerate(inputs):
+            result = result + tf.math.multiply(input, weights[i])
+        return result
 
 ############### MOBILE NET LAYERS ############################################################
 ############### FROM https://github.com/Bisonai/mobilenetv3-tensorflow/blob/master/layers.py
