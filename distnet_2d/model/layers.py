@@ -814,14 +814,15 @@ class WeightedSum(tf.keras.layers.Layer):
     def __init__(self, per_channel=True, **kwargs):
         super().__init__(**kwargs)
         self.per_channel = per_channel
+
     def build(self, input_shape):
         assert isinstance(input_shape, (list, tuple)), "input should be a list or tuple of tensor"
         for i, shape in enumerate(input_shape[1:]):
-            assert shape == input_shape[0], f"all shape should be equal. Shape at {i+1} is {shape} which differs from {input_shape[0]}"
+            assert shape == input_shape[0], f"all shape should be equal. Shape at {i+2}/{len(input_shape)} is {shape} which differs from {input_shape[0]}"
         super().build(input_shape)
         self.weight = self.add_weight(
             name="weight",
-            shape=(len(input_shape), input_shape[0][-1]) if self.per_channel else (len(input_shape),),
+            shape=(input_shape[0][-1], len(input_shape)) if self.per_channel else (len(input_shape),),
             dtype=self.dtype,
             initializer=tf.constant_initializer(1./len(input_shape)), # "ones"
             trainable=True
@@ -833,14 +834,11 @@ class WeightedSum(tf.keras.layers.Layer):
         return config
 
     def call(self, inputs):
-        if self.per_channel:
-            weights = self.weight[:,tf.newaxis, tf.newaxis, tf.newaxis] # N,  B, Y, X, C
-        else:
-            weights = self.weight # N
-        result = tf.cast(0, inputs[0].dtype)
-        for i, input in enumerate(inputs):
-            result = result + tf.math.multiply(input, weights[i])
-        return result
+        weights = self.weight[tf.newaxis, tf.newaxis, tf.newaxis]
+        if not self.per_channel:
+            weights = weights[tf.newaxis]
+        mul = tf.math.multiply(tf.stack(inputs, axis = -1), weights)
+        return tf.math.reduce_sum(mul, axis=-1, keepdims = False)
 
 ############### MOBILE NET LAYERS ############################################################
 ############### FROM https://github.com/Bisonai/mobilenetv3-tensorflow/blob/master/layers.py
