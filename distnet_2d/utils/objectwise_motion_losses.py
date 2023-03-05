@@ -2,7 +2,7 @@ import tensorflow as tf
 from .coordinate_op_2d import get_weighted_mean_2d_fun, get_center_distance_spread_fun
 from ..model.layers import WeigthedGradient
 
-def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_motion:bool = True, motion_var:bool=True):
+def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, center_motion:bool = True, motion_var:bool=True):
     nan = tf.cast(float('NaN'), tf.float32)
     #motion_loss_fun = _center_spread_loss(spatial_dims)
     motion_loss_fun = _distance_loss()
@@ -18,6 +18,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             #print(f"grad displacement: {dy}")
             return dy * center_displacement_grad_weight_displacement
         return x, grad
+    center_scale = tf.cast(1./center_scale, tf.float32)
     def fun(args):
         dY, dX, center, labels, prev_labels = args
         label_rank, label_size, N = _get_label_rank_and_size(labels, batch_axis=False)
@@ -27,7 +28,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             # predicted  center coord per object
             dm = tf.stack([dYm, dXm], -1) # (T-1, N, 2)
             dm=wgrad_d(dm)
-            center_values = tf.math.exp(-center)
+            center_values = tf.math.exp(-center * center_scale) ## try also sqrt(size/pi) per object OR  (stop_gradient(max) - center)**2
             #center_values = tf.math.exp(-tf.math.square(center)) # numerical instability on gradients
             center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(center_values, -1), label_rank))
             center_ob = wgrad_c(center_ob)
