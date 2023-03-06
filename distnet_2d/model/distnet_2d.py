@@ -232,7 +232,7 @@ class DistnetModel(Model):
                     #center_motion_loss_norm = tf.math.divide_no_nan(center_displacement_weight, tf.stop_gradient(center_motion_loss))
                     #loss = loss + center_motion_loss * center_displacement_weight
                 if self.center_unicity_weight>0:
-                    center_unicity_loss = motion_losses[0] if n_motion_loss>1 else motion_losses
+                    center_unicity_loss = motion_losses[1] if n_motion_loss>1 else motion_losses
                     losses["center_unicity"] = center_unicity_loss
                     loss_weights["center_unicity"] = self.center_unicity_weight
 
