@@ -63,7 +63,7 @@ class DistnetModel(Model):
         displacement_loss_weight=1, displacement_lovasz_loss_weight=0,
         center_displacement_loss_weight=1e-1, center_displacement_grad_weight_center:float=1e-1, center_displacement_grad_weight_displacement:float=1e-1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
         category_loss_weight=1,
-        center_scale:float=25,
+        center_scale:float=0, # 0 : computed automatically
         edm_loss=MeanSquaredErrorSampleWeightChannel(),
         center_loss = MeanSquaredError(),
         displacement_loss = MeanSquaredErrorSampleWeightChannel(),

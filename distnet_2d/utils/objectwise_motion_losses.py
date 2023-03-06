@@ -19,22 +19,23 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             #print(f"grad displacement: {dy}")
             return dy * center_displacement_grad_weight_displacement
         return x, grad
-    center_scale = tf.cast(1./center_scale, tf.float32)
     def fun(args):
         dY, dX, center, true_center, labels, prev_labels = args
         label_rank, label_size, N = _get_label_rank_and_size(labels, batch_axis=False)
         dYm = _get_mean_by_object(dY, label_rank[...,1:,:], label_size[...,1:,:]) # T-1, N
         dXm = _get_mean_by_object(dX, label_rank[...,1:,:], label_size[...,1:,:]) # T-1, N
         if center_motion or center_unicity:
-            radius = tf.math.sqrt(label_size / pi )[tf.newaxis, tf.newaxis] # Y, X, T, N
-            center_values_ob = tf.math.multiply_no_nan(tf.expand_dims(center, -1), label_rank) # Y,X,T,N
-            center_values_ob = tf.math.exp(-tf.math.divide(center_values_ob, radius)) ## try also  (stop_gradient(max) - center)**2
-            center_ob = center_fun(center_values_ob)
+            if center_scale<=0:
+                radius = tf.math.sqrt(label_size / pi )[tf.newaxis, tf.newaxis] # 1, 1, T, N
+                scale = tf.math.reduce_sum(radius * label_rank, axis=-1, keepdims=False)
+            else:
+                scale = tf.cast(center_scale, tf.float32)
+            center_values = tf.math.exp(-tf.math.divide_no_nan(center, scale))
+            center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(center_values, -1), label_rank)) # T, N, 2
 
             if center_unicity:
-                true_center_values_ob = tf.math.multiply_no_nan(tf.expand_dims(true_center, -1), label_rank) # Y,X,T,N
-                true_center_values_ob = tf.math.exp(-tf.math.divide(true_center_values_ob, radius)) ## try also  (stop_gradient(max) - center)**2
-                true_center_ob = center_fun(true_center_values_ob)
+                true_center_values = tf.math.exp(- true_center / scale)
+                true_center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(true_center_values, -1), label_rank)) # T, N, 2
                 center_unicity_loss = motion_loss_fun(true_center_ob, center_ob)
                 center_unicity_loss = tf.cond(tf.math.is_nan(center_unicity_loss), lambda : tf.cast(0, center_unicity_loss.dtype), lambda : center_unicity_loss)
         if center_motion: # center+motion coherence loss
@@ -82,7 +83,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             return motion_loss
         else:
             return center_unicity_loss
-            
+
     def loss_fun(dY, dX, center, true_center, labels, prev_labels):
         losses = tf.map_fn(fun, (dY, dX, center, true_center, labels, prev_labels), fn_output_signature=(tf.float32, tf.float32) if center_motion and center_unicity else tf.float32 )
         if center_motion and center_unicity:
