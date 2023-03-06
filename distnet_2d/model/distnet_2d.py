@@ -59,8 +59,8 @@ class DistnetModel(Model):
     def __init__(self, *args, spatial_dims,
         edm_loss_weight=1, edm_lovasz_loss_weight=1, edm_lovasz_label_loss_weight=0,
         contour_loss_weight = 1,
-        center_loss_weight=1, center_lovasz_loss_weight=1,
-        displacement_loss_weight=1, displacement_lovasz_loss_weight=0, displacement_var_weight=1e-3,
+        center_loss_weight=1, center_lovasz_loss_weight=1, center_unicity_loss_weight=1,
+        displacement_loss_weight=1, displacement_lovasz_loss_weight=0,
         center_displacement_loss_weight=1e-1, center_displacement_grad_weight_center:float=1e-1, center_displacement_grad_weight_displacement:float=1e-1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
         category_loss_weight=1,
         center_scale:float=25,
@@ -85,8 +85,8 @@ class DistnetModel(Model):
         self.contour_weight = contour_loss_weight
         self.center_lovasz_weight = center_lovasz_loss_weight
         self.center_weight = center_loss_weight
+        self.center_unicity_weight = center_unicity_loss_weight
         self.displacement_weight = displacement_loss_weight
-        self.displacement_var_weight=displacement_var_weight
         self.center_displacement_weight = center_displacement_loss_weight
         self.category_weight = category_loss_weight
         self.gradient_safe_mode=gradient_safe_mode
@@ -99,7 +99,7 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         self.contour_loss = MeanSquaredError()
         self.displacement_loss = displacement_loss
-        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_scale=center_scale, center_motion = center_displacement_loss_weight>0, motion_var = displacement_var_weight>0)
+        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_scale=center_scale, center_motion = center_displacement_loss_weight>0, center_unicity=center_unicity_loss_weight>0)
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
@@ -121,7 +121,7 @@ class DistnetModel(Model):
             self.grad_writer = tf.summary.create_file_writer(gradient_log_dir)
         else:
             self.grad_writer = None
-        self.loss_groups = [["edm", "edm_lh", "edm_lh_label", "contour", "center", "center_lh", "displacement", "displacement_lh", "displacement_var", "category"], ["center_displacement"]]
+        self.loss_groups = [["edm", "edm_lh", "edm_lh_label", "contour", "center", "center_lh", "displacement", "displacement_lh", "category"], ["center_displacement", "center_unicity"]]
 
     def train_step(self, data):
         if self.use_grad_acc:
@@ -132,7 +132,6 @@ class DistnetModel(Model):
         x, y = data
         displacement_weight = self.displacement_weight / 2. # y & x
         displacement_weight /= (2 * fw + 1.) # mean per channel
-        displacement_var_weight = self.displacement_var_weight
         category_weight = self.category_weight / (self.frame_window * (2. if self.next else 1))
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
@@ -223,18 +222,20 @@ class DistnetModel(Model):
                 losses["displacement"] = d_loss
                 loss_weights["displacement"] = displacement_weight
 
-            if displacement_var_weight>0 or center_displacement_weight>0:
-                motion_losses = self.motion_losses(y_pred[1+inc], y_pred[2+inc], y_pred[inc], labels, prev_labels)
+            n_motion_loss =(1 if center_displacement_weight>0 else 0) + (1 if self.center_unicity_weight>0 else 0)
+            if n_motion_loss>0:
+                motion_losses = self.motion_losses(y_pred[1+inc], y_pred[2+inc], y_pred[inc], y[inc], labels, prev_labels)
                 if center_displacement_weight>0:
-                    center_motion_loss = motion_losses[0] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
+                    center_motion_loss = motion_losses[0] if n_motion_loss>1 else motion_losses
                     losses["center_displacement"] = center_motion_loss
                     loss_weights["center_displacement"] = center_displacement_weight
                     #center_motion_loss_norm = tf.math.divide_no_nan(center_displacement_weight, tf.stop_gradient(center_motion_loss))
                     #loss = loss + center_motion_loss * center_displacement_weight
-                if displacement_var_weight>0:
-                    var_loss = motion_losses[1] if displacement_var_weight>0 and center_displacement_weight>0 else motion_losses
-                    losses["displacement_var"] = var_loss
-                    loss_weights["displacement_var"] = displacement_var_weight
+                if self.center_unicity_weight>0:
+                    center_unicity_loss = motion_losses[0] if n_motion_loss>1 else motion_losses
+                    losses["center_unicity"] = center_unicity_loss
+                    loss_weights["center_unicity"] = self.center_unicity_weight
+
             # category loss
             cat_loss = 0
             for i in range(self.frame_window * (2 if self.next else 1)):

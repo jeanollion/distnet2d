@@ -1,10 +1,11 @@
 import tensorflow as tf
 from .coordinate_op_2d import get_weighted_mean_2d_fun, get_center_distance_spread_fun
 from ..model.layers import WeigthedGradient
+import numpy as np
 
-def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, center_motion:bool = True, motion_var:bool=True):
+def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, center_motion:bool = True, center_unicity:bool=True):
     nan = tf.cast(float('NaN'), tf.float32)
-    #motion_loss_fun = _center_spread_loss(spatial_dims)
+    pi = tf.cast(np.pi, tf.float32)
     motion_loss_fun = _distance_loss()
     center_fun = get_weighted_mean_2d_fun(spatial_dims, True, batch_axis = False, keepdims = False)
     @tf.custom_gradient
@@ -20,17 +21,26 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
         return x, grad
     center_scale = tf.cast(1./center_scale, tf.float32)
     def fun(args):
-        dY, dX, center, labels, prev_labels = args
+        dY, dX, center, true_center, labels, prev_labels = args
         label_rank, label_size, N = _get_label_rank_and_size(labels, batch_axis=False)
         dYm = _get_mean_by_object(dY, label_rank[...,1:,:], label_size[...,1:,:]) # T-1, N
         dXm = _get_mean_by_object(dX, label_rank[...,1:,:], label_size[...,1:,:]) # T-1, N
+        if center_motion or center_unicity:
+            radius = tf.math.sqrt(label_size / pi )[tf.newaxis, tf.newaxis] # Y, X, T, N
+            center_values_ob = tf.math.multiply_no_nan(tf.expand_dims(center, -1), label_rank) # Y,X,T,N
+            center_values_ob = tf.math.exp(-tf.math.divide(center_values_ob, radius)) ## try also  (stop_gradient(max) - center)**2
+            center_ob = center_fun(center_values_ob)
+
+            if center_unicity:
+                true_center_values_ob = tf.math.multiply_no_nan(tf.expand_dims(true_center, -1), label_rank) # Y,X,T,N
+                true_center_values_ob = tf.math.exp(-tf.math.divide(true_center_values_ob, radius)) ## try also  (stop_gradient(max) - center)**2
+                true_center_ob = center_fun(true_center_values_ob)
+                center_unicity_loss = motion_loss_fun(true_center_ob, center_ob)
+                center_unicity_loss = tf.cond(tf.math.is_nan(center_unicity_loss), lambda : tf.cast(0, center_unicity_loss.dtype), lambda : center_unicity_loss)
         if center_motion: # center+motion coherence loss
             # predicted  center coord per object
             dm = tf.stack([dYm, dXm], -1) # (T-1, N, 2)
             dm=wgrad_d(dm)
-            center_values = tf.math.exp(-center * center_scale) ## try also sqrt(size/pi) per object OR  (stop_gradient(max) - center)**2
-            #center_values = tf.math.exp(-tf.math.square(center)) # numerical instability on gradients
-            center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(center_values, -1), label_rank))
             center_ob = wgrad_c(center_ob)
             prev_labels = prev_labels[...,:N] # (T-1, N) # trim from (T-1, Nmax)
             has_prev = tf.math.greater(prev_labels, 0)
@@ -42,11 +52,11 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
 
             # target = previous centers excluding those with no_prev
             #label_rank_cur = label_rank[...,1:,:]
-            label_size_cur = label_size[1:]
+            #label_size_cur = label_size[1:]
             center_ob_prev = center_ob[:-1] # (T-1, N, 2)
             center_ob_prev = tf.gather(center_ob_prev, indices=prev_idx, batch_dims=1, axis=1) # (T-1, N, 2)
             center_ob_prev = tf.where(has_prev_, center_ob_prev, nan)
-            motion_loss = motion_loss_fun(center_ob_prev, center_ob_cur_trans, label_size_cur) #label_rank_cur
+            motion_loss = motion_loss_fun(center_ob_prev, center_ob_cur_trans) #label_size_cur
             #print(f"all center ob: \n{center_ob} center ob prev: \n{center_ob_prev} cebter ob trans: \n{center_ob_cur_trans}, motion loss: \n{motion_loss}")
 
             for d in range(1, motion_range):
@@ -55,34 +65,27 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 has_prev = has_prev[1:] # (T-1-d, N)
                 center_ob_cur_trans = center_ob_cur_trans[1:] # (T-1-d, N, 2)
                 label_rank_cur=label_rank[...,1:,:]
-                label_size_cur=label_size_cur[1:]
+                #label_size_cur=label_size_cur[1:]
                 # remove last frame
                 center_ob_prev = center_ob_prev[:-1] # (T-1-d, N)
                 dm = dm[:-1] # (T-1-d, N, 2)
                 center_ob_cur_trans = _scatter_centers_frames(center_ob_cur_trans, prev_idx, has_prev) # move indices of translated center to match indices of previous frame. average centers in case of division
                 center_ob_cur_trans = center_ob_cur_trans - dm # translate
-                motion_loss = motion_loss + motion_loss_fun(center_ob_prev, center_ob_cur_trans, label_rank_cur, label_size_cur) #label_rank_cur
+                motion_loss = motion_loss + motion_loss_fun(center_ob_prev, center_ob_cur_trans) #label_size_cur
 
             motion_loss = tf.divide(motion_loss, tf.cast(motion_range, motion_loss.dtype))
             motion_loss = tf.cond(tf.math.is_nan(motion_loss), lambda : tf.cast(0, motion_loss.dtype), lambda : motion_loss)
-        if motion_var: # enforce homogeneity : var -> 0
-            dY2m = _get_mean_by_object(tf.math.square(dY), label_rank[...,1:,:], label_size[...,1:,:])
-            vary = dY2m - tf.math.square(dYm)
-            dX2m = _get_mean_by_object(tf.math.square(dX), label_rank[...,1:,:], label_size[...,1:,:])
-            varx = dX2m - tf.math.square(dXm)
-            var = vary + varx
-            var = tf.reduce_mean(var, axis=-1) # mean among object
-            var = tf.reduce_sum(var)
 
-        if center_motion and motion_var:
-            return motion_loss, var
+        if center_motion and center_unicity:
+            return motion_loss, center_unicity_loss
         elif center_motion:
             return motion_loss
         else:
-            return var
-    def loss_fun(dY, dX, center, labels, prev_labels):
-        losses = tf.map_fn(fun, (dY, dX, center, labels, prev_labels), fn_output_signature=(tf.float32, tf.float32) if center_motion and motion_var else tf.float32 )
-        if center_motion and motion_var:
+            return center_unicity_loss
+            
+    def loss_fun(dY, dX, center, true_center, labels, prev_labels):
+        losses = tf.map_fn(fun, (dY, dX, center, true_center, labels, prev_labels), fn_output_signature=(tf.float32, tf.float32) if center_motion and center_unicity else tf.float32 )
+        if center_motion and center_unicity:
             return tf.reduce_mean(losses[0]), tf.reduce_mean(losses[1])
         else:
             return tf.reduce_mean(losses)
@@ -121,7 +124,7 @@ def _scatter_centers_frames(center, prev_idx, has_prev): # (F, N, 2) , (F, N), (
     return tf.map_fn(_scatter_centers, (center, prev_idx, has_prev), fn_output_signature=center.dtype)
 
 def _distance_loss():
-    def loss(true, pred, size): # (C, N, 2)
+    def loss(true, pred): # (C, N, 2)
         no_na_mask = tf.stop_gradient(tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32)) # non-empty objects # (C, N, 1)
         n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False) # (C)
         true = tf.math.multiply_no_nan(true, no_na_mask)  # (C, N, 2)
