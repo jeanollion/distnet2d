@@ -59,13 +59,12 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             center_ob_prev = tf.where(has_prev_, center_ob_prev, nan)
             motion_loss = motion_loss_fun(center_ob_prev, center_ob_cur_trans) #label_size_cur
             #print(f"all center ob: \n{center_ob} center ob prev: \n{center_ob_prev} cebter ob trans: \n{center_ob_cur_trans}, motion loss: \n{motion_loss}")
-
             for d in range(1, motion_range):
                 # remove first frame
                 prev_idx = prev_idx[1:] # (T-1-d, N)
                 has_prev = has_prev[1:] # (T-1-d, N)
                 center_ob_cur_trans = center_ob_cur_trans[1:] # (T-1-d, N, 2)
-                label_rank_cur=label_rank[...,1:,:]
+                #label_rank_cur=label_rank_cur[...,1:,:]
                 #label_size_cur=label_size_cur[1:]
                 # remove last frame
                 center_ob_prev = center_ob_prev[:-1] # (T-1-d, N)
