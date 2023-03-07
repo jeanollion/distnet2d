@@ -131,9 +131,13 @@ class DyDxIterator(TrackingIterator):
 
     def _get_end_points(self, n_frames, pairs):
         return_next = self.channels_next[1]
-        end_points = [int(n_frames * i/self.frame_window + 0.5) for i in range(0, self.frame_window+1)]
+
+        if self.frame_window>1 and n_frames>2: # fix closest previous gap to -1
+            end_points = [int( (n_frames-1) * i/(self.frame_window-1) + 0.5) for i in range(0, self.frame_window-1)] + [n_frames-1, n_frames]
+        else:
+            end_points = [int(n_frames * i/self.frame_window + 0.5) for i in range(0, self.frame_window+1)]
         if return_next:
-            end_points = end_points + [n_frames + int(n_frames * i/self.frame_window + 0.5) for i in range(1, self.frame_window+1)]
+            end_points = end_points + [2 * n_frames - e for e in end_points[:-1]][::-1]
         if pairs:
             end_point_pairs = [[end_points[i], end_points[i+1]] for i in range(0, self.frame_window)]
             if return_next:

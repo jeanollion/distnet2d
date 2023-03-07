@@ -216,8 +216,8 @@ class DistnetModel(Model):
 
             #regression displacement loss
             if displacement_weight>0:
-                dy_inside=tf.where(tf.math.greater(y[0], 0), y_pred[1+inc], 0) # do not predict anything outside
-                dx_inside=tf.where(tf.math.greater(y[0], 0), y_pred[2+inc], 0) # do not predict anything outside
+                dy_inside=tf.where(tf.math.greater(y[0][...,1:], 0), y_pred[1+inc], 0) # do not predict anything outside
+                dx_inside=tf.where(tf.math.greater(y[0][...,1:], 0), y_pred[2+inc], 0) # do not predict anything outside
                 d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
                 losses["displacement"] = d_loss
                 loss_weights["displacement"] = displacement_weight
