@@ -815,7 +815,7 @@ class WSConv2D(tf.keras.layers.Conv2D):
         return config
 
     def call(self, input, training=None):
-        x = super().call(input, training=training)
+        x = super().call(input)
         if self.dropout_rate>0:
             x = self.dropout(x, training = training)
         if self.activation_layer is not None:
