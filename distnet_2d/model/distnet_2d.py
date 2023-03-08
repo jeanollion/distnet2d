@@ -222,7 +222,7 @@ class DistnetModel(Model):
 
             n_motion_loss =(1 if center_displacement_weight>0 else 0) + (1 if self.center_unicity_weight>0 else 0)
             if n_motion_loss>0:
-                motion_losses = self.motion_losses(y[1+inc], y[2+inc], y[inc], y[inc], labels, prev_labels)
+                motion_losses = self.motion_losses(y_pred[1+inc], y_pred[2+inc], y_pred[inc], y[inc], labels, prev_labels)
                 if center_displacement_weight>0:
                     center_motion_loss = motion_losses[0] if n_motion_loss>1 else motion_losses
                     losses["center_displacement"] = center_motion_loss

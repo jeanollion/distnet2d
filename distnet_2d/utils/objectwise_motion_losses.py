@@ -39,7 +39,6 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 true_center_values = tf.math.exp(- true_center / scale)
                 true_center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(true_center_values, -1), label_rank)) # T, N, 2
                 center_unicity_loss = motion_loss_fun(true_center_ob, center_ob)
-                print(f"center unicity loss: {center_unicity_loss}")
                 center_unicity_loss = tf.cond(tf.math.is_nan(center_unicity_loss), lambda : tf.cast(0, center_unicity_loss.dtype), lambda : center_unicity_loss)
         if center_motion: # center+motion coherence loss
             # predicted  center coord per object
