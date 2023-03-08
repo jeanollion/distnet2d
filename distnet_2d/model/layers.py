@@ -436,7 +436,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
 
-    def call(self, input, training=True):
+    def call(self, input, training=None):
         x = self.convY1(input)
         x = self.convX1(x)
         if self.batch_norm:
@@ -449,7 +449,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         if self.weighted_sum:
-            return self.ws([input, x])
+            return self.activation_layer(self.ws([input, x]))
         else:
             return self.activation_layer(input + x)
 
@@ -510,7 +510,7 @@ class ResConv2D(Layer):
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
 
-    def call(self, input, training=True):
+    def call(self, input, training=None):
         x = self.conv1(input)
         if self.batch_norm:
             x = self.bn1(x, training = training)
@@ -521,7 +521,7 @@ class ResConv2D(Layer):
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         if self.weighted_sum:
-            return self.ws([input, x])
+            return self.activation_layer(self.ws([input, x]))
         else:
             return self.activation_layer(input + x)
 
@@ -568,7 +568,7 @@ class Conv2DBNDrop(Layer):
             self.bn = tf.keras.layers.BatchNormalization()
         super().build(input_shape)
 
-    def call(self, input, training=True):
+    def call(self, input, training=None):
         x = self.conv(input)
         if self.batch_norm:
             x = self.bn(x, training = training)
@@ -585,7 +585,7 @@ class Conv2DTransposeBNDrop(Layer):
             dropout_rate:float = 0,
             batch_norm : bool = True,
             activation:str = "relu",
-            name: str="ResConv1D",
+            name: str="ResConv2D",
     ):
         super().__init__(name=name)
         self.filters = filters
@@ -622,7 +622,7 @@ class Conv2DTransposeBNDrop(Layer):
     def call(self, input, training=None):
         x = self.conv(input)
         if self.batch_norm:
-            x = self.bn(x, training = False)
+            x = self.bn(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         return self.activation_layer(x)
@@ -814,8 +814,8 @@ class WSConv2D(tf.keras.layers.Conv2D):
         config.update({"eps":self.eps, "use_gain": self.use_gain, "activation_layer":tf.keras.activations.serialize(self.activation_layer), "dropout_rate":self.dropout_rate, "gamma":self.gamma})
         return config
 
-    def call(self, input, training=True):
-        x = super().call(input)
+    def call(self, input, training=None):
+        x = super().call(input, training=training)
         if self.dropout_rate>0:
             x = self.dropout(x, training = training)
         if self.activation_layer is not None:
@@ -852,7 +852,7 @@ class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
         config.update({"eps":self.eps, "use_gain": self.use_gain, "dropout_rate":self.dropout_rate, "gamma":self.gamma})
         return config
 
-    def call(self, inputs, training=True): # code from TF2.11 modified to use standardized weights + apply dropout: https://github.com/keras-team/keras/blob/v2.11.0/keras/layers/convolutional/conv2d_transpose.py#L34-L362
+    def call(self, inputs, training=None): # code from TF2.11 modified to use standardized weights + apply dropout: https://github.com/keras-team/keras/blob/v2.11.0/keras/layers/convolutional/conv2d_transpose.py#L34-L362
         inputs_shape = tf.shape(inputs)
         batch_size = inputs_shape[0]
         if self.data_format == "channels_first":
