@@ -436,18 +436,18 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
 
-    def call(self, input, is_training=True):
+    def call(self, input, training=True):
         x = self.convY1(input)
         x = self.convX1(x)
         if self.batch_norm:
-            x = self.bn1(x, training = is_training)
+            x = self.bn1(x, training = training)
         x = self.activation_layer(x) #* self.gamma
         x = self.convY2(x)
         x = self.convX2(x)
         if self.batch_norm:
-            x = self.bn2(x, training = is_training)
+            x = self.bn2(x, training = training)
         if self.dropout_rate>0:
-            x = self.drop(x, training = is_training)
+            x = self.drop(x, training = training)
         if self.weighted_sum:
             return self.ws([input, x])
         else:
@@ -510,16 +510,16 @@ class ResConv2D(Layer):
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
 
-    def call(self, input, is_training=True):
+    def call(self, input, training=True):
         x = self.conv1(input)
         if self.batch_norm:
-            x = self.bn1(x, training = is_training)
+            x = self.bn1(x, training = training)
         x = self.activation_layer(x) #* self.gamma
         x = self.conv2(x)
         if self.batch_norm:
-            x = self.bn2(x, training = is_training)
+            x = self.bn2(x, training = training)
         if self.dropout_rate>0:
-            x = self.drop(x, training = is_training)
+            x = self.drop(x, training = training)
         if self.weighted_sum:
             return self.ws([input, x])
         else:
@@ -568,12 +568,12 @@ class Conv2DBNDrop(Layer):
             self.bn = tf.keras.layers.BatchNormalization()
         super().build(input_shape)
 
-    def call(self, input, is_training=True):
+    def call(self, input, training=True):
         x = self.conv(input)
         if self.batch_norm:
-            x = self.bn(x, training = is_training)
+            x = self.bn(x, training = training)
         if self.dropout_rate>0:
-            x = self.drop(x, training = is_training)
+            x = self.drop(x, training = training)
         return self.activation_layer(x)
 
 class Conv2DTransposeBNDrop(Layer):
@@ -611,18 +611,87 @@ class Conv2DTransposeBNDrop(Layer):
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"{self.name}/Dropout")
         if self.batch_norm:
-            self.bn = tf.keras.layers.BatchNormalization()
+            #self.bn = MockBatchNormalization(name = f"{self.name}/MockBatchNormalization")
+            self.bn = tf.keras.layers.BatchNormalization(name = f"{self.name}/BatchNormalization")
         super().build(input_shape)
 
-    def call(self, input, is_training=True):
+    def call(self, input, training=None):
         x = self.conv(input)
         if self.batch_norm:
-            x = self.bn(x, training = is_training)
+            x = self.bn(x, training = False)
         if self.dropout_rate>0:
-            x = self.drop(x, training = is_training)
+            x = self.drop(x, training = training)
         return self.activation_layer(x)
+
+class MockBatchNormalization(Layer):
+    def __init__(
+            self,
+            scale:bool = True,
+            center:bool = True,
+            name: str="BatchNormalization",
+    ):
+        super().__init__(name=name)
+        self.scale = scale
+        self.center = center
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"scale":self.scale, "center": self.center})
+      return config
+
+    def build(self, input_shape):
+        if self.scale:
+            self.gamma = self.add_weight(
+                name="gamma",
+                shape=input_shape[-1:],
+                dtype=tf.float32,
+                trainable=False,
+                experimental_autocast=False,
+            )
+        else:
+            self.gamma = None
+
+        if self.center:
+            self.beta = self.add_weight(
+                name="beta",
+                shape=input_shape[-1:],
+                dtype=tf.float32,
+                trainable=False,
+                experimental_autocast=False,
+            )
+        else:
+            self.beta = None
+        self.moving_mean = self.add_weight(
+            name="moving_mean",
+            shape=input_shape[-1:],
+            dtype=tf.float32,
+            trainable=False,
+            experimental_autocast=False,
+        )
+
+        self.moving_variance = self.add_weight(
+            name="moving_variance",
+            shape=input_shape[-1:],
+            dtype=tf.float32,
+            trainable=False,
+            experimental_autocast=False,
+        )
+        super().build(input_shape)
+
+    def _reshape(self, variable):
+        return variable[tf.newaxis, tf.newaxis, tf.newaxis]
+
+    def call(self, input):
+        x = (input - self._reshape(self.moving_mean)) / tf.math.sqrt(self._reshape(self.moving_variance)+1e-3)
+        if self.scale:
+            x = x * self._reshape(self.gamma)
+        if self.center:
+            x = x + self._reshape(self.beta)
+        return x
+
+
 
 def _standardize_weight(weight, gain, eps):
     mean = tf.math.reduce_mean(weight, axis=(0, 1, 2), keepdims=True)
@@ -695,10 +764,10 @@ class WSConv2D(tf.keras.layers.Conv2D):
         config.update({"eps":self.eps, "use_gain": self.use_gain, "activation_layer":tf.keras.activations.serialize(self.activation_layer), "dropout_rate":self.dropout_rate, "gamma":self.gamma})
         return config
 
-    def call(self, input, is_training=True):
+    def call(self, input, training=True):
         x = super().call(input)
         if self.dropout_rate>0:
-            x = self.dropout(x, training = is_training)
+            x = self.dropout(x, training = training)
         if self.activation_layer is not None:
             x = self.activation_layer(x) #* self.gamma
         return x
@@ -733,7 +802,7 @@ class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
         config.update({"eps":self.eps, "use_gain": self.use_gain, "dropout_rate":self.dropout_rate, "gamma":self.gamma})
         return config
 
-    def call(self, inputs, is_training=True): # code from TF2.11 modified to use standardized weights + apply dropout: https://github.com/keras-team/keras/blob/v2.11.0/keras/layers/convolutional/conv2d_transpose.py#L34-L362
+    def call(self, inputs, training=True): # code from TF2.11 modified to use standardized weights + apply dropout: https://github.com/keras-team/keras/blob/v2.11.0/keras/layers/convolutional/conv2d_transpose.py#L34-L362
         inputs_shape = tf.shape(inputs)
         batch_size = inputs_shape[0]
         if self.data_format == "channels_first":
@@ -805,7 +874,7 @@ class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
             )
 
         if self.dropout_rate>0:
-            x = self.dropout(x, training = is_training)
+            x = self.dropout(x, training = training)
         if self.activation is not None:
             return self.activation(outputs) #* self.gamma
         return outputs

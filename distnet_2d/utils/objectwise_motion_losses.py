@@ -19,6 +19,8 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             #print(f"grad displacement: {dy}")
             return dy * center_displacement_grad_weight_displacement
         return x, grad
+
+    @tf.function
     def fun(args):
         dY, dX, center, true_center, labels, prev_labels = args
         label_rank, label_size, N = _get_label_rank_and_size(labels, batch_axis=False)
@@ -37,6 +39,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 true_center_values = tf.math.exp(- true_center / scale)
                 true_center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(true_center_values, -1), label_rank)) # T, N, 2
                 center_unicity_loss = motion_loss_fun(true_center_ob, center_ob)
+                print(f"center unicity loss: {center_unicity_loss}")
                 center_unicity_loss = tf.cond(tf.math.is_nan(center_unicity_loss), lambda : tf.cast(0, center_unicity_loss.dtype), lambda : center_unicity_loss)
         if center_motion: # center+motion coherence loss
             # predicted  center coord per object
@@ -59,10 +62,10 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             center_ob_prev = tf.where(has_prev_, center_ob_prev, nan)
             motion_loss = motion_loss_fun(center_ob_prev, center_ob_cur_trans) #label_size_cur
             #print(f"all center ob: \n{center_ob} center ob prev: \n{center_ob_prev} cebter ob trans: \n{center_ob_cur_trans}, motion loss: \n{motion_loss}")
+            prev_idx = prev_idx[1:] # (T-1-d, N)
+            has_prev = has_prev[1:] # (T-1-d, N)
             for d in range(1, motion_range):
                 # remove first frame
-                prev_idx = prev_idx[1:] # (T-1-d, N)
-                has_prev = has_prev[1:] # (T-1-d, N)
                 center_ob_cur_trans = center_ob_cur_trans[1:] # (T-1-d, N, 2)
                 #label_rank_cur=label_rank_cur[...,1:,:]
                 #label_size_cur=label_size_cur[1:]
@@ -71,7 +74,12 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 dm = dm[:-1] # (T-1-d, N, 2)
                 center_ob_cur_trans = _scatter_centers_frames(center_ob_cur_trans, prev_idx, has_prev) # move indices of translated center to match indices of previous frame. average centers in case of division
                 center_ob_cur_trans = center_ob_cur_trans - dm # translate
+                #print(f"depth: {d} center PREV vs trans: \n{tf.concat([center_ob_prev, center_ob_cur_trans], -1).numpy()}")
+                #print(f"new motion loss: {motion_loss_fun(center_ob_prev, center_ob_cur_trans).numpy()}")
                 motion_loss = motion_loss + motion_loss_fun(center_ob_prev, center_ob_cur_trans) #label_size_cur
+                if d<motion_range-1:
+                    prev_idx = prev_idx[:-1] # (T-1-d-1, N)
+                    has_prev = has_prev[:-1] # (T-1-d-1, N)
 
             motion_loss = tf.divide(motion_loss, tf.cast(motion_range, motion_loss.dtype))
             motion_loss = tf.cond(tf.math.is_nan(motion_loss), lambda : tf.cast(0, motion_loss.dtype), lambda : motion_loss)

@@ -7,9 +7,7 @@ from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
 import numpy as np
-from .self_attention import SelfAttention
-from .attention import Attention
-from .directional_2d_self_attention import Directional2DSelfAttention
+from .attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorSampleWeightChannel
@@ -224,7 +222,7 @@ class DistnetModel(Model):
 
             n_motion_loss =(1 if center_displacement_weight>0 else 0) + (1 if self.center_unicity_weight>0 else 0)
             if n_motion_loss>0:
-                motion_losses = self.motion_losses(y_pred[1+inc], y_pred[2+inc], y_pred[inc], y[inc], labels, prev_labels)
+                motion_losses = self.motion_losses(y[1+inc], y[2+inc], y[inc], y[inc], labels, prev_labels)
                 if center_displacement_weight>0:
                     center_motion_loss = motion_losses[0] if n_motion_loss>1 else motion_losses
                     losses["center_displacement"] = center_motion_loss
@@ -355,10 +353,10 @@ def get_distnet_2d_sep_out_fw(input_shape, # Y, X
         feature_convs, _, _, attention_filters, _ = parse_param_list(feature_settings, "FeatureSequence")
         combine_features_op = Combine(filters=attention_filters//2, name="CombineFeatures")
         if self_attention:
-            self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
+            self_attention_op = SpatialAttention2D(positional_encoding="2D", name="SelfAttention")
             self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
         if attention:
-            attention_op = Attention(positional_encoding="2D", name="Attention")
+            attention_op = SpatialAttention2D(positional_encoding="2D", name="Attention")
             attention_combine = Combine(filters=attention_filters//2, name="AttentionCombine")
             attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")
 
@@ -500,7 +498,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
         combine_filters = int(attention_filters * n_chan / 2.)
         combine_features_op = Combine(filters=combine_filters, name="CombineFeatures")
         if attention:
-            attention_op = Attention(positional_encoding="2D", name="Attention")
+            attention_op = SpatialAttention2D(positional_encoding="2D", name="Attention")
             attention_combine = Combine(filters=combine_filters, name="AttentionCombine")
             attention_skip_op = Combine(filters=combine_filters, name="AttentionSkip")
 
@@ -659,7 +657,7 @@ def decoder_op(
         elif op == "res2d" or op=="resconv2d":
             convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, weighted_sum=weighted_sum, name=f"{name}/ResConv2D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         else:
-            if weight_scaled or dropout_rate>0:
+            if weight_scaled:
                 convs = [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
             elif batch_norm or dropout_rate>0:
                 convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
@@ -777,9 +775,9 @@ def upsampling_op(
         if parent_name is not None and len(parent_name)>0:
             name = f"{parent_name}/{name}"
         if mode=="tconv":
-            if weight_scaled or dropout_rate>0:
+            if weight_scaled:
                 upsample = WSConv2DTranspose(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, dropout_rate=dropout_rate, padding='same', name=f"{name}/tConv{kernel_size}x{kernel_size}")
-            elif batch_norm:
+            elif batch_norm or dropout_rate>0:
                 upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/tConv{kernel_size}x{kernel_size}")
             else:
                 upsample = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, name=f"{name}/tConv{kernel_size}x{kernel_size}")
@@ -787,7 +785,7 @@ def upsampling_op(
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
             upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{name}/Upsample{size_factor}x{size_factor}_{interpolation}")
-            if batch_norm or dropout_rate>0:
+            if batch_norm:
                 conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, dropout_rate=dropout_rate, name=f"{name}/Conv{kernel_size}x{kernel_size}", activation=activation )
             else:
                 conv = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides=1, padding='same', name=f"{name}/Conv{kernel_size}x{kernel_size}", use_bias=use_bias, activation=activation )
@@ -853,15 +851,15 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
         return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention":
-        self_attention_op = Attention(positional_encoding="2D", name=f"{name}/SelfAttention")
+        self_attention_op = SpatialAttention2D(positional_encoding="2D", name=f"{name}/SelfAttention")
         self_attention_skip_op = Combine(filters=filters, name=f"{name}/SelfAttentionSkip")
         def op(x):
             sa = self_attention_op([x, x])
             return self_attention_skip_op([x, sa])
         return op
-    if weight_scaled or dropout_rate>0:
+    if weight_scaled:
         return WSConv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, activation=activation, dropout_rate=dropout_rate, padding='same', name=f"{name}/Conv{kernel_size}x{kernel_size}")
-    elif dropout_rate>0 or batch_norm:
+    elif batch_norm or dropout_rate>0:
         return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, name=f"{name}/Conv{kernel_size}x{kernel_size}")
     else:
         return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, name=f"{name}/Conv{kernel_size}x{kernel_size}")
@@ -902,8 +900,8 @@ def get_distnet_2d_sep_out(input_shape,
             combine_residual_layer.append(Combine(filters=residual_filters * (3 if next else 2), kernel_size=residual_combine_size, name=f"CombineResiduals{l_idx}"))
         # define feature operations
         feature_convs, _, _, attention_filters, _ = parse_param_list(feature_settings, "FeatureSequence")
-        attention_op = Attention(positional_encoding="2D", name="Attention")
-        self_attention_op = Attention(positional_encoding="2D", name="SelfAttention")
+        attention_op = SpatialAttention2D(positional_encoding="2D", name="Attention")
+        self_attention_op = SpatialAttention2D(positional_encoding="2D", name="SelfAttention")
         self_attention_skip_op = Combine(filters=attention_filters, name="SelfAttentionSkip")
         combine_features_op = Combine(filters=attention_filters//2, kernel_size=residual_combine_size, name="CombineFeatures")
         attention_skip_op = Combine(filters=attention_filters//2, name="AttentionSkip")

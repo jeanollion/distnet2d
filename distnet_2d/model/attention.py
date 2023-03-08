@@ -2,9 +2,8 @@ import tensorflow as tf
 from tensorflow.keras.layers import Layer, Dense, Reshape, Embedding, Concatenate, Conv2D
 from tensorflow.keras.models import Model
 import numpy as np
-from .self_attention import scaled_dot_product_attention
 
-class Attention(Layer):
+class SpatialAttention2D(Layer):
     def __init__(self, positional_encoding=True, filters=0, return_attention=False, name="Attention"):
         '''
             filters : number of output channels
@@ -90,3 +89,35 @@ class Attention(Layer):
             return input_shape[:-1]+(self.filters,), (input_shape[0],self.spatial_dim,self.spatial_dim)
         else:
             return input_shape[:-1]+(self.filters,)
+
+def scaled_dot_product_attention(q, k, v):
+    """Calculate the attention weights.
+    q, k, v must have matching leading dimensions.
+    k, v must have matching penultimate dimension, i.e.: seq_len_k = seq_len_v.
+    The mask has different shapes depending on its type(padding or look ahead)
+    but it must be broadcastable for addition.
+
+    Args:
+    q: query shape == (..., seq_len_q, depth)
+    k: key shape == (..., seq_len_k, depth)
+    v: value shape == (..., seq_len_v, depth_v)
+
+    Returns:
+    output, attention_weights
+
+    from : https://www.tensorflow.org/tutorials/text/transformer
+    """
+
+    matmul_qk = tf.matmul(q, k, transpose_b=True)  # (..., seq_len_q, seq_len_k)
+
+    # scale matmul_qk
+    dk = tf.cast(tf.shape(k)[-1], matmul_qk.dtype)
+    scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+
+    # softmax is normalized on the last axis (seq_len_k) so that the scores
+    # add up to 1.
+    attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1, name="AttentionWeights")  # (..., seq_len_q, seq_len_k)
+
+    output = tf.matmul(attention_weights, v)  # (..., seq_len_q, depth_v)
+
+    return output, attention_weights
