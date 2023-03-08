@@ -612,7 +612,9 @@ class Conv2DTransposeBNDrop(Layer):
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"{self.name}/Dropout")
-        if self.batch_norm:
+        if self.batch_norm == "trainablenormalization":
+            self.bn = TrainableNormalization(name = f"{self.name}/TrainableNormalization")
+        elif self.batch_norm:
             #self.bn = MockBatchNormalization(name = f"{self.name}/MockBatchNormalization")
             self.bn = tf.keras.layers.BatchNormalization(name = f"{self.name}/BatchNormalization")
         super().build(input_shape)
@@ -624,6 +626,55 @@ class Conv2DTransposeBNDrop(Layer):
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         return self.activation_layer(x)
+
+class TrainableNormalization(Layer):
+    def __init__(
+            self,
+            scale:bool = True,
+            center:bool = True,
+            name: str="BatchNormalization",
+    ):
+        super().__init__(name=name)
+        self.scale = scale
+        self.center = center
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"scale":self.scale, "center": self.center})
+      return config
+
+    def build(self, input_shape):
+        if self.scale:
+            self.gamma = self.add_weight(
+                name="gamma",
+                shape=input_shape[-1:],
+                dtype=self.dtype,
+                initializer="ones",
+                trainable=True,
+                experimental_autocast=False,
+            )
+        else:
+            self.gamma = None
+
+        if self.center:
+            self.beta = self.add_weight(
+                name="beta",
+                shape=input_shape[-1:],
+                dtype=self.dtype,
+                initializer="zeros",
+                trainable=True,
+                experimental_autocast=False,
+            )
+        else:
+            self.beta = None
+        super().build(input_shape)
+
+    def call(self, input):
+        if self.scale:
+            input = input * self.gamma
+        if self.center:
+            input = input + self.beta
+        return input
 
 class MockBatchNormalization(Layer):
     def __init__(
@@ -691,16 +742,15 @@ class MockBatchNormalization(Layer):
             x = x + self._reshape(self.beta)
         return x
 
-
-
 def _standardize_weight(weight, gain, eps):
     mean = tf.math.reduce_mean(weight, axis=(0, 1, 2), keepdims=True)
     var = tf.math.reduce_mean(tf.math.square(weight-mean), axis=(0, 1, 2), keepdims=True)
     fan_in = np.prod(weight.shape[:-1])
-    scale = tf.math.sqrt(tf.math.maximum(var * fan_in, eps))
-    if gain is not None:
-        scale = scale * gain
+    #scale = tf.math.sqrt(tf.math.maximum(var * fan_in, eps))
+    scale = tf.math.sqrt(var * fan_in + eps)
     weight = (weight - mean) / scale
+    if gain is not None:
+        weight = weight * gain
     return weight
 
 def get_gamma(activation):
