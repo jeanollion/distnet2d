@@ -129,8 +129,8 @@ class DistnetModel(Model):
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
         displacement_weight = self.displacement_weight / 2. # y & x
-        displacement_weight /= (2 * fw + 1.) # mean per channel
-        category_weight = self.category_weight / (self.frame_window * (2. if self.next else 1))
+        displacement_weight /= (fw * (2. if self.next else 1)) # mean per channel # should it be divided by channel ? 
+        category_weight = self.category_weight / (fw * (2. if self.next else 1))
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
         center_weight = self.center_weight
