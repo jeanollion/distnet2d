@@ -464,8 +464,8 @@ def get_distnet_2d_erf(input_shape, # Y, X
             combine_kernel_size:int = 1,
             skip_stop_gradient:bool = True,
             skip_connections:bool = False,
+            skip_connections_center:bool = True,
             skip_combine_mode:str="conv", #conv, wsconv
-            predict_contours:bool = False,
             encoder_settings:list = ENCODER_SETTINGS,
             feature_settings: list = FEATURE_SETTINGS,
             decoder_settings: list = DECODER_SETTINGS,
@@ -507,14 +507,10 @@ def get_distnet_2d_erf(input_shape, # Y, X
         decoder_out={"Seg":{}, "Center":{}, "Track":{}, "Cat":{}}
         output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"], "Cat": ["Cat"]}
         n_output_per_decoder = {"Seg": n_chan, "Center": n_chan if predict_center else 0, "Track": n_chan-1, "Cat": n_chan-1}
-        skip_per_decoder = {"Seg": skip_connections, "Center": False, "Track": False, "Cat": False}
+        skip_per_decoder = {"Seg": skip_connections, "Center": skip_connections if skip_connections_center else False, "Track": False, "Cat": False}
         output_inc = 0
         seg_out = ["Output0_EDM"]
         activation_out = ["linear"]
-        if predict_contours:
-            output_inc += 1
-            seg_out += ["Output1_Contours"]
-            activation_out += ["sigmoid"] # sigmoid  ?
 
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
