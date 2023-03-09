@@ -297,12 +297,34 @@ class ApplyChannelWise(Layer):
             channels = [self.op(c) for c in channels]
             return self.concat(channels)
 
+class NConvToBatch2D(Layer):
+    def __init__(self, n_conv:int, filters:int, name: str="NConvToBatch2D"):
+        super().__init__(name=name)
+        self.n_conv = n_conv
+        self.filters = filters
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"n_conv": self.n_conv, "filters":self.filters})
+      return config
+
+    def build(self, input_shape):
+        self.convs = [
+            Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
+        for i in range(self.n_conv)]
+        super().build(input_shape)
+
+    def call(self, input):
+        inputs = [conv(input) for conv in self.convs]
+        return tf.concat(inputs, axis = 0)
+
 class ChannelToBatch2D(Layer):
     def __init__(self,name: str="ChannelToBatch2D"):
         super().__init__(name=name)
 
     def build(self, input_shape):
         self.target_shape = [-1, input_shape[1], input_shape[2]]
+        super().build(input_shape)
 
     def call(self, input):
         input = tf.transpose(input, perm=[3, 0, 1, 2]) # (C, B, Y, X)
@@ -321,6 +343,7 @@ class SplitBatch2D(Layer):
 
     def build(self, input_shape):
         self.target_shape = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
+        super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
         input = tf.reshape(input, self.target_shape) # (B, N, Y, X, C)
@@ -340,6 +363,7 @@ class BatchToChannel2D(Layer):
     def build(self, input_shape):
         self.target_shape1 = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
         self.target_shape2 = [-1, input_shape[1], input_shape[2], self.n_splits * input_shape[-1]]
+        super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
         input = tf.reshape(input, shape = self.target_shape1) # (N, B, Y, X, F)

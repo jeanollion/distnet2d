@@ -2,7 +2,7 @@
 
 import tensorflow as tf
 import tensorflow_probability as tfp
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel2D, SplitBatch2D, ChannelToBatch2D
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel2D, SplitBatch2D, ChannelToBatch2D, NConvToBatch2D
 from tensorflow.keras.layers import Conv2D, MaxPool2D
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -530,7 +530,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
             for o_n in o_ns:
                 decoder_output_names[n][o_n] = f"Output{oi}_{o_n}"
                 oi += 1
-        pick_conv_gen = lambda i, decoder_name, output_name: Conv2D(filters=attention_filters, kernel_size=1, padding='same', activation="relu", name=f"FeatureConv{decoder_name}{output_name}_{i}") # convolution to distinguish frames
+        # pick_conv_gen = lambda i, decoder_name, output_name: Conv2D(filters=attention_filters, kernel_size=1, padding='same', activation="relu", name=f"FeatureConv{decoder_name}{output_name}_{i}") # convolution to distinguish frames
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
         # input_merged = tf.expand_dims(tf.reshape(tf.transpose(input, perm=[0, 3, 1, 2]), [-1]+spatial_dims), -1) # shared encoder -> frames into batch dim
@@ -547,9 +547,6 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for op in feature_convs:
             feature = op(feature)
 
-        # target_shape = [-1, n_chan]+feature.shape.as_list()[-3:]
-        # all_features = tf.split(tf.reshape(feature, target_shape), num_or_size_splits = n_chan, axis=1)
-        # all_features = [tf.squeeze(f, 1) for f in all_features]
         all_features = SplitBatch2D(n_chan, "SplitFeatures")(feature)
         combined_features = combine_features_op(all_features)
         if attention:
@@ -569,14 +566,11 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
                         skip = skip_per_decoder[decoder_name]
-                        up = tf.concat([pick_conv_gen(i, decoder_name, output_name)(combined_features) for i in range(n_out)], axis=0, name = f"FeatureConv{decoder_name}{output_name}") # shared decoder -> to batch dim # (N_OUT x B, Y, X, F)
+                        # up = tf.concat([pick_conv_gen(i, decoder_name, output_name)(combined_features) for i in range(n_out)], axis=0, name = f"FeatureConv{decoder_name}{output_name}") # shared decoder -> to batch dim # (N_OUT x B, Y, X, F)
+                        up = NConvToBatch2D(n_conv = n_out, filters = attention_filters, name = f"FeatureConv{decoder_name}{output_name}")(combined_features) # (N_OUT x B, Y, X, F)
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
                             up = l([up, res if skip else None])
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
-                        # up = tf.reshape(up, shape = [n_out, -1]+up.shape.as_list()[-3:]) # (N_OUT, B, Y, X, F)
-                        # up = tf.transpose(up, perm=[1, 2, 3, 4, 0])
-                        # shape = up.shape.as_list()
-                        # up = tf.keras.layers.Reshape( shape[1:-2] + [ shape[-1] * shape[-2] ], name = layer_output_name)(up) # use keras layer to name output
                         up = BatchToChannel2D(n_splits = n_out, name = layer_output_name)(up)
                         outputs.append(up)
         return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_contours = False, predict_center=predict_center, spatial_dims=spatial_dims, **kwargs)
