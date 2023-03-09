@@ -55,12 +55,12 @@ DECODER_SETTINGS_DS = [
 
 class DistnetModel(Model):
     def __init__(self, *args, spatial_dims,
-        edm_loss_weight=1, edm_lovasz_loss_weight=1, edm_lovasz_label_loss_weight=0,
-        contour_loss_weight = 1,
-        center_loss_weight=1, center_lovasz_loss_weight=1, center_unicity_loss_weight=1,
-        displacement_loss_weight=1, displacement_lovasz_loss_weight=0,
-        center_displacement_loss_weight=1e-1, center_displacement_grad_weight_center:float=1e-1, center_displacement_grad_weight_displacement:float=1e-1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
-        category_loss_weight=1,
+        edm_loss_weight:float=1, edm_lovasz_loss_weight:float=1, edm_lovasz_label_loss_weight:float=0,
+        contour_loss_weight:float = 1,
+        center_loss_weight:float=1, center_lovasz_loss_weight:float=1, center_unicity_loss_weight:float=1e-1,
+        displacement_loss_weight:float=1, displacement_lovasz_loss_weight:float=0,
+        center_displacement_loss_weight:float=1e-1, center_displacement_grad_weight_center:float=1e-1, center_displacement_grad_weight_displacement:float=1e-1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
+        category_loss_weight:float=1,
         center_scale:float=0, # 0 : computed automatically
         edm_loss=MeanSquaredErrorSampleWeightChannel(),
         center_loss = MeanSquaredError(),
