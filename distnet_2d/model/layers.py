@@ -367,8 +367,8 @@ class BatchToChannel2D(Layer):
 
     def call(self, input): #(N x B, Y, X, C)
         input = tf.reshape(input, shape = self.target_shape1) # (N, B, Y, X, F)
-        input = tf.transpose(input, perm=[1, 2, 3, 4, 0]) # (B, Y, X, F, N)
-        return tf.reshape(input, self.target_shape2) # (B, Y, X, F x N)
+        input = tf.transpose(input, perm=[1, 2, 3, 0, 4]) # (B, Y, X, N, F)
+        return tf.reshape(input, self.target_shape2) # (B, Y, X, N x F)
 
 class Combine(Layer):
     def __init__(
