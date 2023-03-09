@@ -297,6 +297,55 @@ class ApplyChannelWise(Layer):
             channels = [self.op(c) for c in channels]
             return self.concat(channels)
 
+class ChannelToBatch2D(Layer):
+    def __init__(self,name: str="ChannelToBatch2D"):
+        super().__init__(name=name)
+
+    def build(self, input_shape):
+        self.target_shape = [-1, input_shape[1], input_shape[2]]
+
+    def call(self, input):
+        input = tf.transpose(input, perm=[3, 0, 1, 2]) # (C, B, Y, X)
+        input = tf.reshape(input, self.target_shape) # (C x B, Y, X)
+        return tf.expand_dims(input, -1) # (C x B, Y, X, 1)
+
+class SplitBatch2D(Layer):
+    def __init__(self, n_splits:int, name:str="SplitBatch2D"):
+        self.n_splits=n_splits
+        super().__init__(name=name)
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"n_splits": self.n_splits})
+      return config
+
+    def build(self, input_shape):
+        self.target_shape = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
+
+    def call(self, input): #(N x B, Y, X, C)
+        input = tf.reshape(input, self.target_shape) # (B, N, Y, X, C)
+        splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
+        return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
+
+class BatchToChannel2D(Layer):
+    def __init__(self, n_splits:int, name:str="SplitBatchToChannel2DBatch2D"):
+        self.n_splits=n_splits
+        super().__init__(name=name)
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"n_splits": self.n_splits})
+      return config
+
+    def build(self, input_shape):
+        self.target_shape1 = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
+        self.target_shape2 = [-1, input_shape[1], input_shape[2], self.n_splits * input_shape[-1]]
+
+    def call(self, input): #(N x B, Y, X, C)
+        input = tf.reshape(input, shape = self.target_shape1) # (N, B, Y, X, F)
+        input = tf.transpose(input, perm=[1, 2, 3, 4, 0]) # (B, Y, X, F, N)
+        return tf.reshape(input, self.target_shape2) # (B, Y, X, F x N)
+
 class Combine(Layer):
     def __init__(
             self,
@@ -580,10 +629,10 @@ class Conv2DTransposeBNDrop(Layer):
     def __init__(
             self,
             filters:int,
-            kernel_size: int=3,
-            strides: int = 1,
+            kernel_size: int=4,
+            strides: int = 2,
             dropout_rate:float = 0,
-            batch_norm : bool = True,
+            batch_norm : bool = False,
             activation:str = "relu",
             name: str="ResConv2D",
     ):
