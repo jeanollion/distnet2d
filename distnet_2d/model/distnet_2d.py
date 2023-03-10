@@ -387,7 +387,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for op in feature_convs:
             feature = op(feature)
 
-        all_features = SplitBatch2D(n_chan, compensate_gradient = True, name = "SplitFeatures")(feature)
+        all_features = SplitBatch2D(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
         combined_features = combine_features_op(all_features)
         if attention:
             attention_result = []

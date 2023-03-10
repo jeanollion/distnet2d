@@ -315,22 +315,28 @@ class NConvToBatch2D(Layer):
         self.convs = [
             Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
         for i in range(self.n_conv)]
-        self.grad_fun = get_grad_weight_fun(float(self.n_conv))
+        if self.compensate_gradient:
+            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
+            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
         super().build(input_shape)
 
-    def call(self, input):
+    def call(self, input): # (B, Y, X, F)
+        # input = get_print_grad_fun(f"{self.name} before split")(input)
+        if self.compensate_gradient:
+            input = self.grad_fun_inv(input)
         if self.inference_mode: # only produce one output
             conv_idx = (len(self.convs)-1) // 2 if self.next else -1
             return self.convs[conv_idx](input)
         inputs = [conv(input) for conv in self.convs] # N x (B, Y, X, F)
-        #inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
+        # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
         output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
-        output = self.grad_fun(output) # compensate gradients
-        #output = get_print_grad_fun(f"{self.name} after concat")(output)
+        if self.compensate_gradient:
+            output = self.grad_fun(output) # compensate gradients to have same level in
+        # output = get_print_grad_fun(f"{self.name} after concat")(output)
         return output
 
 class ChannelToBatch2D(Layer):
-    def __init__(self, compensate_gradient:bool = True, name: str="ChannelToBatch2D"):
+    def __init__(self, compensate_gradient:bool = False, name: str="ChannelToBatch2D"):
         self.compensate_gradient=compensate_gradient
         super().__init__(name=name)
 
@@ -353,7 +359,7 @@ class ChannelToBatch2D(Layer):
         return tf.expand_dims(input, -1) # (C x B, Y, X, 1)
 
 class SplitBatch2D(Layer):
-    def __init__(self, n_splits:int, compensate_gradient:bool = True, name:str="SplitBatch2D"):
+    def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="SplitBatch2D"):
         self.n_splits=n_splits
         self.compensate_gradient=compensate_gradient
         super().__init__(name=name)
@@ -372,7 +378,7 @@ class SplitBatch2D(Layer):
     def call(self, input): #(N x B, Y, X, C)
         #input = get_print_grad_fun(f"{self.name} before split")(input)
         if self.compensate_gradient:
-            input = self.grad_fun(input) # compensate gradient reduction = sum / batch
+            input = self.grad_fun(input) # so that gradient are averaged over N (number of frames)
         input = tf.reshape(input, self.target_shape) # (B, N, Y, X, C)
         splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
         #splits[0] = get_print_grad_fun(f"{self.name} after split")(splits[0])
