@@ -28,9 +28,9 @@ class ASABlend():
             {"op":"res2d", "dilation":2, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
         ]
         self.feature_blending_settings = [
-            {"op":"res2d", "kernel_size":5, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
-            {"op":"res2d", "kernel_size":5, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
-            {"op":"res2d", "kernel_size":5, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
+            {"op":"res2d", "dilation":2, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
+            {"op":"res2d", "dilation":2, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
+            {"op":"res2d", "dilation":2, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
         ]
 
         self.decoder_settings = [

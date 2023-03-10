@@ -374,7 +374,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                 oi += 1
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
-        input_merged = ChannelToBatch2D("MergeInputs")(input)
+        input_merged = ChannelToBatch2D(compensate_gradient = False, name = "MergeInputs")(input)
         downsampled = [input_merged]
         residuals = []
         for l in encoder_layers:
@@ -387,7 +387,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for op in feature_convs:
             feature = op(feature)
 
-        all_features = SplitBatch2D(n_chan, "SplitFeatures")(feature)
+        all_features = SplitBatch2D(n_chan, compensate_gradient = True, name = "SplitFeatures")(feature)
         combined_features = combine_features_op(all_features)
         if attention:
             attention_result = []
@@ -409,11 +409,11 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
                         skip = skip_per_decoder[decoder_name]
-                        up = NConvToBatch2D(n_conv = n_out, filters = feature_filters, next = next, name = f"FeatureConv{decoder_name}{output_name}")(combined_features) # (N_OUT x B, Y, X, F)
+                        up = NConvToBatch2D(compensate_gradient = True, n_conv = n_out, filters = feature_filters, next = next, name = f"FeatureConv{decoder_name}{output_name}")(combined_features) # (N_OUT x B, Y, X, F)
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
                             up = l([up, res if skip else None])
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
-                        up = BatchToChannel2D(n_splits = n_out, name = layer_output_name)(up)
+                        up = BatchToChannel2D(n_splits = n_out, compensate_gradient = False, name = layer_output_name)(up)
                         outputs.append(up)
         return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_contours = False, predict_center=predict_center, spatial_dims=spatial_dims, **kwargs)
 

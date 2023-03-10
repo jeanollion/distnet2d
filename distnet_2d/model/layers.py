@@ -298,85 +298,139 @@ class ApplyChannelWise(Layer):
             return self.concat(channels)
 
 class NConvToBatch2D(Layer):
-    def __init__(self, n_conv:int, filters:int, inference_mode:bool=False, next:bool=True, name: str="NConvToBatch2D"):
+    def __init__(self, n_conv:int, filters:int, next:bool=True, compensate_gradient:bool = False, name: str="NConvToBatch2D"):
         super().__init__(name=name)
         self.n_conv = n_conv
         self.filters = filters
-        self.inference_mode=inference_mode
+        self.inference_mode=False
         self.next = next
+        self.compensate_gradient=compensate_gradient
 
     def get_config(self):
-      config = super().get_config().copy()
-      config.update({"n_conv": self.n_conv, "filters":self.filters})
-      return config
+        config = super().get_config().copy()
+        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient})
+        return config
 
     def build(self, input_shape):
         self.convs = [
             Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
         for i in range(self.n_conv)]
+        self.grad_fun = get_grad_weight_fun(1./self.n_conv)
         super().build(input_shape)
 
     def call(self, input):
         if self.inference_mode: # only produce one output
             conv_idx = (len(self.convs)-1) // 2 if self.next else -1
             return self.convs[conv_idx](input)
-        inputs = [conv(input) for conv in self.convs]
-        return tf.concat(inputs, axis = 0)
+        inputs = [conv(input) for conv in self.convs] # N x (B, Y, X, F)
+        #inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
+        output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
+        output = self.grad_fun(output) # compensate gradients
+        #output = get_print_grad_fun(f"{self.name} after concat")(output)
+        return output
 
 class ChannelToBatch2D(Layer):
-    def __init__(self,name: str="ChannelToBatch2D"):
+    def __init__(self, compensate_gradient:bool = True, name: str="ChannelToBatch2D"):
+        self.compensate_gradient=compensate_gradient
         super().__init__(name=name)
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"compensate_gradient": self.compensate_gradient})
+        return config
 
     def build(self, input_shape):
         self.target_shape = [-1, input_shape[1], input_shape[2]]
+        if self.compensate_gradient:
+            self.grad_fun = get_grad_weight_fun(1./input_shape[-1])
         super().build(input_shape)
 
-    def call(self, input):
+    def call(self, input): # (B, C, Y, X)
         input = tf.transpose(input, perm=[3, 0, 1, 2]) # (C, B, Y, X)
         input = tf.reshape(input, self.target_shape) # (C x B, Y, X)
+        if self.compensate_gradient:
+            input = self.grad_fun(input)
         return tf.expand_dims(input, -1) # (C x B, Y, X, 1)
 
 class SplitBatch2D(Layer):
-    def __init__(self, n_splits:int, name:str="SplitBatch2D"):
+    def __init__(self, n_splits:int, compensate_gradient:bool = True, name:str="SplitBatch2D"):
         self.n_splits=n_splits
+        self.compensate_gradient=compensate_gradient
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"n_splits": self.n_splits})
+      config.update({"n_splits": self.n_splits, "compensate_gradient":self.compensate_gradient})
       return config
 
     def build(self, input_shape):
         self.target_shape = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
+        if self.compensate_gradient:
+            self.grad_fun = get_grad_weight_fun(float(self.n_splits))
         super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
+        #input = get_print_grad_fun(f"{self.name} before split")(input)
+        if self.compensate_gradient:
+            input = self.grad_fun(input) # compensate gradient reduction = sum / batch
         input = tf.reshape(input, self.target_shape) # (B, N, Y, X, C)
         splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
+        #splits[0] = get_print_grad_fun(f"{self.name} after split")(splits[0])
         return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
 
 class BatchToChannel2D(Layer):
-    def __init__(self, n_splits:int, inference_mode:bool=False, name:str="BatchToChannel2D"):
+    def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="BatchToChannel2D"):
         self.n_splits=n_splits
-        self.inference_mode=inference_mode
+        self.compensate_gradient = compensate_gradient
+        self.inference_mode=False
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"n_splits": self.n_splits})
+      config.update({"n_splits": self.n_splits, "compensate_gradient":self.compensate_gradient})
       return config
 
     def build(self, input_shape):
         self.target_shape1 = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
         self.target_shape2 = [-1, input_shape[1], input_shape[2], self.n_splits * input_shape[-1]]
+        if self.compensate_gradient:
+            self.grad_fun = get_grad_weight_fun(float(self.n_splits))
         super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
         if self.inference_mode:
             return input
+        if self.compensate_gradient:
+            input = self.grad_fun(input) # compensate gradient reduction = sum / batch
         input = tf.reshape(input, shape = self.target_shape1) # (N, B, Y, X, F)
         input = tf.transpose(input, perm=[1, 2, 3, 0, 4]) # (B, Y, X, N, F)
         return tf.reshape(input, self.target_shape2) # (B, Y, X, N x F)
+
+def get_grad_weight_fun(weight):
+    @tf.custom_gradient
+    def wgrad(x):
+        def grad(dy):
+            if isinstance(dy, tuple): #and len(dy)>1
+                #print(f"gradient is tuple of length: {len(dy)}")
+                return (y * weight for y in dy)
+            elif isinstance(dy, list):
+                #print(f"gradient is list of length: {len(dy)}")
+                return [y * weight for y in dy]
+            else:
+                return dy * weight
+        return x, grad
+    return wgrad
+
+def get_print_grad_fun(message):
+    @tf.custom_gradient
+    def wgrad(x):
+        def grad(dy):
+                g_flat = tf.reshape(tf.math.abs(dy), [-1])
+                g_flat = tf.boolean_mask(g_flat, tf.greater(g_flat, 0))
+                print(f"{message} gradient shape: {dy.shape}, non-null: {100 * g_flat.shape[0]/tf.size(dy)}%, value: {tf.math.reduce_mean(g_flat)}")
+                return dy
+        return x, grad
+    return wgrad
 
 class Combine(Layer):
     def __init__(
