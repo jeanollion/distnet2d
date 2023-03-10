@@ -128,9 +128,9 @@ class DistnetModel(Model):
         fw = self.frame_window
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
-        displacement_weight = self.displacement_weight / 2. # y & x
-        displacement_weight /= (fw * (2. if self.next else 1)) # mean per channel # should it be divided by channel ? 
-        category_weight = self.category_weight / (fw * (2. if self.next else 1))
+        displacement_weight = self.displacement_weight #/ 2. # y & x
+        # displacement_weight /= (fw * (2. if self.next else 1)) # mean per channel # should it be divided by channel ?
+        category_weight = self.category_weight #/ (fw * (2. if self.next else 1))
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
         center_weight = self.center_weight
@@ -308,6 +308,21 @@ class DistnetModel(Model):
         # # print(f"losses: {printlosses}")
         # return losses
 
+    def set_inference(self, inference:bool=True):
+        for layer in self.layers:
+            if isinstance(layer, (NConvToBatch2D, BatchToChannel2D)):
+                layer.inference_mode = inference
+
+    def save(self, *args, inference:bool, **kwargs):
+        if inference:
+            self.set_inference(True)
+            self.trainable=False
+            self.compile()
+        super().save(*args, **kwargs)
+        if inference:
+            self.set_inference(False)
+            self.trainable=True
+            self.compile()
 # one encoder per input + one decoder + one last level of decoder per output + custom frame window size
 def get_distnet_2d_sep_out_fw(input_shape, # Y, X
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
@@ -565,8 +580,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
                         skip = skip_per_decoder[decoder_name]
-                        # up = tf.concat([pick_conv_gen(i, decoder_name, output_name)(combined_features) for i in range(n_out)], axis=0, name = f"FeatureConv{decoder_name}{output_name}") # shared decoder -> to batch dim # (N_OUT x B, Y, X, F)
-                        up = NConvToBatch2D(n_conv = n_out, filters = attention_filters, name = f"FeatureConv{decoder_name}{output_name}")(combined_features) # (N_OUT x B, Y, X, F)
+                        up = NConvToBatch2D(n_conv = n_out, filters = attention_filters, next = next, name = f"FeatureConv{decoder_name}{output_name}")(combined_features) # (N_OUT x B, Y, X, F)
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
                             up = l([up, res if skip else None])
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)

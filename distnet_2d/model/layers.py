@@ -298,10 +298,12 @@ class ApplyChannelWise(Layer):
             return self.concat(channels)
 
 class NConvToBatch2D(Layer):
-    def __init__(self, n_conv:int, filters:int, name: str="NConvToBatch2D"):
+    def __init__(self, n_conv:int, filters:int, inference_mode:bool=False, next:bool=True, name: str="NConvToBatch2D"):
         super().__init__(name=name)
         self.n_conv = n_conv
         self.filters = filters
+        self.inference_mode=inference_mode
+        self.next = next
 
     def get_config(self):
       config = super().get_config().copy()
@@ -315,6 +317,9 @@ class NConvToBatch2D(Layer):
         super().build(input_shape)
 
     def call(self, input):
+        if self.inference_mode: # only produce one output
+            conv_idx = (len(self.convs)-1) // 2 if self.next else -1
+            return self.convs[conv_idx](input)
         inputs = [conv(input) for conv in self.convs]
         return tf.concat(inputs, axis = 0)
 
@@ -351,8 +356,9 @@ class SplitBatch2D(Layer):
         return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
 
 class BatchToChannel2D(Layer):
-    def __init__(self, n_splits:int, name:str="SplitBatchToChannel2DBatch2D"):
+    def __init__(self, n_splits:int, inference_mode:bool=False, name:str="BatchToChannel2D"):
         self.n_splits=n_splits
+        self.inference_mode=inference_mode
         super().__init__(name=name)
 
     def get_config(self):
@@ -366,6 +372,8 @@ class BatchToChannel2D(Layer):
         super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
+        if self.inference_mode:
+            return input
         input = tf.reshape(input, shape = self.target_shape1) # (N, B, Y, X, F)
         input = tf.transpose(input, perm=[1, 2, 3, 0, 4]) # (B, Y, X, N, F)
         return tf.reshape(input, self.target_shape2) # (B, Y, X, N x F)
