@@ -145,10 +145,10 @@ def _distance_loss():
         d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C, N)
         #print(f"n_obj: {n_obj} \ndistances: \n{d} \nsize: \n{size}")
         #d = tf.math.divide_no_nan(d, size)
-        return tf.math.reduce_sum(d, keepdims=False)
-        #d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C)
-        #d = tf.math.divide_no_nan(d, n_obj)
-        #return tf.math.reduce_sum(d) # sum over channel
+        #return tf.math.reduce_sum(d, keepdims=False)
+        d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C)
+        d = tf.math.divide_no_nan(d, n_obj) # mean per object
+        return tf.math.reduce_sum(d) # sum over channel
     return loss
 
 def _center_spread_loss(spatial_dims):
