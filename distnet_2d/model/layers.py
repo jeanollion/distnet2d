@@ -315,7 +315,7 @@ class NConvToBatch2D(Layer):
         self.convs = [
             Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
         for i in range(self.n_conv)]
-        self.grad_fun = get_grad_weight_fun(1./self.n_conv)
+        self.grad_fun = get_grad_weight_fun(float(self.n_conv))
         super().build(input_shape)
 
     def call(self, input):
@@ -342,7 +342,7 @@ class ChannelToBatch2D(Layer):
     def build(self, input_shape):
         self.target_shape = [-1, input_shape[1], input_shape[2]]
         if self.compensate_gradient:
-            self.grad_fun = get_grad_weight_fun(1./input_shape[-1])
+            self.grad_fun = get_grad_weight_fun(float(input_shape[-1]))
         super().build(input_shape)
 
     def call(self, input): # (B, C, Y, X)
@@ -366,7 +366,7 @@ class SplitBatch2D(Layer):
     def build(self, input_shape):
         self.target_shape = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
         if self.compensate_gradient:
-            self.grad_fun = get_grad_weight_fun(float(self.n_splits))
+            self.grad_fun = get_grad_weight_fun(1./self.n_splits)
         super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
@@ -394,14 +394,14 @@ class BatchToChannel2D(Layer):
         self.target_shape1 = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
         self.target_shape2 = [-1, input_shape[1], input_shape[2], self.n_splits * input_shape[-1]]
         if self.compensate_gradient:
-            self.grad_fun = get_grad_weight_fun(float(self.n_splits))
+            self.grad_fun = get_grad_weight_fun(1./self.n_splits)
         super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
         if self.inference_mode:
             return input
         if self.compensate_gradient:
-            input = self.grad_fun(input) # compensate gradient reduction = sum / batch
+            input = self.grad_fun(input)
         input = tf.reshape(input, shape = self.target_shape1) # (N, B, Y, X, F)
         input = tf.transpose(input, perm=[1, 2, 3, 0, 4]) # (B, Y, X, N, F)
         return tf.reshape(input, self.target_shape2) # (B, Y, X, N x F)

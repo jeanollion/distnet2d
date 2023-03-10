@@ -3,8 +3,15 @@ import tensorflow.keras.backend as K
 import numpy as np
 
 class MeanSquaredErrorChannel(tf.keras.losses.Loss):
-  def call(self, y_true, y_pred):
-    return tf.math.square(y_pred - y_true)
+    def call(self, y_true, y_pred):
+        return tf.math.square(y_pred - y_true)
+
+def l2():
+    def loss(y_true, y_pred):
+        d2 = tf.math.square(y_pred - y_true)
+        d2 = tf.math.reduce_sum(d2, axis=[1, 2, 3], keepdims=False)
+        return tf.math.reduce_mean(d2, keepdims = False)
+    return loss
 
 def ssim_loss(max_val = 1, filter_size=11, filter_sigma=1.5, k1=0.01, k2=0.03):
     def loss_fun(y_true, y_pred):

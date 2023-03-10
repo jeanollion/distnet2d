@@ -62,17 +62,6 @@ def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, 
             if tf.shape(unique_labs)[0]>1:
                 accum = accum / tf.cast(tf.shape(unique_labs)[0]-1, tf.float32)
             return accum
-            #unique_labs = tf.boolean_mask(unique_labs, tf.math.greater(unique_labs, 0))
-            # unique_labs = unique_labs[unique_labs != 0]
-            # def treat_label(label):
-            #     valid = tf.equal(lab, label)
-            #     vscores = tf.boolean_mask(log, valid)
-            #     vlabels = tf.boolean_mask(lab, valid)
-            #     return lovasz_hinge_flat(vscores, vlabels)
-            # loss_per_label = tf.cond(tf.equal(tf.shape(unique_labs)[0], 0),
-            #                lambda: tf.convert_to_tensor([0.], tf.float32),
-            #                lambda: tf.map_fn(treat_label, unique_labs, fn_output_signature=tf.float32) )
-            return tf.reduce_mean(loss_per_label)
         shape = tf.shape(labels)
         if per_object or channel_axis:
             labels = trans(labels, shape)
@@ -80,10 +69,8 @@ def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, 
         if per_label:
             assert not per_object, "per label is incompatible with per object option"
         losses = tf.map_fn(treat_image_per_label if per_label else treat_image, (logits, labels), fn_output_signature=tf.float32)
-        if channel_axis:
-            losses = losses * tf.cast(shape[-1], tf.float32) # average per batch but not per channel
-        # if per_object or or:
-        #     losses = utrans(losses, shape)
+        # if channel_axis:
+        #     losses = losses * tf.cast(shape[-1], tf.float32) # average per batch but not per channel
     else:
         losses = lovasz_hinge_flat(*flatten_binary_scores(logits, labels, ignore))
     return tf.reduce_mean(losses)

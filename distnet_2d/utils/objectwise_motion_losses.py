@@ -148,7 +148,7 @@ def _distance_loss():
         #return tf.math.reduce_sum(d, keepdims=False)
         d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C)
         d = tf.math.divide_no_nan(d, n_obj) # mean per object
-        return tf.math.reduce_sum(d) # sum over channel
+        return tf.math.reduce_mean(d) # mean over channel
     return loss
 
 def _center_spread_loss(spatial_dims):

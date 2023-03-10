@@ -1,6 +1,6 @@
 class ASABlend():
     def __init__(self):
-        self.name = "asa_blend"
+        self.name = "asa-blend"
         self.attention = True
         self.combine_kernel_size = 1
         self.downsampling_mode="maxpool_and_stride"
