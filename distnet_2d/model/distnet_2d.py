@@ -10,7 +10,7 @@ import numpy as np
 from .attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
-from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorSampleWeightChannel
+from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorChannel
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
@@ -26,9 +26,9 @@ class DistnetModel(Model):
         center_displacement_loss_weight:float=1e-1, center_displacement_grad_weight_center:float=1e-1, center_displacement_grad_weight_displacement:float=1e-1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
         category_loss_weight:float=1,
         center_scale:float=0, # 0 : computed automatically
-        edm_loss=MeanSquaredErrorSampleWeightChannel(),
-        center_loss = MeanSquaredError(),
-        displacement_loss = MeanSquaredErrorSampleWeightChannel(),
+        edm_loss=MeanSquaredErrorChannel(),
+        center_loss = MeanSquaredErrorChannel(),
+        displacement_loss = MeanSquaredErrorChannel(),
         category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
         category_class_frequency_range=[1/10, 10],
         next = True,
@@ -236,7 +236,7 @@ class DistnetModel(Model):
                             if g is not None:
                                 g = g * w
                                 #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
-                                print(f"layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
+                                print(f"layer: {v.name}, loss: {loss_name}, value: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}] shape: {g.shape}")
                         if self.use_agc:
                             gradients = adaptive_clip_grad(trainable_vars_tape, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords, grad_scale = w)
                             for v, g in zip(trainable_vars_tape, gradients):

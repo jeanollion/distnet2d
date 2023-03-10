@@ -80,6 +80,8 @@ def lovasz_hinge(logits, labels, per_image=True, ignore=None, per_object=False, 
         if per_label:
             assert not per_object, "per label is incompatible with per object option"
         losses = tf.map_fn(treat_image_per_label if per_label else treat_image, (logits, labels), fn_output_signature=tf.float32)
+        if channel_axis:
+            losses = losses * tf.cast(shape[-1], tf.float32) # average per batch but not per channel
         # if per_object or or:
         #     losses = utrans(losses, shape)
     else:

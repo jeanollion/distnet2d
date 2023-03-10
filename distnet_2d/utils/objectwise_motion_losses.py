@@ -3,23 +3,28 @@ from .coordinate_op_2d import get_weighted_mean_2d_fun, get_center_distance_spre
 from ..model.layers import WeigthedGradient
 import numpy as np
 
+def get_grad_weight_fun(weight):
+    @tf.custom_gradient
+    def wgrad(x):
+        def grad(dy):
+            if isinstance(dy, tuple): #and len(dy)>1
+                #print(f"gradient is tuple of length: {len(dy)}")
+                return (y * weight for y in dy)
+            elif isinstance(dy, list):
+                #print(f"gradient is list of length: {len(dy)}")
+                return [y * weight for y in dy]
+            else:
+                return dy * weight
+        return x, grad
+    return wgrad
+
 def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, center_motion:bool = True, center_unicity:bool=True):
     nan = tf.cast(float('NaN'), tf.float32)
     pi = tf.cast(np.pi, tf.float32)
     motion_loss_fun = _distance_loss()
     center_fun = get_weighted_mean_2d_fun(spatial_dims, True, batch_axis = False, keepdims = False)
-    @tf.custom_gradient
-    def wgrad_c(x):
-        def grad(dy):
-            return dy * center_displacement_grad_weight_center
-        return x, grad
-    @tf.custom_gradient
-    def wgrad_d(x):
-        def grad(dy):
-            #print(f"grad displacement: {dy}")
-            return dy * center_displacement_grad_weight_displacement
-        return x, grad
-
+    wgrad_c = get_grad_weight_fun(center_displacement_grad_weight_center)
+    wgrad_d = get_grad_weight_fun(center_displacement_grad_weight_displacement)
     @tf.function
     def fun(args):
         dY, dX, center, true_center, labels, prev_labels = args
@@ -140,9 +145,10 @@ def _distance_loss():
         d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C, N)
         #print(f"n_obj: {n_obj} \ndistances: \n{d} \nsize: \n{size}")
         #d = tf.math.divide_no_nan(d, size)
-        d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C)
-        d = tf.math.divide_no_nan(d, n_obj)
-        return tf.math.reduce_mean(d)
+        return tf.math.reduce_sum(d, keepdims=False)
+        #d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C)
+        #d = tf.math.divide_no_nan(d, n_obj)
+        #return tf.math.reduce_sum(d) # sum over channel
     return loss
 
 def _center_spread_loss(spatial_dims):

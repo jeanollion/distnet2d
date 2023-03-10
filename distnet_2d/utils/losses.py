@@ -2,7 +2,7 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 import numpy as np
 
-class MeanSquaredErrorSampleWeightChannel(tf.keras.losses.Loss):
+class MeanSquaredErrorChannel(tf.keras.losses.Loss):
   def call(self, y_true, y_pred):
     return tf.math.square(y_pred - y_true)
 
