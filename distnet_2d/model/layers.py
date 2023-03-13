@@ -445,18 +445,19 @@ class Combine(Layer):
             kernel_size: int=1,
             weight_scaled:bool = False,
             activation: str="relu",
-            #l2_reg: float=1e-5,
+            compensate_gradient:bool = False,
             name: str="Combine",
         ):
         self.activation = activation
         self.filters= filters
         self.kernel_size=kernel_size
         self.weight_scaled = weight_scaled
+        self.compensate_gradient = compensate_gradient
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "weight_scaled":self.weight_scaled})
+      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "weight_scaled":self.weight_scaled, "compensate_gradient":self.compensate_gradient})
       return config
 
     def build(self, input_shape):
@@ -467,7 +468,6 @@ class Combine(Layer):
                 kernel_size=self.kernel_size,
                 padding='same',
                 activation=self.activation,
-                use_bias=True,
                 name="Conv1x1")
         else:
             self.combine_conv = Conv2D(
@@ -475,14 +475,20 @@ class Combine(Layer):
                 kernel_size=self.kernel_size,
                 padding='same',
                 activation=self.activation,
-                use_bias=True,
-                # kernel_regularizer=tf.keras.regularizers.l2(l2_reg),
                 name="Conv1x1")
+        if self.compensate_gradient:
+            self.grad_fun = get_grad_weight_fun(1./len(input_shape))
         super().build(input_shape)
 
     def call(self, input):
+        # for i in range(len(input)):
+            # input[i] = get_print_grad_fun(f"{self.name} before combine {i}")(input[i])
         x = self.concat(input)
+        # x = get_print_grad_fun(f"{self.name} before before concat")(x)
+        if self.compensate_gradient:
+            x = self.grad_fun(x)
         x = self.combine_conv(x)
+        # x = get_print_grad_fun(f"{self.name} before before conv")(x)
         return x
 
 class WeigthedGradient(tf.keras.layers.Layer):

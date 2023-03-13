@@ -224,7 +224,7 @@ class DistnetModel(Model):
                         loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
 
         if self.grad_writer is not None:
-            trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY") or t.name.startswith("DecoderCat0")) and "/kernel" in t.name]
+            trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
             with self.grad_writer.as_default(step=self._train_counter):
                 for loss_name, loss_value in losses.items():
                     if loss_name != "loss" :
@@ -334,10 +334,10 @@ def get_distnet_2d_erf(input_shape, # Y, X
         # define feature operations
         feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", last_input_filters=out_filters)
         combine_filters = int(feature_filters * n_chan / 2.)
-        combine_features_op = Combine(filters=combine_filters, name="CombineFeatures")
+        combine_features_op = Combine(filters=combine_filters, compensate_gradient = True, name="CombineFeatures")
         if attention:
             attention_op = SpatialAttention2D(positional_encoding="2D", name="Attention")
-            attention_combine = Combine(filters=combine_filters, name="AttentionCombine")
+            attention_combine = Combine(filters=combine_filters, compensate_gradient = True, name="AttentionCombine")
             attention_skip_op = Combine(filters=combine_filters, name="AttentionSkip")
         for f in feature_blending_settings:
             if "filters" not in f or f["filters"]<0:

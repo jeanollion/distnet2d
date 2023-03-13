@@ -28,7 +28,7 @@ class SpatialAttention2D(Layer):
             self.filters = input_shape[-1]
         self.wq = Dense(self.filters, name="Q")
         self.wk = Dense(self.filters, name="K")
-        self.wv = Dense(self.filters, name="W")
+        self.wv = Dense(self.filters, name="V")
         if self.positional_encoding=="2D":
             self.pos_embedding_y = Embedding(self.spatial_dims[0], input_shape[-1], name="PosEncY")
             self.pos_embedding_x = Embedding(self.spatial_dims[1], input_shape[-1], name="PosEncX")
