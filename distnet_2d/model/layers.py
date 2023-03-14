@@ -298,17 +298,17 @@ class ApplyChannelWise(Layer):
             return self.concat(channels)
 
 class NConvToBatch2D(Layer):
-    def __init__(self, n_conv:int, filters:int, next:bool=True, compensate_gradient:bool = False, name: str="NConvToBatch2D"):
+    def __init__(self, n_conv:int, inference_conv_idx:int, filters:int, compensate_gradient:bool = False, name: str="NConvToBatch2D"):
         super().__init__(name=name)
         self.n_conv = n_conv
         self.filters = filters
         self.inference_mode=False
-        self.next = next
+        self.inference_conv_idx=inference_conv_idx
         self.compensate_gradient=compensate_gradient
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient})
+        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient, "inference_conv_idx":self.inference_conv_idx})
         return config
 
     def build(self, input_shape):
@@ -321,12 +321,12 @@ class NConvToBatch2D(Layer):
         super().build(input_shape)
 
     def call(self, input): # (B, Y, X, F)
+        if self.inference_mode: # only produce one output
+            return self.convs[self.inference_conv_idx](input)
         # input = get_print_grad_fun(f"{self.name} before split")(input)
         if self.compensate_gradient:
             input = self.grad_fun_inv(input)
-        if self.inference_mode: # only produce one output
-            conv_idx = (len(self.convs)-1) // 2 if self.next else -1
-            return self.convs[conv_idx](input)
+
         inputs = [conv(input) for conv in self.convs] # N x (B, Y, X, F)
         # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
         output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)

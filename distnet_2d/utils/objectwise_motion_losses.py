@@ -18,16 +18,25 @@ def get_grad_weight_fun(weight):
         return x, grad
     return wgrad
 
-def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, center_motion:bool = True, center_unicity:bool=True):
+def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, next:bool, frame_window:int, long_term:bool=False, center_motion:bool = True, center_unicity:bool=True):
     nan = tf.cast(float('NaN'), tf.float32)
     pi = tf.cast(np.pi, tf.float32)
     motion_loss_fun = _distance_loss()
     center_fun = get_weighted_mean_2d_fun(spatial_dims, True, batch_axis = False, keepdims = False)
     wgrad_c = get_grad_weight_fun(center_displacement_grad_weight_center)
     wgrad_d = get_grad_weight_fun(center_displacement_grad_weight_displacement)
+    fw = frame_window
+    n_chan = 2 * frame_window + 1 if next else frame_window + 1
     @tf.function
     def fun(args):
         dY, dX, center, true_center, labels, prev_labels = args
+        if long_term:
+            dY_lt = dY[...,n_chan-1:]
+            dX_lt = dX[...,n_chan-1:]
+            prev_labels_lt = prev_labels[...,n_chan-1:,:]
+            dY = dY[...,:n_chan-1]
+            dX = dX[...,:n_chan-1]
+            prev_labels=prev_labels[...,:n_chan-1,:]
         label_rank, label_size, N = _get_label_rank_and_size(labels, batch_axis=False)
         dYm = _get_mean_by_object(dY, label_rank[...,1:,:], label_size[...,1:,:]) # T-1, N
         dXm = _get_mean_by_object(dX, label_rank[...,1:,:], label_size[...,1:,:]) # T-1, N
@@ -84,8 +93,41 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 if d<motion_range-1:
                     prev_idx = prev_idx[:-1] # (T-1-d-1, N)
                     has_prev = has_prev[:-1] # (T-1-d-1, N)
+            if long_term:
+                def sel(tensor, tile):
+                    tensor_p = tf.tile(tensor[...,fw:fw+1, :], tile)
+                    if next:
+                        return tf.concat([tensor_p, tensor[...,fw+2:, :]], -2)
+                    else:
+                        return tensor_p
+                label_rank = sel(label_rank, tile=[1, 1, fw-1, 1])
+                label_size = sel(label_size, tile=[fw-1, 1])
+                dYm = _get_mean_by_object(dY_lt, label_rank, label_size) # T-2, N
+                dXm = _get_mean_by_object(dX_lt, label_rank, label_size) # T-2, N
+                dm = tf.stack([dYm, dXm], -1) # (T-2, N, 2)
+                dm=wgrad_d(dm)
+                prev_labels = prev_labels_lt[...,:N] # (T-2, N) # trim from (T-2, Nmax)
+                has_prev = tf.math.greater(prev_labels, 0)
+                prev_idx = tf.cast(has_prev, tf.int32) * (prev_labels-1)
+                has_prev_ = tf.expand_dims(has_prev, -1)
 
-            motion_loss = tf.divide(motion_loss, tf.cast(motion_range, motion_loss.dtype))
+                # move next so that it corresponds to prev
+                center_ob_cur = tf.tile(center_ob[fw:fw+1], [fw-1, 1, 1])
+                if next:
+                    center_ob_cur = tf.concat([center_ob_cur, center_ob[fw+2:]], 0)
+                center_ob_cur_trans = center_ob_cur - dm # (T-2, N, 2)
+                center_ob_prev = center_ob[:fw-1]
+                if next:
+                    center_ob_prev_n = tf.tile(center_ob[fw:fw+1], [fw-1, 1, 1])
+                    center_ob_prev = tf.concat([center_ob_prev, center_ob_prev_n], 0)
+                center_ob_prev = tf.gather(center_ob_prev, indices=prev_idx, batch_dims=1, axis=1) # (T-2, N, 2)
+                center_ob_prev = tf.where(has_prev_, center_ob_prev, nan)
+                motion_loss = motion_loss + motion_loss_fun(center_ob_prev, center_ob_cur_trans) #label_size_cur
+
+            norm = motion_range
+            if long_term:
+                norm = norm + 1
+            motion_loss = tf.divide(motion_loss, tf.cast(norm, motion_loss.dtype))
             motion_loss = tf.cond(tf.math.is_nan(motion_loss), lambda : tf.cast(0, motion_loss.dtype), lambda : motion_loss)
 
         if center_motion and center_unicity:

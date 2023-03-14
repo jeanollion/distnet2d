@@ -35,6 +35,7 @@ class DistnetModel(Model):
         frame_window = 1,
         predict_contours = False,
         predict_center = False,
+        long_term:bool = False,
         gradient_safe_mode = False,
         gradient_log_dir:str=None,
         accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False,
@@ -61,7 +62,7 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         self.contour_loss = MeanSquaredError()
         self.displacement_loss = displacement_loss
-        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_scale=center_scale, center_motion = center_displacement_loss_weight>0, center_unicity=center_unicity_loss_weight>0)
+        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_scale=center_scale, next = next, frame_window=frame_window, long_term=long_term, center_motion = center_displacement_loss_weight>0, center_unicity=center_unicity_loss_weight>0)
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
@@ -71,6 +72,7 @@ class DistnetModel(Model):
             self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
 
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
+        self.long_term = long_term
         self.use_grad_acc = accum_steps>1
         self.accum_steps = float(accum_steps)
         if self.use_grad_acc or use_agc:
@@ -178,8 +180,15 @@ class DistnetModel(Model):
 
             #regression displacement loss
             if displacement_weight>0:
-                dy_inside=tf.where(tf.math.greater(y[0][...,1:], 0), y_pred[1+inc], 0) # do not predict anything outside
-                dx_inside=tf.where(tf.math.greater(y[0][...,1:], 0), y_pred[2+inc], 0) # do not predict anything outside
+                mask = tf.math.greater(y[0][...,1:], 0)
+                if self.long_term and fw>1:
+                    mask_lt = tf.tile(mask[...,fw-1:fw], [1, 1, 1, fw-1])
+                    if self.next:
+                        mask = tf.concat([mask, mask_lt, mask[...,fw+1:]], -1)
+                    else:
+                        mask = tf.concat([mask, mask_lt], -1)
+                dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
+                dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
                 d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
                 losses["displacement"] = d_loss
                 loss_weights["displacement"] = displacement_weight
@@ -310,6 +319,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
             attention : bool = True,
             frame_window:int = 1,
             next:bool=True,
+            long_term:bool = False,
             predict_center = True,
             name: str="DiSTNet2D",
             **kwargs,
@@ -319,6 +329,8 @@ def get_distnet_2d_erf(input_shape, # Y, X
         spatial_dims = ensure_multiplicity(2, input_shape)
         if isinstance(spatial_dims, tuple):
             spatial_dims = list(spatial_dims)
+        if frame_window<=1:
+            long_term = False
         n_chan = frame_window * (2 if next else 1) + 1
         # define enconder operations
         encoder_layers = []
@@ -348,7 +360,10 @@ def get_distnet_2d_erf(input_shape, # Y, X
         decoder_layers={"Seg":[], "Center":[], "Track":[], "Cat":[]}
         decoder_out={"Seg":{}, "Center":{}, "Track":{}, "Cat":{}}
         output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"], "Cat": ["Cat"]}
-        n_output_per_decoder = {"Seg": n_chan, "Center": n_chan if predict_center else 0, "Track": n_chan-1, "Cat": n_chan-1}
+        n_motion = n_chan -1
+        if long_term:
+            n_motion = n_motion + (frame_window-1) * (2 if next else 1)
+        n_output_per_decoder = {"Seg": [n_chan, frame_window], "Center": [n_chan, frame_window] if predict_center else [0, 0], "Track": [n_motion, frame_window-1], "Cat": [n_motion, frame_window-1]}
         skip_per_decoder = {"Seg": skip_connections, "Center": False, "Track": False, "Cat": False}
         output_inc = 0
         seg_out = ["Output0_EDM"]
@@ -393,7 +408,12 @@ def get_distnet_2d_erf(input_shape, # Y, X
             attention_result = []
             for i in range(1, n_chan):
                 attention_result.append(attention_op([all_features[i-1], all_features[i]]))
-            # TODO: add long ranges: 0 <- mid & mid <- last ?
+            if long_term:
+                for c in range(0, frame_window-1):
+                    attention_result.append(attention_op([all_features[c], all_features[frame_window]]))
+                if next:
+                    for c in range(frame_window+2, n_chan):
+                        attention_result.append(attention_op([all_features[frame_window], all_features[c]]))
             attention = attention_combine(attention_result)
             combined_features = attention_skip_op([attention, combined_features])
 
@@ -401,7 +421,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
             combined_features = op(combined_features)
 
         outputs = []
-        for decoder_name, n_out in n_output_per_decoder.items():
+        for decoder_name, [n_out, out_idx] in n_output_per_decoder.items():
             if n_out>0:
                 d_layers = decoder_layers[decoder_name]
                 for output_name in output_per_decoder[decoder_name]:
@@ -409,13 +429,13 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
                         skip = skip_per_decoder[decoder_name]
-                        up = NConvToBatch2D(compensate_gradient = True, n_conv = n_out, filters = feature_filters, next = next, name = f"FeatureConv{decoder_name}{output_name}")(combined_features) # (N_OUT x B, Y, X, F)
+                        up = NConvToBatch2D(compensate_gradient = True, n_conv = n_out, inference_conv_idx=out_idx, filters = feature_filters, name = f"FeatureConv{decoder_name}{output_name}")(combined_features) # (N_OUT x B, Y, X, F)
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
                             up = l([up, res if skip else None])
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
                         up = BatchToChannel2D(n_splits = n_out, compensate_gradient = False, name = layer_output_name)(up)
                         outputs.append(up)
-        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_contours = False, predict_center=predict_center, spatial_dims=spatial_dims, **kwargs)
+        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_contours = False, predict_center=predict_center, spatial_dims=spatial_dims, long_term=long_term, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"

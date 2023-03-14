@@ -29,8 +29,9 @@ class DyDxIterator(TrackingIterator):
         return_contours = False,
         contour_sigma = 0.5,
         return_center = False,
-        center_mode = "GEOMETRICAL", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
+        center_mode = "MEDOID", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
         return_label_rank = False,
+        long_term:bool = False,
         output_float16=False,
         **kwargs):
         assert len(channel_keywords)==3, 'keyword should contain 3 elements in this order: grayscale input images, object labels, object previous labels'
@@ -48,6 +49,7 @@ class DyDxIterator(TrackingIterator):
         assert frame_window>=1, "frame_window must be >=1"
         self.frame_window = frame_window
         self.n_label_max = kwargs.pop("n_label_max", 2000)
+        self.long_term=long_term if self.frame_window>1 else False
         super().__init__(dataset=dataset,
                     channel_keywords=channel_keywords,
                     input_channels=[0],
@@ -142,6 +144,10 @@ class DyDxIterator(TrackingIterator):
             end_point_pairs = [[end_points[i], end_points[i+1]] for i in range(0, self.frame_window)]
             if return_next:
                 end_point_pairs = end_point_pairs + [[end_points[i+self.frame_window], end_points[i+self.frame_window+1]] for i in range(0, self.frame_window)]
+            if self.long_term:
+                end_point_pairs = end_point_pairs + [[end_points[i], end_points[self.frame_window]] for i in range(0, self.frame_window-1)]
+                if return_next:
+                    end_point_pairs = end_point_pairs + [[end_points[self.frame_window], end_points[i+self.frame_window+1]] for i in range(1, self.frame_window)]
             return end_point_pairs
         else:
             return end_points
@@ -155,7 +161,7 @@ class DyDxIterator(TrackingIterator):
             n_frames = self.frame_window
         assert labelIms.shape[-1]==prevlabelIms.shape[-1] and labelIms.shape[-1]==1+n_frames*(2 if return_next else 1), f"invalid channel number: labels: {labelIms.shape[-1]} prev labels: {prevlabelIms.shape[-1]} n_frames: {n_frames}"
         end_point_pairs = self._get_end_points(n_frames, True)
-        # print(f"n_frames: {n_frames}, nchan: {labelIms.shape[-1]}, frame_window: {self.frame_window}, return_next: {return_next}, end_points: {self._get_end_points(n_frames, False)}, end_point_pairs: {end_point_pairs}")
+        #print(f"n_frames: {n_frames}, nchan: {labelIms.shape[-1]}, frame_window: {self.frame_window}, return_next: {return_next}, end_points: {self._get_end_points(n_frames, False)}, end_point_pairs: {end_point_pairs}")
         for b in range(labelIms.shape[0]):
             prev_label_map.append(_compute_prev_label_map(labelIms[b], prevlabelIms[b], end_point_pairs))
         batch_by_channel[-666] = prev_label_map
@@ -186,16 +192,18 @@ class DyDxIterator(TrackingIterator):
         edm = np.zeros(shape = labelIms.shape, dtype=np.float32)
         for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
             edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
-
-        dyIm = np.zeros(labelIms.shape[:-1]+(2 * self.frame_window if return_next else self.frame_window,), dtype=self.dtype)
-        dxIm = np.zeros(labelIms.shape[:-1]+(2 * self.frame_window if return_next else self.frame_window,), dtype=self.dtype)
+        n_motion = 2 * self.frame_window if return_next else self.frame_window
+        if self.long_term:
+            n_motion = n_motion + (2 * ( self.frame_window - 1 ) if return_next else self.frame_window -1)
+        dyIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
+        dxIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
         centerIm = np.zeros(labelIms.shape, dtype=self.dtype) if self.return_center else None
         if self.return_label_rank:
             labelIm = np.zeros(labelIms.shape, dtype=np.int32)
             # noNextArr = np.zeros(labelIms.shape[:1]+(2 * self.frame_window if return_next else self.frame_window, self.n_label_max), dtype=np.bool)
-            prevLabelArr = np.zeros(labelIms.shape[:1]+(2 * self.frame_window if return_next else self.frame_window, self.n_label_max), dtype=np.int32)
+            prevLabelArr = np.zeros(labelIms.shape[:1]+(n_motion, self.n_label_max), dtype=np.int32)
         if self.return_categories:
-            categoryIm = np.zeros(labelIms.shape[:-1]+(2 * self.frame_window if return_next else self.frame_window,), dtype=self.dtype)
+            categoryIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
         labels_map_prev = batch_by_channel[-666]
         batch_size = batch_by_channel[-1]
         if labelIms.shape[0]>batch_size:
@@ -204,7 +212,6 @@ class DyDxIterator(TrackingIterator):
             get_idx = lambda x:x%batch_size # We assume here that the indexing order of tiling is tile x batch
         else:
             get_idx = lambda x:x
-
         for i in range(labelIms.shape[0]):
             bidx = get_idx(i)
             for c in range(0, self.frame_window):
@@ -214,6 +221,15 @@ class DyDxIterator(TrackingIterator):
                 for c in range(self.frame_window, 2*self.frame_window):
                     sel = [c, c+1]#[self.frame_window, c+1]
                     _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], center_mode=self.center_mode, centerIm=centerIm[i,...,c+1] if self.return_center else None, centerImPrev=None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, rankIm=labelIm[i,...,c+1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None)
+            if self.long_term:
+                off = 2*self.frame_window if return_next else self.frame_window
+                for c in range(0, self.frame_window-1):
+                    sel = [c, self.frame_window]
+                    _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c+off], dyIm[i,...,c+off], dxIm[i,...,c+off], edm[i][...,sel], center_mode=self.center_mode, centerIm=None, centerImPrev=None, categoryIm=categoryIm[i,...,c+off] if self.return_categories else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c+off] if self.return_label_rank else None)
+                if return_next:
+                    for c in range(self.frame_window-1, 2*(self.frame_window-1)):
+                        sel = [self.frame_window, c+3]
+                        _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c+off], dyIm[i,...,c+off], dxIm[i,...,c+off], edm[i][...,sel], center_mode=self.center_mode, centerIm=None, centerImPrev=None, categoryIm=categoryIm[i,...,c+off] if self.return_categories else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c+off] if self.return_label_rank else None)
 
         other_output_channels = [chan_idx for chan_idx in self.output_channels if chan_idx!=1 and chan_idx!=2]
         all_channels = [batch_by_channel[chan_idx] for chan_idx in other_output_channels]
