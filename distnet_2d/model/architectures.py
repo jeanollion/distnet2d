@@ -20,8 +20,6 @@ class ASABlend():
                 {"filters":filters, "downscale":2, "weight_scaled":False, "dropout_rate":0}
             ]
         ]
-        if v2:
-            del self.encoder_settings[2][0]
         self.feature_settings = [
             {"op":"res2d", "dilation":2, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
             {"op":"res2d", "dilation":2, "weighted_sum":True, "weight_scaled":False, "dropout_rate":0},
