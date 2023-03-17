@@ -61,7 +61,7 @@ class ImageDataGenerator2D(ImageDataGenerator):
     histogram_normalization_scale
 
     """
-    def __init__(self, rotate90:bool=False, interpolation_order=1, perform_illumination_augmentation:bool = True, gaussian_blur_range:list=[1, 2], noise_intensity:float = 0.1, histogram_scaling_mode:str="AUTO", min_histogram_range:float=0.1, min_histogram_to_zero:bool=False, histogram_normalization_center=None, histogram_normalization_scale=None, histogram_voodoo_n_points:int=5, histogram_voodoo_intensity:float=0.5, illumination_voodoo_n_points:int=5, illumination_voodoo_intensity:float=0.6, **kwargs):
+    def __init__(self, rotate90:bool=False, interpolation_order=1, perform_illumination_augmentation:bool = True, gaussian_blur_range:list=[1, 2], noise_intensity:float = 0.1, histogram_scaling_mode:str="AUTO", min_histogram_range:float=0.1, min_histogram_to_zero:bool=False, invert:bool=False, histogram_normalization_center=None, histogram_normalization_scale=None, histogram_voodoo_n_points:int=5, histogram_voodoo_intensity:float=0.5, illumination_voodoo_n_points:int=5, illumination_voodoo_intensity:float=0.6, **kwargs):
         assert histogram_scaling_mode in ["PHASE_CONTRAST", "FLUORESCENCE", "TRANSMITTED_LIGHT", "AUTO", "NONE"], "invalid histogram scaling mode"
         if histogram_scaling_mode=="FLUORESCENCE" or histogram_scaling_mode=="TRANSMITTED_LIGHT" or (histogram_scaling_mode=="AUTO" and histogram_normalization_center is not None and histogram_normalization_scale is not None):
             assert histogram_normalization_center is not None and histogram_normalization_scale is not None, "in FLUORESCENCE or TRANSMITTED_LIGHT mode histogram_normalization_center and histogram_normalization_scale must be not None"
@@ -90,6 +90,7 @@ class ImageDataGenerator2D(ImageDataGenerator):
         self.perform_illumination_augmentation = perform_illumination_augmentation
         self.histogram_normalization_center=histogram_normalization_center
         self.histogram_normalization_scale=histogram_normalization_scale
+        self.invert=invert
         super().__init__(interpolation_order=interpolation_order, **kwargs)
 
     def get_random_transform(self, img_shape, seed=None):
@@ -169,6 +170,10 @@ class ImageDataGenerator2D(ImageDataGenerator):
                 max = img.max()
                 if min==max:
                     raise ValueError("Image is blank, cannot perform illumination augmentation")
+                if self.invert:
+                    t = max
+                    max = min
+                    min = t
                 img = pp.adjust_histogram_range(img, min=params["vmin"], max = params["vmax"], initial_range=[min, max])
         if "histogram_voodoo_target_points" in params:
             img = pp.histogram_voodoo(img, self.histogram_voodoo_n_points, self.histogram_voodoo_intensity, target_points = params["histogram_voodoo_target_points"])
