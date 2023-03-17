@@ -22,7 +22,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
     nan = tf.cast(float('NaN'), tf.float32)
     pi = tf.cast(np.pi, tf.float32)
     motion_loss_fun = _distance_loss()
-    center_fun = get_weighted_mean_2d_fun(spatial_dims, True, batch_axis = False, keepdims = False)
+    center_fun = _get_spatial_wmean_by_object_fun(*spatial_dims)
     wgrad_c = get_grad_weight_fun(center_displacement_grad_weight_center)
     wgrad_d = get_grad_weight_fun(center_displacement_grad_weight_displacement)
     fw = frame_window
@@ -30,6 +30,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
     @tf.function
     def fun(args):
         dY, dX, center, true_center, labels, prev_labels = args
+        labels = tf.transpose(labels, perm=[2, 0, 1]) # T, Y, X
         if long_term:
             dY_lt = dY[...,n_chan-1:]
             dX_lt = dX[...,n_chan-1:]
@@ -37,21 +38,21 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             dY = dY[...,:n_chan-1]
             dX = dX[...,:n_chan-1]
             prev_labels=prev_labels[...,:n_chan-1,:]
-        label_rank, label_size, N = _get_label_rank_and_size(labels, batch_axis=False)
-        dYm = _get_mean_by_object(dY, label_rank[...,1:,:], label_size[...,1:,:]) # T-1, N
-        dXm = _get_mean_by_object(dX, label_rank[...,1:,:], label_size[...,1:,:]) # T-1, N
+        ids, sizes, N = _get_label_size(labels) # (T, N), (T, N)
+        dYm = _get_mean_by_object(dY, labels[1:], ids[1:], sizes[1:]) # T-1, N
+        dXm = _get_mean_by_object(dX, labels[1:], ids[1:], sizes[1:]) # T-1, N
         if center_motion or center_unicity:
-            if center_scale<=0:
-                radius = tf.math.sqrt(label_size / pi )[tf.newaxis, tf.newaxis] # 1, 1, T, N
-                scale = tf.math.reduce_sum(radius * label_rank, axis=-1, keepdims=False)
-            else:
-                scale = tf.cast(center_scale, tf.float32)
+            # if center_scale<=0:
+            #     radius = tf.math.sqrt(label_size / pi )[tf.newaxis, tf.newaxis] # 1, 1, T, N
+            #     scale = tf.math.reduce_sum(radius * label_rank, axis=-1, keepdims=False)
+            # else:
+            scale = tf.cast(center_scale, tf.float32)
             center_values = tf.math.exp(-tf.math.square(tf.math.divide_no_nan(center, scale)))
-            center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(center_values, -1), label_rank)) # T, N, 2
+            center_ob = center_fun(center_values, labels, ids, sizes) # T, N, 2
 
             if center_unicity:
                 true_center_values = tf.math.exp(- tf.math.square(true_center / scale))
-                true_center_ob = center_fun(tf.math.multiply_no_nan(tf.expand_dims(true_center_values, -1), label_rank)) # T, N, 2
+                true_center_ob = center_fun(true_center_values, labels, ids, sizes) # T, N, 2
                 center_unicity_loss = motion_loss_fun(true_center_ob, center_ob)
                 center_unicity_loss = tf.cond(tf.math.is_nan(center_unicity_loss), lambda : tf.cast(0, center_unicity_loss.dtype), lambda : center_unicity_loss)
         if center_motion: # center+motion coherence loss
@@ -68,20 +69,16 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             center_ob_cur_trans = center_ob_cur - dm # (T-1, N, 2)
 
             # target = previous centers excluding those with no_prev
-            #label_rank_cur = label_rank[...,1:,:]
-            #label_size_cur = label_size[1:]
             center_ob_prev = center_ob[:-1] # (T-1, N, 2)
             center_ob_prev = tf.gather(center_ob_prev, indices=prev_idx, batch_dims=1, axis=1) # (T-1, N, 2)
             center_ob_prev = tf.where(has_prev_, center_ob_prev, nan)
             motion_loss = motion_loss_fun(center_ob_prev, center_ob_cur_trans) #label_size_cur
-            #print(f"all center ob: \n{center_ob} center ob prev: \n{center_ob_prev} cebter ob trans: \n{center_ob_cur_trans}, motion loss: \n{motion_loss}")
+            # print(f"all center ob: \n{center_ob} \ncenter ob prev - trans: \n{tf.concat([center_ob_prev[0], center_ob_cur_trans[0]], -1)}")
             prev_idx = prev_idx[1:] # (T-1-d, N)
             has_prev = has_prev[1:] # (T-1-d, N)
             for d in range(1, motion_range):
                 # remove first frame
                 center_ob_cur_trans = center_ob_cur_trans[1:] # (T-1-d, N, 2)
-                #label_rank_cur=label_rank_cur[...,1:,:]
-                #label_size_cur=label_size_cur[1:]
                 # remove last frame
                 center_ob_prev = center_ob_prev[:-1] # (T-1-d, N)
                 dm = dm[:-1] # (T-1-d, N, 2)
@@ -95,15 +92,16 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                     has_prev = has_prev[:-1] # (T-1-d-1, N)
             if long_term:
                 def sel(tensor, tile):
-                    tensor_p = tf.tile(tensor[...,fw:fw+1, :], tile)
+                    tensor_p = tf.tile(tensor[fw:fw+1], tile)
                     if next:
-                        return tf.concat([tensor_p, tensor[...,fw+2:, :]], -2)
+                        return tf.concat([tensor_p, tensor[fw+2:]], 0)
                     else:
                         return tensor_p
-                label_rank = sel(label_rank, tile=[1, 1, fw-1, 1])
-                label_size = sel(label_size, tile=[fw-1, 1])
-                dYm = _get_mean_by_object(dY_lt, label_rank, label_size) # T-2, N
-                dXm = _get_mean_by_object(dX_lt, label_rank, label_size) # T-2, N
+                labels = sel(labels, tile=[fw-1, 1, 1])
+                ids = sel(ids, tile=[fw-1, 1])
+                sizes = sel(sizes, tile=[fw-1, 1])
+                dYm = _get_mean_by_object(dY_lt, labels, ids, sizes) # T-2, N
+                dXm = _get_mean_by_object(dX_lt, labels, ids, sizes) # T-2, N
                 dm = tf.stack([dYm, dXm], -1) # (T-2, N, 2)
                 dm=wgrad_d(dm)
                 prev_labels = prev_labels_lt[...,:N] # (T-2, N) # trim from (T-2, Nmax)
@@ -112,9 +110,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 has_prev_ = tf.expand_dims(has_prev, -1)
 
                 # move next so that it corresponds to prev
-                center_ob_cur = tf.tile(center_ob[fw:fw+1], [fw-1, 1, 1])
-                if next:
-                    center_ob_cur = tf.concat([center_ob_cur, center_ob[fw+2:]], 0)
+                center_ob_cur = sel(center_ob, [fw-1, 1, 1])
                 center_ob_cur_trans = center_ob_cur - dm # (T-2, N, 2)
                 center_ob_prev = center_ob[:fw-1]
                 if next:
@@ -145,23 +141,59 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             return tf.reduce_mean(losses)
     return loss_fun
 
-def _get_label_rank_and_size(labels, batch_axis=False):
-    N = tf.math.reduce_max(labels)
-    def null_im():
-        shape = tf.shape(labels)
-        label_rank = tf.zeros(shape = tf.shape(labels), dtype = tf.float32)[..., tf.newaxis]
-        label_size = tf.zeros(shape = tf.concat([shape[:1], shape[-1:], [1]], 0), dtype=tf.float32) if batch_axis else tf.zeros(shape = tf.concat([shape[-1:], [1]], 0), dtype=tf.float32)
-        return label_rank, label_size, N#, tf.divide(tf.ones(shape = tf.shape(labels), dtype=tf.float32), tf.cast(shape[1]*shape[2], tf.float32))
-    def non_null_im():
-        label_rank = tf.one_hot(labels-1, N, dtype=tf.float32) # B, Y, X, T, N
-        label_size = tf.reduce_sum(label_rank, axis=[1, 2] if batch_axis else [0, 1], keepdims=False) # B, T, N
-        return label_rank, label_size, N
-    return tf.cond(tf.equal(N, 0), null_im, non_null_im)
+def _get_mean_by_object(data, labels, ids, sizes):
+    return _apply_by_obj_and_channel(_mean_by_obj, data, labels, ids, sizes)
 
-def _get_mean_by_object(data, label_rank, label_size, batch_axis=False):
-    data_ob = tf.math.multiply_no_nan(tf.expand_dims(data, -1), label_rank)
-    wsum = tf.math.reduce_sum(data_ob, axis=[1, 2] if batch_axis else [0, 1], keepdims = False)
-    return tf.math.divide_no_nan(wsum, label_size) # (B) C, N
+def _get_spatial_wmean_by_object_fun(Y, X):
+    Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')
+    nan = tf.cast(float('NaN'), tf.float32)
+    def apply(data, mask, size):
+        def non_null():
+            data_masked = tf.math.multiply_no_nan(data, mask)
+            wsum_y = tf.reduce_sum(data_masked * Y, keepdims=False)
+            wsum_x = tf.reduce_sum(data_masked * X, keepdims=False)
+            wsum = tf.stack([wsum_y, wsum_x]) # (2)
+            sum = tf.reduce_sum(data_masked, keepdims = False)
+            #sum = tf.stop_gradient(sum)
+            return tf.math.divide(wsum, sum) # when no values should return nan # (2)
+        return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null)
+    def fun(data, labels, ids, sizes):
+        return _apply_by_obj_and_channel(apply, data, labels, ids, sizes)
+    return fun
+
+def _get_label_size(labels): # C, Y, X
+    N = tf.math.reduce_max(labels)
+    def treat_image(im):
+        ids, _, counts = tf.unique_with_counts(im)
+        if tf.math.greater(N, 0):
+            non_null = tf.math.not_equal(ids, 0)
+            ids = tf.boolean_mask(ids, non_null)
+            counts = tf.boolean_mask(counts, non_null)
+            indices = ids - 1
+            indices = indices[...,tf.newaxis]
+            ids = tf.scatter_nd(indices, ids, shape = (N,))
+            counts = tf.scatter_nd(indices, counts, shape = (N,))
+        return ids, counts
+    labels = tf.reshape(labels, [tf.shape(labels)[0], -1]) # (C, Y*X)
+    ids, size = tf.map_fn(treat_image, labels, fn_output_signature=(tf.int32, tf.int32))
+    return ids, size, N
+
+def _mean_by_obj(data, mask, size):
+    non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), keepdims=False), tf.cast(size, data.dtype))
+    return tf.cond(tf.math.equal(size, 0), lambda:tf.cast(float('NaN'), data.dtype), non_null)
+
+def _apply_by_obj(fun, data, labels, ids, sizes):
+    def treat_obj(args):
+        id, size = args
+        return tf.cond(tf.math.equal(id, 0), lambda:fun(data, 0., 0), lambda:fun(data, tf.cast(tf.math.equal(labels, id), data.dtype), size))
+    return tf.map_fn(treat_obj, (ids, sizes), fn_output_signature=data.dtype)
+
+def _apply_by_obj_and_channel(fun, data, labels, ids, size):
+    data = tf.transpose(data, perm=[2, 0, 1]) # (C, Y, X)
+    def treat_im(args):
+        data_, labels_, ids_, size_ = args
+        return _apply_by_obj(fun, data_, labels_, ids_, size_)
+    return tf.map_fn(treat_im, (data, labels, ids, size), fn_output_signature=data.dtype)
 
 # inverse of tf.gather
 def _scatter_centers(args): # (N, 2) , (N), (N)
@@ -191,27 +223,4 @@ def _distance_loss():
         d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C)
         d = tf.math.divide_no_nan(d, n_obj) # mean per object
         return tf.math.reduce_mean(d) # mean over channel
-    return loss
-
-def _center_spread_loss(spatial_dims):
-    spread_fun = get_center_distance_spread_fun(*spatial_dims)
-    def loss(true, pred, label_rank, label_size): # (C, N, 2), (C, N, 2), (Y, X, C, N)
-        no_na_mask = tf.stop_gradient(tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,0]), tf.math.is_nan(pred[...,0]))), tf.float32)) # (C, N)
-        label_rank = label_rank * no_na_mask[tf.newaxis, tf.newaxis] # remove NA objects
-        true = spread_fun(true[tf.newaxis, tf.newaxis], label_rank) #(Y, X, C)
-        pred = spread_fun(pred[tf.newaxis, tf.newaxis], label_rank) #(Y, X, C)
-        #true_ob = true[...,tf.newaxis] * label_rank
-        #pred_ob = pred[...,tf.newaxis] * label_rank
-        # print(f"true: {true.shape.as_list()}, true_ob: {true_ob.shape.as_list()}, label_rank: {label_rank.shape.as_list()}")
-        # true_ob_min = tf.math.reduce_min(true_ob, axis=[0, 1])[0]
-        # true_ob_max = tf.math.reduce_max(true_ob, axis=[0, 1])[0]
-        # pred_ob_min = tf.math.reduce_min(pred_ob, axis=[0, 1])[0]
-        # pred_ob_max = tf.math.reduce_max(pred_ob, axis=[0, 1])[0]
-        # print(f"true min: \n{true_ob_min} \ntrue max: \n{true_ob_max} \npred min: \n{pred_ob_min} \npred max: \n{pred_ob_max}")
-        d = tf.math.square(true-pred) #(Y, X, C)
-        size = tf.math.reduce_sum(label_rank, axis=[0, 1], keepdims = True) * label_rank #(Y, X, C, N)
-        size = tf.math.reduce_sum(size, -1) #(Y, X, C)
-        d = tf.math.divide_no_nan(d, size) #(Y, X, C)
-        d = tf.math.reduce_mean(d, -1) #(Y, X)
-        return tf.math.reduce_sum(d)
     return loss
