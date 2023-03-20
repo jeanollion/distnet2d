@@ -103,8 +103,8 @@ class DistnetModel(Model):
         center_displacement_weight = self.center_displacement_weight
         inc = 1 if self.predict_contours else 0
         inc += 1 if self.predict_center else 0
-        if len(y) == 6 + inc: # y = edm, contour, center, dy, dX, cat, no_next, label_rank
-            labels, prev_labels = y[-1], y[-2]
+        if len(y) == 7 + inc: # y = edm, contour, center, dy, dX, cat, true_center, prev_labels, label_rank
+            labels, prev_labels, centers = y[-1], y[-2], y[-3]
         else :
             labels = None
             if self.predict_center and self.predict_contours:
@@ -195,7 +195,7 @@ class DistnetModel(Model):
 
             n_motion_loss =(1 if center_displacement_weight>0 else 0) + (1 if self.center_unicity_weight>0 else 0)
             if n_motion_loss>0:
-                motion_losses = self.motion_losses(y_pred[1+inc], y_pred[2+inc], y_pred[inc], y[inc], labels, prev_labels)
+                motion_losses = self.motion_losses(y_pred[1+inc], y_pred[2+inc], y_pred[inc], labels, prev_labels, centers)
                 if center_displacement_weight>0:
                     center_motion_loss = motion_losses[0] if n_motion_loss>1 else motion_losses
                     losses["center_displacement"] = center_motion_loss
@@ -303,12 +303,13 @@ def get_distnet_2d(input_shape,
             config,
             name: str="DiSTNet2D",
             **kwargs):
-    return get_distnet_2d_erf(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, combine_kernel_size=config.combine_kernel_size, skip_stop_gradient=False, skip_connections=False, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, attention=True, frame_window=frame_window, next=next, name=name, **kwargs)
+    return get_distnet_2d_erf(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, combine_kernel_size=config.combine_kernel_size, skip_stop_gradient=False, skip_connections=False, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, decoder_feature_settings=config.decoder_feature_settings, attention=True, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_erf(input_shape, # Y, X
             encoder_settings:list,
             feature_settings: list,
             feature_blending_settings: list,
+            decoder_feature_settings:list,
             decoder_settings: list,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             downsampling_mode:str = "maxpool_and_stride", #maxpool, stride, maxpool_and_stride
@@ -354,10 +355,11 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for f in feature_blending_settings:
             if "filters" not in f or f["filters"]<0:
                 f["filters"] = combine_filters
-        feature_blending_convs, _, _, _, _ = parse_param_list(feature_blending_settings, "FeatureBlendingSequence", last_input_filters=combine_filters)
+        feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(feature_blending_settings, "FeatureBlendingSequence", last_input_filters=combine_filters)
 
         # define decoder operations
         decoder_layers={"Seg":[], "Center":[], "Track":[], "Cat":[]}
+        decoder_feature_op={n: parse_param_list(decoder_feature_settings, f"FeatureBlending{n}", last_input_filters=feature_blending_filters)[0] for n in decoder_layers.keys()}
         decoder_out={"Seg":{}, "Center":{}, "Track":{}, "Cat":{}}
         output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"], "Cat": ["Cat"]}
         n_motion = n_chan -1
@@ -429,7 +431,10 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
                         skip = skip_per_decoder[decoder_name]
-                        up = NConvToBatch2D(compensate_gradient = True, n_conv = n_out, inference_conv_idx=out_idx, filters = feature_filters, name = f"FeatureConv{decoder_name}{output_name}")(combined_features) # (N_OUT x B, Y, X, F)
+                        decoder_features = combined_features
+                        for op in decoder_feature_op[decoder_name]:
+                            decoder_features = op(decoder_features)
+                        up = NConvToBatch2D(compensate_gradient = True, n_conv = n_out, inference_conv_idx=out_idx, filters = feature_filters, name = f"FeatureConv{decoder_name}{output_name}")(decoder_features) # (N_OUT x B, Y, X, F)
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
                             up = l([up, res if skip else None])
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)

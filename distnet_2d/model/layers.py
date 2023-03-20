@@ -315,22 +315,26 @@ class NConvToBatch2D(Layer):
         self.convs = [
             Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
         for i in range(self.n_conv)]
-        if self.compensate_gradient:
+        
+        if self.compensate_gradient and self.n_conv>1:
             self.grad_fun = get_grad_weight_fun(float(self.n_conv))
             self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
+        else:
+            self.grad_fun = None
+            self.grad_fun_inv = None
         super().build(input_shape)
 
     def call(self, input): # (B, Y, X, F)
         if self.inference_mode: # only produce one output
             return self.convs[self.inference_conv_idx](input)
         # input = get_print_grad_fun(f"{self.name} before split")(input)
-        if self.compensate_gradient:
+        if self.grad_fun_inv is not None:
             input = self.grad_fun_inv(input)
 
         inputs = [conv(input) for conv in self.convs] # N x (B, Y, X, F)
         # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
         output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
-        if self.compensate_gradient:
+        if self.grad_fun is not None:
             output = self.grad_fun(output) # compensate gradients to have same level in
         # output = get_print_grad_fun(f"{self.name} after concat")(output)
         return output
