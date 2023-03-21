@@ -25,6 +25,7 @@ class DistnetModel(Model):
         displacement_loss_weight:float=1, displacement_lovasz_loss_weight:float=0,
         center_displacement_loss_weight:float=1e-1, center_displacement_grad_weight_center:float=1e-1, center_displacement_grad_weight_displacement:float=1e-1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
         category_loss_weight:float=1,
+        max_objects_number:int = 0,
         center_scale:float=0, # 0 : computed automatically
         edm_loss= MeanSquaredError(),
         center_loss = MeanSquaredError(),
@@ -62,7 +63,7 @@ class DistnetModel(Model):
         self.center_loss=center_loss
         self.contour_loss = MeanSquaredError()
         self.displacement_loss = displacement_loss
-        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_scale=center_scale, next = next, frame_window=frame_window, long_term=long_term, center_motion = center_displacement_loss_weight>0, center_unicity=center_unicity_loss_weight>0)
+        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_scale=center_scale, next = next, frame_window=frame_window, long_term=long_term, center_motion = center_displacement_loss_weight>0, center_unicity=center_unicity_loss_weight>0, max_objects_number=max_objects_number)
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:

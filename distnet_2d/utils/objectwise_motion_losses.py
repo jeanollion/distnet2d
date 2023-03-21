@@ -18,7 +18,7 @@ def get_grad_weight_fun(weight):
         return x, grad
     return wgrad
 
-def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, next:bool, frame_window:int, long_term:bool=False, center_motion:bool = True, center_unicity:bool=True):
+def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, next:bool, frame_window:int, long_term:bool=False, center_motion:bool = True, center_unicity:bool=True, max_objects_number:int=0):
     nan = tf.cast(float('NaN'), tf.float32)
     pi = tf.cast(np.pi, tf.float32)
     scale = tf.cast(center_scale, tf.float32)
@@ -35,12 +35,12 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
         dY, dX, center, labels, prev_labels, true_center_ob = args
         labels = tf.transpose(labels, perm=[2, 0, 1]) # T, Y, X
         center = tf.transpose(center, perm=[2, 0, 1])
-        ids, sizes, N = _get_label_size(labels) # (T, N), (T, N)
+        ids, sizes, N = _get_label_size(labels, max_objects_number) # (T, N), (T, N)
         true_center_ob = true_center_ob[:,:N]
         # compute averages per object. compute all at the same time to avoid computing several times object masks
         if center_motion:
             dYX = tf.stack([dY, dX], -1) # Y, X, T, 2
-            dYX = tf.transpose(d, perm=[2, 0, 1, 3]) # T, Y, X, 2
+            dYX = tf.transpose(dYX, perm=[2, 0, 1, 3]) # T, Y, X, 2
             motion_chan = np.arange(1, n_chan).tolist()
             if long_term:
                 lt_chan = [fw]*(fw-1)
@@ -142,11 +142,14 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             return tf.reduce_mean(losses)
     return loss_fun
 
-def _get_label_size(labels): # C, Y, X
-    N = tf.math.reduce_max(labels)
+def _get_label_size(labels, max_objects_number:int=0): # C, Y, X
+    N = max_objects_number if max_objects_number>0 else tf.math.reduce_max(labels)
     def treat_image(im):
         ids, _, counts = tf.unique_with_counts(im)
-        if tf.math.greater(N, 0):
+        if tf.math.equal(tf.shape(ids)[0], 1) and tf.math.equal(ids[0], 0): # null case: only zeros
+            ids = tf.zeros(shape = (N,), dtype=tf.int32)
+            count = tf.zeros(shape = (N,), dtype=tf.int32)
+        else:
             non_null = tf.math.not_equal(ids, 0)
             ids = tf.boolean_mask(ids, non_null)
             counts = tf.boolean_mask(counts, non_null)
