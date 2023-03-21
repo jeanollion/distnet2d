@@ -213,13 +213,18 @@ def _objectwise_compute(center, center_channels, center_fun, motion, motion_chan
 def _objectwise_compute_channel(tasks, labels, ids, sizes, N): # [(tensor, fun, task_idx, output_chan_idx)], (Y, X), (N), ( N)
     Nt = tf.cast(len(tasks), tf.int32)
     results = tf.TensorArray(tf.float32, size= Nt * N, element_shape=(2,), dynamic_size=False, clear_after_read=True)
-    for i in tf.range(N):
+    init_state = (0, results)
+    condition = lambda i, _: tf.math.less(i, N)
+    def loop_fun(i, results):
         id = ids[i]
         size = sizes[i]
         mask = tf.cond(tf.math.equal(id, 0), lambda:0., lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
         for j in range(len(tasks)):
             tensor, fun, _, o_idx = tasks[j]
             results = results.write(j*N + i, fun(tensor, mask, size))
+        return (i+1, results)
+    _, results = tf.while_loop(condition, loop_fun, init_state)
+
     results = results.stack()
     target_shape = tf.concat([[Nt, N], tf.shape(results)[1:]], 0)
     return tf.reshape(results, target_shape)
