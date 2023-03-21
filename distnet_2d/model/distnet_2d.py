@@ -303,13 +303,13 @@ def get_distnet_2d(input_shape,
             config,
             name: str="DiSTNet2D",
             **kwargs):
-    return get_distnet_2d_erf(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, combine_kernel_size=config.combine_kernel_size, skip_stop_gradient=False, skip_connections=False, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, decoder_feature_settings=config.decoder_feature_settings, attention=True, frame_window=frame_window, next=next, name=name, **kwargs)
+    return get_distnet_2d_erf(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, combine_kernel_size=config.combine_kernel_size, skip_stop_gradient=False, skip_connections=False, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_blending_decoder_settings=config.feature_blending_decoder_settings, attention=True, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_erf(input_shape, # Y, X
             encoder_settings:list,
             feature_settings: list,
             feature_blending_settings: list,
-            decoder_feature_settings:list,
+            feature_blending_decoder_settings:list,
             decoder_settings: list,
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             downsampling_mode:str = "maxpool_and_stride", #maxpool, stride, maxpool_and_stride
@@ -359,7 +359,8 @@ def get_distnet_2d_erf(input_shape, # Y, X
 
         # define decoder operations
         decoder_layers={"Seg":[], "Center":[], "Track":[], "Cat":[]}
-        decoder_feature_op={n: parse_param_list(decoder_feature_settings, f"FeatureBlending{n}", last_input_filters=feature_blending_filters)[0] for n in decoder_layers.keys()}
+        get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
+        decoder_feature_op={n: get_seq_and_filters(parse_param_list(feature_blending_decoder_settings, f"FeatureBlending{n}", last_input_filters=feature_blending_filters)) for n in decoder_layers.keys()}
         decoder_out={"Seg":{}, "Center":{}, "Track":{}, "Cat":{}}
         output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"], "Cat": ["Cat"]}
         n_motion = n_chan -1
@@ -432,9 +433,9 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         layer_output_name = decoder_output_names[decoder_name][output_name]
                         skip = skip_per_decoder[decoder_name]
                         decoder_features = combined_features
-                        for op in decoder_feature_op[decoder_name]:
+                        for op in decoder_feature_op[decoder_name][0]:
                             decoder_features = op(decoder_features)
-                        up = NConvToBatch2D(compensate_gradient = True, n_conv = n_out, inference_conv_idx=out_idx, filters = feature_filters, name = f"FeatureConv{decoder_name}{output_name}")(decoder_features) # (N_OUT x B, Y, X, F)
+                        up = NConvToBatch2D(compensate_gradient = True, n_conv = n_out, inference_conv_idx=out_idx, filters = min(decoder_feature_op[decoder_name][1], feature_filters//2), name = f"FeatureConv{decoder_name}{output_name}")(decoder_features) # (N_OUT x B, Y, X, F)
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
                             up = l([up, res if skip else None])
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
@@ -598,18 +599,15 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
     i = 0
     if param_list[0].get("downscale", 1)==1:
         residual_filters = last_input_filters
-        if len(param_list)>1 and param_list[1].get("downscale", 1) == 1:
-            sequence = []
-            while i<len(param_list) and param_list[i].get("downscale", 1) == 1:
-                sequence.append(parse_params(**param_list[i], name = f"{name}/Op{i}"))
-                if "filters" in param_list[i]:
-                    residual_filters =  param_list[i]["filters"]
-                i+=1
-        else:
-            sequence = [parse_params(**param_list[0], name = f"{name}/Op")]
+        sequence = []
+        while i<len(param_list) and param_list[i].get("downscale", 1) == 1:
             if "filters" in param_list[i]:
+                if isinstance(param_list[i]["filters"], float):
+                    assert residual_filters>0, "last_input_filters should be >0 when filters is a float"
+                    param_list[i]["filters"] = int(param_list[i]["filters"] * residual_filters+0.5)
                 residual_filters =  param_list[i]["filters"]
-            i=1
+            sequence.append(parse_params(**param_list[i], name = f"{name}/Op{i}"))
+            i+=1
     else:
         sequence=None
         residual_filters = 0

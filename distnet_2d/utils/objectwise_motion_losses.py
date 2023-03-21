@@ -34,13 +34,13 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
     def fun(args):
         dY, dX, center, labels, prev_labels, true_center_ob = args
         labels = tf.transpose(labels, perm=[2, 0, 1]) # T, Y, X
-        d = tf.stack([dY, dX], -1) # Y, X, T, 2
-        d = tf.transpose(d, perm=[2, 0, 1, 3]) # T, Y, X, 2
         center = tf.transpose(center, perm=[2, 0, 1])
         ids, sizes, N = _get_label_size(labels) # (T, N), (T, N)
         true_center_ob = true_center_ob[:,:N]
         # compute averages per object. compute all at the same time to avoid computing several times object masks
         if center_motion:
+            dYX = tf.stack([dY, dX], -1) # Y, X, T, 2
+            dYX = tf.transpose(d, perm=[2, 0, 1, 3]) # T, Y, X, 2
             motion_chan = np.arange(1, n_chan).tolist()
             if long_term:
                 lt_chan = [fw]*(fw-1)
@@ -49,7 +49,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 motion_chan = motion_chan + lt_chan
         center_values = tf.math.exp(-tf.math.square(tf.math.divide_no_nan(center, scale)))
         results = _objectwise_compute(center_values, np.arange(n_chan).tolist(), spa_wmean_fun,
-                                    d if center_motion else None, motion_chan if center_motion else None, mean_fun,
+                                    dYX if center_motion else None, motion_chan if center_motion else None, mean_fun,
                                     labels, ids, sizes, n_chan, N)
 
         center_ob = results[0]
@@ -183,7 +183,7 @@ def _get_mean_by_obj_fun():
     return fun
 
 def _objectwise_compute(center, center_channels, center_fun, motion, motion_channels, motion_fun, labels, ids, sizes, n_chan, N): # [(tensor, range, fun)], (T, Y, X), (T, N), (T, N)
-    if motion is not None:
+    if motion_channels is not None:
         motion_result = tf.TensorArray(tf.float32, size=len(motion_channels), dynamic_size=False, clear_after_read=True)
     center_result = tf.TensorArray(tf.float32, size=len(center_channels), dynamic_size=False, clear_after_read=True)
     for c in range(n_chan):
@@ -191,7 +191,7 @@ def _objectwise_compute(center, center_channels, center_fun, motion, motion_chan
         for i, cc in enumerate(center_channels):
             if c==cc:
                 tasks.append((center[i], center_fun, 0, i))
-        if motion is not None:
+        if motion_channels is not None:
             for i, cc in enumerate(motion_channels):
                 if c==cc:
                     tasks.append((motion[i], motion_fun, 1, i))
@@ -202,7 +202,7 @@ def _objectwise_compute(center, center_channels, center_fun, motion, motion_chan
                 center_result = center_result.write(o_idx, res[i])
             else:
                 motion_result = motion_result.write(o_idx, res[i])
-    if motion is not None:
+    if motion_channels is not None:
         return [center_result.stack(), motion_result.stack()]
     else:
         return [center_result.stack()]
