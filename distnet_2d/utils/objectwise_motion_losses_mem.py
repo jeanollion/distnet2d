@@ -38,6 +38,8 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
         ids, sizes, N = _get_label_size(labels, max_objects_number) # (T, N), (T, N)
         true_center_ob = true_center_ob[:,:N]
         # compute averages per object. compute all at the same time to avoid computing several times object masks
+        center_values = tf.math.exp(-tf.math.square(tf.math.divide_no_nan(center, scale)))
+        center_ob = _objectwise_compute(center_values, np.arange(n_chan).tolist(), spa_wmean_fun, labels, ids, sizes)
         if center_motion:
             dYX = tf.stack([dY, dX], -1) # Y, X, T, 2
             dYX = tf.transpose(dYX, perm=[2, 0, 1, 3]) # T, Y, X, 2
@@ -47,14 +49,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 if next:
                     lt_chan = lt_chan + np.arange(fw+2, n_chan).tolist()
                 motion_chan = motion_chan + lt_chan
-        center_values = tf.math.exp(-tf.math.square(tf.math.divide_no_nan(center, scale)))
-        results = _objectwise_compute(center_values, np.arange(n_chan).tolist(), spa_wmean_fun,
-                                    dYX if center_motion else None, motion_chan if center_motion else None, mean_fun,
-                                    labels, ids, sizes, n_chan, N)
-
-        center_ob = results[0]
-        if center_motion:
-            dm = results[1]
+            dm = _objectwise_compute(dYX, motion_chan, mean_fun, labels, ids, sizes)
             dm=wgrad_d(dm)
             if long_term:
                 dm_lt = dm[n_chan-1:]
@@ -185,56 +180,18 @@ def _get_mean_by_obj_fun():
         return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null)
     return fun
 
-# TODO : try to compute separately center & motion 
-def _objectwise_compute(center, center_channels, center_fun, motion, motion_channels, motion_fun, labels, ids, sizes, n_chan, N): # [(tensor, range, fun)], (T, Y, X), (T, N), (T, N)
-    if motion_channels is not None:
-        motion_result = tf.TensorArray(tf.float32, size=len(motion_channels), dynamic_size=False, clear_after_read=True)
-    center_result = tf.TensorArray(tf.float32, size=len(center_channels), dynamic_size=False, clear_after_read=True)
-    for c in range(n_chan):
-        tasks = [] # [(tensor, fun, task_idx, output_chan_idx)]
-        for i, cc in enumerate(center_channels):
-            if c==cc:
-                tasks.append((center[i], center_fun, 0, i))
-        if motion_channels is not None:
-            for i, cc in enumerate(motion_channels):
-                if c==cc:
-                    tasks.append((motion[i], motion_fun, 1, i))
-        res = _objectwise_compute_channel(tasks, labels[c], ids[c], sizes[c], N)
-        for i in range(len(tasks)):
-            _, _, t_idx, o_idx = tasks[i]
-            if t_idx==0:
-                center_result = center_result.write(o_idx, res[i])
-            else:
-                motion_result = motion_result.write(o_idx, res[i])
-    if motion_channels is not None:
-        return [center_result.stack(), motion_result.stack()]
-    else:
-        return [center_result.stack()]
+def _objectwise_compute(data, channels, fun, labels, ids, sizes): # [(tensor, range, fun)], (T, Y, X), (T, N), (T, N)
+    def treat_im(args):
+        data, channel = args
+        return _objectwise_compute_channel(data, fun, labels[channel], ids[channel], sizes[channel])
+    return tf.map_fn(treat_im, (data, tf.convert_to_tensor(channels)), fn_output_signature=data.dtype)
 
-def _objectwise_compute_channel(tasks, labels, ids, sizes, N): # [(tensor, fun, task_idx, output_chan_idx)], (Y, X), (N), ( N)
-    Nt = tf.cast(len(tasks), tf.int32)
-    results = tf.TensorArray(tf.float32, size= Nt * N, element_shape=(2,), dynamic_size=False, clear_after_read=True)
-    # init_state = (0, results)
-    # condition = lambda i, _: tf.math.less(i, N)
-    # def loop_fun(i, results):
-    #     id = ids[i]
-    #     size = sizes[i]
-    #     mask = tf.cond(tf.math.equal(id, 0), lambda:0., lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
-    #     for j in range(len(tasks)):
-    #         tensor, fun, _, o_idx = tasks[j]
-    #         results = results.write(j*N + i, fun(tensor, mask, size))
-    #     return (i+1, results)
-    # _, results = tf.while_loop(condition, loop_fun, init_state)
-    for i in tf.range(N):
-        id = ids[i]
-        size = sizes[i]
+def _objectwise_compute_channel(data, fun, labels, ids, sizes): # tensor, fun, (Y, X), (N), ( N)
+    def treat_ob(args):
+        id, size = args
         mask = tf.cond(tf.math.equal(id, 0), lambda:0., lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
-        for j in range(len(tasks)):
-            tensor, fun, _, o_idx = tasks[j]
-            results = results.write(j*N + i, fun(tensor, mask, size))
-    results = results.stack()
-    target_shape = tf.concat([[Nt, N], tf.shape(results)[1:]], 0)
-    return tf.reshape(results, target_shape)
+        return fun(data, mask, size)
+    return tf.map_fn(treat_ob, (ids, sizes), fn_output_signature=data.dtype)
 
 # inverse of tf.gather
 def _scatter_centers(args): # (N, 2) , (N), (N)
