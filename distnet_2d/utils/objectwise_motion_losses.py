@@ -165,11 +165,14 @@ def _get_label_size(labels, max_objects_number:int=0): # C, Y, X
 def _get_spatial_wmean_by_object_fun(Y, X):
     Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')
     nan = tf.cast(float('NaN'), tf.float32)
+    Y, X = tf.reshape(Y, -1), tf.reshape(X, -1)
     def apply(data, mask, size):
         def non_null():
-            data_masked = tf.math.multiply_no_nan(data, mask)
-            wsum_y = tf.reduce_sum(data_masked * Y, keepdims=False)
-            wsum_x = tf.reduce_sum(data_masked * X, keepdims=False)
+            data_masked = tf.boolean_mask(tf.reshape(data, -1), mask)
+            Y_masked = tf.boolean_mask(Y, mask)
+            X_masked = tf.boolean_mask(X, mask)
+            wsum_y = tf.reduce_sum(data_masked * Y_masked, keepdims=False)
+            wsum_x = tf.reduce_sum(data_masked * X_masked, keepdims=False)
             wsum = tf.stack([wsum_y, wsum_x]) # (2)
             sum = tf.reduce_sum(data_masked, keepdims = False)
             #sum = tf.stop_gradient(sum)
@@ -180,8 +183,10 @@ def _get_spatial_wmean_by_object_fun(Y, X):
 def _get_mean_by_obj_fun():
     nan = tf.cast(float('NaN'), tf.float32)
     def fun(data, mask, size): # (Y, X, 2)
-        mask = tf.expand_dims(mask, -1)
-        non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False), tf.cast(size, tf.float32))
+        def non_null():
+            y = tf.reduce_sum(tf.boolean_mask(tf.reshape(data[...,0], -1), mask), keepdims = False)
+            x = tf.reduce_sum(tf.boolean_mask(tf.reshape(data[...,1], -1), mask), keepdims = False)
+            return tf.divide(tf.stack([y, x]), tf.cast(size, tf.float32))
         return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null)
     return fun
 
@@ -227,7 +232,8 @@ def _objectwise_compute_channel(tasks, labels, ids, sizes, N): # [(tensor, fun, 
     for i in tf.range(N):
         id = ids[i]
         size = sizes[i]
-        mask = tf.cond(tf.math.equal(id, 0), lambda:0., lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
+        #mask = tf.cond(tf.math.equal(id, 0), lambda:0., lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
+        mask = tf.cond(tf.math.equal(id, 0), lambda:tf.convert_to_tensor([False]), lambda:tf.reshape(tf.math.equal(labels, id), -1))
         for j in range(len(tasks)):
             tensor, fun, _, o_idx = tasks[j]
             results = results.write(j*N + i, fun(tensor, mask, size))
