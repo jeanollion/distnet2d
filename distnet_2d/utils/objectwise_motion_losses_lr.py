@@ -137,7 +137,7 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
 
 def _get_label_rank_and_size(labels, max_objects_number:int=0): # (T, Y, X)
     _N = tf.math.reduce_max(labels)
-    N = max_objects_number if max_objects_number>0 else N
+    N = max_objects_number if max_objects_number>0 else _N
     def null_im():
         shape = tf.shape(labels)
         label_rank = tf.zeros(shape = tf.shape(labels), dtype = tf.float32)[..., tf.newaxis]
