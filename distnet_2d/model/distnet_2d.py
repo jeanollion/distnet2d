@@ -13,7 +13,7 @@ from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorChannel, l2
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 from ..utils.lovasz_loss import lovasz_hinge
-from ..utils.objectwise_motion_losses import get_motion_losses
+from ..utils.objectwise_motion_losses_lr import get_motion_losses
 from ..utils.agc import adaptive_clip_grad
 from .gradient_accumulator import GradientAccumulator
 

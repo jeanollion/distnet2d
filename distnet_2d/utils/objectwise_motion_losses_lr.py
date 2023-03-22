@@ -29,16 +29,21 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
     fw = frame_window
     n_chan = 2 * frame_window + 1 if next else frame_window + 1
     spa_wmean_fun = _get_spatial_wmean_by_object_fun(*spatial_dims)
-    mean_fun = _get_mean_by_obj_fun()
     #@tf.function
     def fun(args):
         dY, dX, center, labels, prev_labels, true_center_ob = args
         labels = tf.transpose(labels, perm=[2, 0, 1]) # T, Y, X
         center = tf.transpose(center, perm=[2, 0, 1])
-        ids, sizes, N = _get_label_size(labels, max_objects_number) # (T, N), (T, N)
+        label_rank, label_size, N = _get_label_rank_and_size(labels, max_objects_number) # (T, N), (T, N)
         true_center_ob = true_center_ob[:,:N]
         # compute averages per object. compute all at the same time to avoid computing several times object masks
-        if center_motion:
+        center_values = tf.math.exp(-tf.math.square(tf.math.divide_no_nan(center, scale)))
+        center_ob = spa_wmean_fun(center_values, label_rank, label_size)
+        if center_unicity:
+            center_unicity_loss = motion_loss_fun(true_center_ob, center_ob)
+            center_unicity_loss = tf.cond(tf.math.is_nan(center_unicity_loss), lambda : tf.cast(0, center_unicity_loss.dtype), lambda : center_unicity_loss)
+
+        if center_motion: # center+motion coherence loss
             dYX = tf.stack([dY, dX], -1) # Y, X, T, 2
             dYX = tf.transpose(dYX, perm=[2, 0, 1, 3]) # T, Y, X, 2
             motion_chan = np.arange(1, n_chan).tolist()
@@ -47,25 +52,13 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
                 if next:
                     lt_chan = lt_chan + np.arange(fw+2, n_chan).tolist()
                 motion_chan = motion_chan + lt_chan
-        center_values = tf.math.exp(-tf.math.square(tf.math.divide_no_nan(center, scale)))
-        results = _objectwise_compute(center_values, np.arange(n_chan).tolist(), spa_wmean_fun,
-                                    dYX if center_motion else None, motion_chan if center_motion else None, mean_fun,
-                                    labels, ids, sizes, n_chan, N)
-
-        center_ob = results[0]
-        if center_motion:
-            dm = results[1]
-            dm=wgrad_d(dm)
+            dm = _get_mean_by_object(dYX, motion_chan, label_rank, label_size)
+            dm = wgrad_d(dm)
             if long_term:
                 dm_lt = dm[n_chan-1:]
                 prev_labels_lt = prev_labels[...,n_chan-1:,:]
                 dm = dm[:n_chan-1]
                 prev_labels=prev_labels[...,:n_chan-1,:]
-
-        if center_unicity:
-            center_unicity_loss = motion_loss_fun(true_center_ob, center_ob)
-            center_unicity_loss = tf.cond(tf.math.is_nan(center_unicity_loss), lambda : tf.cast(0, center_unicity_loss.dtype), lambda : center_unicity_loss)
-        if center_motion: # center+motion coherence loss
             center_ob = wgrad_c(center_ob)
             prev_labels = prev_labels[...,:N] # (T-1, N) # trim from (T-1, Nmax)
             has_prev = tf.math.greater(prev_labels, 0)
@@ -142,98 +135,42 @@ def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_w
             return tf.reduce_mean(losses)
     return loss_fun
 
-def _get_label_size(labels, max_objects_number:int=0): # C, Y, X
-    N = max_objects_number if max_objects_number>0 else tf.math.reduce_max(labels)
-    def treat_image(im):
-        ids, _, counts = tf.unique_with_counts(im)
-        if tf.math.equal(tf.shape(ids)[0], 1) and tf.math.equal(ids[0], 0): # null case: only zeros
-            ids = tf.zeros(shape = (N,), dtype=tf.int32)
-            count = tf.zeros(shape = (N,), dtype=tf.int32)
-        else:
-            non_null = tf.math.not_equal(ids, 0)
-            ids = tf.boolean_mask(ids, non_null)
-            counts = tf.boolean_mask(counts, non_null)
-            indices = ids - 1
-            indices = indices[...,tf.newaxis]
-            ids = tf.scatter_nd(indices, ids, shape = (N,))
-            counts = tf.scatter_nd(indices, counts, shape = (N,))
-        return ids, counts
-    labels = tf.reshape(labels, [tf.shape(labels)[0], -1]) # (C, Y*X)
-    ids, size = tf.map_fn(treat_image, labels, fn_output_signature=(tf.int32, tf.int32))
-    return ids, size, N
+def _get_label_rank_and_size(labels, max_objects_number:int=0): # (T, Y, X)
+    _N = tf.math.reduce_max(labels)
+    N = max_objects_number if max_objects_number>0 else N
+    def null_im():
+        shape = tf.shape(labels)
+        label_rank = tf.zeros(shape = tf.shape(labels), dtype = tf.float32)[..., tf.newaxis]
+        label_size = tf.zeros(shape = tf.concat([shape[-1:], [1]], 0), dtype=tf.float32)
+        return label_rank, label_size, N
+    def non_null_im():
+        label_rank = tf.one_hot(labels-1, N, dtype=tf.float32) # T, Y, X, N
+        label_size = tf.reduce_sum(label_rank, axis=[1, 2], keepdims=False) # T, N
+        return label_rank, label_size, N
+    return tf.cond(tf.equal(_N, 0), null_im, non_null_im)
+
+def _get_mean_by_object(data, channels, label_rank, label_size): # (T', Y, X, 2), (T'), (T, Y, X, N)
+    def treat_im(args): #(Y, X, 2), (Y, X, N), (N,)
+        data, channel = args
+        ls = label_size[channel][:, tf.newaxis]
+        lr = label_rank[channel]
+        data_ob = tf.math.multiply_no_nan(tf.expand_dims(data, -2), tf.expand_dims(lr, -1))
+        wsum = tf.math.reduce_sum(data_ob, axis=[0, 1], keepdims = False) # N, 2
+        return tf.math.divide(wsum, ls) # N, 2
+    return tf.map_fn(treat_im, (data, tf.convert_to_tensor(channels)), fn_output_signature=tf.float32)
 
 def _get_spatial_wmean_by_object_fun(Y, X):
     Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')
+    Y, X = Y[tf.newaxis, :,:, tf.newaxis], X[tf.newaxis, :,:, tf.newaxis]
     nan = tf.cast(float('NaN'), tf.float32)
-    def apply(data, mask, size):
-        def non_null():
-            data_masked = tf.math.multiply_no_nan(data, mask)
-            wsum_y = tf.reduce_sum(data_masked * Y, keepdims=False)
-            wsum_x = tf.reduce_sum(data_masked * X, keepdims=False)
-            wsum = tf.stack([wsum_y, wsum_x]) # (2)
-            sum = tf.reduce_sum(data_masked, keepdims = False)
-            #sum = tf.stop_gradient(sum)
-            return tf.math.divide(wsum, sum) # when no values should return nan # (2)
-        return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null)
+    def apply(data, label_rank, label_size): # (T, Y, X), (T, Y, X, N), (T, N)
+        data_ob = tf.math.multiply_no_nan(tf.expand_dims(data, -1), label_rank)
+        wsum_y = tf.reduce_sum(data_ob * Y, axis=[1, 2], keepdims=False) # (T, N)
+        wsum_x = tf.reduce_sum(data_ob * X, axis=[1, 2], keepdims=False) # (T, N)
+        wsum = tf.stack([wsum_y, wsum_x], -1) # (T, N, 2)
+        sum = tf.expand_dims(tf.reduce_sum(data_ob, axis=[1, 2], keepdims = False), -1) # (T, N, 1)
+        return tf.math.divide(wsum, sum) # when no values should return nan  # (T, N, 2)
     return apply
-
-def _get_mean_by_obj_fun():
-    nan = tf.cast(float('NaN'), tf.float32)
-    def fun(data, mask, size): # (Y, X, 2)
-        mask = tf.expand_dims(mask, -1)
-        non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False), tf.cast(size, tf.float32))
-        return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null)
-    return fun
-
-def _objectwise_compute(center, center_channels, center_fun, motion, motion_channels, motion_fun, labels, ids, sizes, n_chan, N): # [(tensor, range, fun)], (T, Y, X), (T, N), (T, N)
-    if motion_channels is not None:
-        motion_result = tf.TensorArray(tf.float32, size=len(motion_channels), dynamic_size=False, clear_after_read=True)
-    center_result = tf.TensorArray(tf.float32, size=len(center_channels), dynamic_size=False, clear_after_read=True)
-    for c in range(n_chan):
-        tasks = [] # [(tensor, fun, task_idx, output_chan_idx)]
-        for i, cc in enumerate(center_channels):
-            if c==cc:
-                tasks.append((center[i], center_fun, 0, i))
-        if motion_channels is not None:
-            for i, cc in enumerate(motion_channels):
-                if c==cc:
-                    tasks.append((motion[i], motion_fun, 1, i))
-        res = _objectwise_compute_channel(tasks, labels[c], ids[c], sizes[c], N)
-        for i in range(len(tasks)):
-            _, _, t_idx, o_idx = tasks[i]
-            if t_idx==0:
-                center_result = center_result.write(o_idx, res[i])
-            else:
-                motion_result = motion_result.write(o_idx, res[i])
-    if motion_channels is not None:
-        return [center_result.stack(), motion_result.stack()]
-    else:
-        return [center_result.stack()]
-
-def _objectwise_compute_channel(tasks, labels, ids, sizes, N): # [(tensor, fun, task_idx, output_chan_idx)], (Y, X), (N), ( N)
-    Nt = tf.cast(len(tasks), tf.int32)
-    results = tf.TensorArray(tf.float32, size= Nt * N, element_shape=(2,), dynamic_size=False, clear_after_read=True)
-    # init_state = (0, results)
-    # condition = lambda i, _: tf.math.less(i, N)
-    # def loop_fun(i, results):
-    #     id = ids[i]
-    #     size = sizes[i]
-    #     mask = tf.cond(tf.math.equal(id, 0), lambda:0., lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
-    #     for j in range(len(tasks)):
-    #         tensor, fun, _, o_idx = tasks[j]
-    #         results = results.write(j*N + i, fun(tensor, mask, size))
-    #     return (i+1, results)
-    # _, results = tf.while_loop(condition, loop_fun, init_state)
-    for i in tf.range(N):
-        id = ids[i]
-        size = sizes[i]
-        mask = tf.cond(tf.math.equal(id, 0), lambda:0., lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
-        for j in range(len(tasks)):
-            tensor, fun, _, o_idx = tasks[j]
-            results = results.write(j*N + i, fun(tensor, mask, size))
-    results = results.stack()
-    target_shape = tf.concat([[Nt, N], tf.shape(results)[1:]], 0)
-    return tf.reshape(results, target_shape)
 
 # inverse of tf.gather
 def _scatter_centers(args): # (N, 2) , (N), (N)
