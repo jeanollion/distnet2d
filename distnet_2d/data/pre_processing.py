@@ -285,7 +285,7 @@ def get_histogram_normalization_center_scale_ranges(histogram, bins, center_perc
     return mode_range, scale_range
 
 def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:bool = False, tl_sd_factor:float=3., fluo_centile_range:list=[75, 99.9], fluo_centile_extent:float=5, transmitted_light_per_image_mode:bool=True):
-    """Computes a range for center and for scale factor for data augmentation.
+    """Computes a range for center and for scale factor for random intensity normalization during data augmentation.
     Image can then be normalized using a random center C in the center range and a random scaling factor in the scale range: I -> (I - C) / S
 
     Parameters
@@ -298,7 +298,6 @@ def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:
             mode M is computed, corresponding to the Mp centile: M = centile(Mp). center_range = [centile(Mp-fluo_centile_extent), centile(Mp+fluo_centile_extent)]
             scale_range = [centile(fluo_centile_range[0]) - M, centile(fluo_centile_range[0]) + M ]
         in transmitted light mode: with transmitted_light_per_image_mode=True center_range = [mean - tl_sd_factor*sd, mean + tl_sd_factor*sd]; scale_range = [sd/tl_sd_factor, sd*tl_sd_factor]
-        in transmitted light mode: with transmitted_light_per_image_mode=False: center_range = [-tl_sd_factor*sd, tl_sd_factor*sd]; scale_range = [1/tl_sd_factor, tl_sd_factor]
     tl_sd_factor : float
         use in the computation of transmitted light ranges cf description of fluorescence parameter
     fluo_centile_range : list
@@ -337,3 +336,50 @@ def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:
             center_range, scale_range = [mean - tl_sd_factor*sd, mean + tl_sd_factor*sd], [sd/tl_sd_factor, sd*tl_sd_factor]
             print("center: [{}; {}] / scale: [{}; {}]".format(center_range[0], center_range[1], scale_range[0], scale_range[1]))
         return center_range, scale_range
+
+def get_min_max_range(dataset, raw_feature_name:str = "/raw", min_centile_range:list=[0.01, 5], max_centile_range:list=[95, 99.9]):
+    """Computes a range for min and max value for random intensity normalization during data augmentation.
+    Image can then be normalized using a random min and max value that will be mapped to [0, 1]
+
+    Parameters
+    ----------
+    dataset : datasetIO/path(str) OR list/tuple of datasetIO/path(str)
+    raw_feature_name : str
+        name of the dataset
+    min_centile_range : list
+        interval for min range in centiles
+    min_centile_range : float
+        interval for max range in centiles
+
+    Returns
+    -------
+    min_range (list(2)) , max_range (list(2))
+
+    """
+    assert dih is not None, "dataset_iterator package is required for this method"
+    if isinstance(min_centile_range, float):
+        min_centile_range = [min_centile_range, min_centile_range]
+    if isinstance(max_centile_range, float):
+        max_centile_range = [max_centile_range, max_centile_range]
+    assert min_centile_range[0]<=min_centile_range[1], "invalid min range"
+    assert max_centile_range[0]<=max_centile_range[1], "invalid max range"
+    assert min_centile_range[1]<max_centile_range[0], "invalid min and max range"
+    if isinstance(dataset, (list, tuple)):
+        min_range, max_range = [], []
+        for ds in dataset:
+            min_r, max_r = get_min_max_range(ds, raw_feature_name, min_centile_range, max_centile_range)
+            min_range.append(min_r)
+            max_range.append(max_r)
+        if len(dataset)==1:
+            return min_range[0], max_range[0]
+        return min_range, max_range
+
+    bins = dih.get_histogram_bins_IPR(*dih.get_histogram(dataset, raw_feature_name, bins=1000), n_bins=256, percentiles=[0, 95], verbose=True)
+    histo, _ = dih.get_histogram(dataset, raw_feature_name, bins=bins)
+
+    values = dih.get_percentile(histogram, bins, min_centile_range + max_centile_range)
+    min_range = [values[0], values[1]]
+    max_range = [values[2], values[3]]
+    if verbose:
+        print(f"normalization: min_range: [{min_range[0]}; {min_range[1]}] max_range: [{max_range[0]}; {max_range[1]}]")
+    return min_range, max_range
