@@ -1,5 +1,5 @@
 class ASABlendD3():
-    def __init__(self, filters:int = 192):
+    def __init__(self, filters:int = 192, batch_norm:bool = True):
         self.name = f"asa-blend-{filters}"
         self.attention = True
         self.combine_kernel_size = 1
@@ -36,13 +36,13 @@ class ASABlendD3():
             {"op":"res2d", "weighted_sum":True, "weight_scaled":False, "dropout_rate":0}
         ]
         self.decoder_settings = [
-            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":True, "dropout_rate":0},
+            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":batch_norm, "dropout_rate":0},
             {"filters":32, "op":"res2d", "weighted_sum":True, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False,"dropout_rate":0},
             {"filters":64, "op":"res2d", "weighted_sum":True, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
         ]
 
 class ASABlendD2():
-    def __init__(self, filters:int = 128):
+    def __init__(self, filters:int = 128, batch_norm:bool = True):
         self.name = f"asa-blend-d2-{filters}"
         self.attention = True
         self.combine_kernel_size = 1
@@ -74,6 +74,6 @@ class ASABlendD2():
             {"op":"res2d", "weighted_sum":True, "weight_scaled":False, "dropout_rate":0}
         ]
         self.decoder_settings = [
-            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":True, "dropout_rate":0},
+            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":batch_norm, "dropout_rate":0},
             {"filters":32, "op":"res2d", "weighted_sum":True, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
         ]
