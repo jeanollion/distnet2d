@@ -19,7 +19,7 @@ def ssim_loss(max_val = 1, filter_size=11, filter_sigma=1.5, k1=0.01, k2=0.03):
         return 1 - (1 + SSIM ) * 0.5
     return loss_fun
 
-def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=True, dtype='float32'):
+def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=True, remove_background=False, dtype='float32'):
     weight_list = np.array(weight_list).astype("float32")
     # normalize weights:
     n_classes = weight_list.shape[0]
@@ -30,24 +30,35 @@ def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=T
             class_weights = tf.squeeze(y_true, axis=-1)
             if not class_weights.dtype.is_integer:
                 class_weights = tf.cast(class_weights, tf.int32)
-            class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
+            class_weights = tf.one_hot(class_weights, n_classes+(1 if remove_background else 0), dtype=dtype)
+            if remove_background:
+                class_weights = class_weights[...,1:]
+            y_true = class_weights
         else:
+            if remove_background:
+                y_true = y_true[...,1:]
             class_weights = tf.cast(y_true, dtype=dtype)
+
         class_weights = tf.reduce_sum(class_weights * weight_list, axis=-1, keepdims=False) # multiply with broadcast
         if sample_weight is not None:
             class_weights = sample_weight * class_weights
         return original_loss_func(y_true, y_pred, sample_weight=class_weights)
     return loss_func
 
-def balanced_category_loss(original_loss_func, n_classes, min_class_frequency=1./10, max_class_frequency=10, axis=-1, sparse=True, add_channel_axis=False, dtype='float32'):
+def balanced_category_loss(original_loss_func, n_classes, min_class_frequency=1./10, max_class_frequency=10, axis=-1, sparse=True, remove_background=False, dtype='float32'):
     weight_limits = np.array([min_class_frequency, max_class_frequency]).astype(dtype)
     def loss_func(y_true, y_pred, sample_weight=None):
         if sparse:
             class_weights = tf.squeeze(y_true, axis=-1)
             if not class_weights.dtype.is_integer:
                 class_weights = tf.cast(class_weights, tf.int32)
-            class_weights = tf.one_hot(class_weights, n_classes, dtype=dtype)
+            class_weights = tf.one_hot(class_weights, n_classes+(1 if remove_background else 0), dtype=dtype)
+            if remove_background:
+                class_weights = class_weights[...,1:]
+            y_true = class_weights
         else:
+            if remove_background:
+                y_true = y_true[...,1:]
             class_weights = tf.cast(y_true, dtype=dtype)
 
         class_count = tf.math.count_nonzero(class_weights, axis=tf.range(tf.rank(class_weights)-1), dtype=tf.float32)

@@ -11,7 +11,7 @@ from .attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorChannel, l2
-from tensorflow.keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
+from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
 from ..utils.agc import adaptive_clip_grad
@@ -31,7 +31,8 @@ class DistnetModel(Model):
         center_loss = MeanSquaredError(),
         displacement_loss = MeanSquaredError(),
         category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
-        category_class_frequency_range=[1/10, 10],
+        category_class_frequency_range=[1/50, 50],
+        category_background = True,
         next = True,
         frame_window = 1,
         predict_contours = False,
@@ -67,11 +68,14 @@ class DistnetModel(Model):
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
-            assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
-            self.category_loss=weighted_loss_by_category(SparseCategoricalCrossentropy(), category_weights)
+            if category_background:
+                assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
+            else:
+                assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
+            self.category_loss=weighted_loss_by_category(CategoricalCrossentropy(), category_weights, remove_background=not category_background)
         else:
-            self.category_loss = balanced_category_loss(SparseCategoricalCrossentropy(), 4, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
-
+            self.category_loss = balanced_category_loss(CategoricalCrossentropy(), 4 if category_background else 3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=not category_background) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
+        self.category_background = category_background
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
         self.long_term = long_term
         self.use_grad_acc = accum_steps>1
@@ -93,11 +97,14 @@ class DistnetModel(Model):
             self.gradient_accumulator.init_train_step()
 
         fw = self.frame_window
+        n_frame_pairs = fw * (2. if self.next else 1)
+        if self.long_term:
+            n_frame_pairs += (fw - 1) * (2. if self.next else 1)
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
         displacement_weight = self.displacement_weight #/ 2. # y & x
         # displacement_weight /= (fw * (2. if self.next else 1)) # mean per channel # should it be divided by channel ?
-        category_weight = self.category_weight #/ (fw * (2. if self.next else 1))
+        category_weight = self.category_weight / n_frame_pairs
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
         center_weight = self.center_weight
@@ -211,7 +218,12 @@ class DistnetModel(Model):
             # category loss
             cat_loss = 0
             for i in range(self.frame_window * (2 if self.next else 1)):
-                cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
+                if not self.category_background:
+                    inside_mask = tf.math.greater(y[3+inc][...,i:i+1], 0)
+                    cat_pred_inside=tf.where(inside_mask, y_pred[3+inc][...,3*i:3*i+3], 0)
+                    cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], cat_pred_inside)
+                else:
+                    cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
             losses["category"] = cat_loss
             loss_weights["category"] = category_weight
 
@@ -323,6 +335,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
             next:bool=True,
             long_term:bool = False,
             predict_center = True,
+            category_background = True,
             name: str="DiSTNet2D",
             **kwargs,
     ):
@@ -378,7 +391,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                 decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
                 decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
                 decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
-                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4, layer_idx=l_idx, name=f"DecoderCat")
+                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, layer_idx=l_idx, name=f"DecoderCat")
                 if predict_center:
                     decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
             else:
@@ -442,7 +455,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
                         up = BatchToChannel2D(n_splits = n_out, compensate_gradient = False, name = layer_output_name)(up)
                         outputs.append(up)
-        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_contours = False, predict_center=predict_center, spatial_dims=spatial_dims, long_term=long_term, **kwargs)
+        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_contours = False, predict_center=predict_center, spatial_dims=spatial_dims, long_term=long_term, category_background=category_background, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
