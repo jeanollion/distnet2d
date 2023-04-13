@@ -74,7 +74,7 @@ class DistnetModel(Model):
                 assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
             self.category_loss=weighted_loss_by_category(CategoricalCrossentropy(), category_weights, remove_background=not category_background)
         else:
-            self.category_loss = balanced_category_loss(CategoricalCrossentropy(), 4 if category_background else 3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=not category_background) # TODO optimize this: use CategoricalCrossentropy to avoid transforming to one_hot twice
+            self.category_loss = balanced_category_loss(CategoricalCrossentropy(), 4 if category_background else 3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=not category_background)
         self.category_background = category_background
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
         self.long_term = long_term
@@ -97,14 +97,14 @@ class DistnetModel(Model):
             self.gradient_accumulator.init_train_step()
 
         fw = self.frame_window
-        n_frame_pairs = fw * (2. if self.next else 1)
+        n_frame_pairs = fw * (2 if self.next else 1)
         if self.long_term:
-            n_frame_pairs += (fw - 1) * (2. if self.next else 1)
+            n_frame_pairs += (fw - 1) * (2 if self.next else 1)
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
         displacement_weight = self.displacement_weight #/ 2. # y & x
         # displacement_weight /= (fw * (2. if self.next else 1)) # mean per channel # should it be divided by channel ?
-        category_weight = self.category_weight / n_frame_pairs
+        category_weight = self.category_weight / float(n_frame_pairs)
         contour_weight = self.contour_weight
         edm_weight = self.edm_weight
         center_weight = self.center_weight
@@ -217,10 +217,10 @@ class DistnetModel(Model):
 
             # category loss
             cat_loss = 0
-            for i in range(self.frame_window * (2 if self.next else 1)):
+            for i in range(n_frame_pairs):
                 if not self.category_background:
                     inside_mask = tf.math.greater(y[3+inc][...,i:i+1], 0)
-                    cat_pred_inside=tf.where(inside_mask, y_pred[3+inc][...,3*i:3*i+3], 0)
+                    cat_pred_inside=tf.where(inside_mask, y_pred[3+inc][...,3*i:3*i+3], 1)
                     cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], cat_pred_inside)
                 else:
                     cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
