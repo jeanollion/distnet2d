@@ -198,8 +198,8 @@ class DistnetModel(Model):
                         mask = tf.concat([mask, mask_lt], -1)
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
-                dy_norm = _get_abs_mean_foreground(y[1+inc], mask)
-                dx_norm = _get_abs_mean_foreground(y[2+inc], mask)
+                dy_norm = tf.maximum(1., _get_abs_mean_foreground(y[1+inc], mask))
+                dx_norm = tf.maximum(1.,_get_abs_mean_foreground(y[2+inc], mask))
                 #print(f"dx norm: {dx_norm} dy norm: {dy_norm}")
                 if self.displacement_grad_weight!=1:
                     g_weight = get_grad_weight_fun(self.displacement_grad_weight)
