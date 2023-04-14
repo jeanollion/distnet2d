@@ -52,6 +52,7 @@ class DistnetModel(Model):
         self.center_weight = center_loss_weight
         self.center_unicity_weight = center_unicity_loss_weight
         self.displacement_weight = displacement_loss_weight
+        assert displacement_grad_weight<=1, "displacement grad weight must be <=1"
         self.displacement_grad_weight = displacement_grad_weight
         self.center_displacement_weight = center_displacement_loss_weight
         self.category_weight = category_loss_weight
@@ -198,9 +199,13 @@ class DistnetModel(Model):
                         mask = tf.concat([mask, mask_lt], -1)
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
-                dy_norm = tf.maximum(1., tf.stop_gradient(_get_abs_mean_foreground(dy_inside, mask)))
-                dx_norm = tf.maximum(1., tf.stop_gradient(_get_abs_mean_foreground(dx_inside, mask)))
-                print(f"dx norm: {dx_norm} dy norm: {dy_norm}")
+                dy_norm = tf.stop_gradient(_get_abs_mean_foreground(dy_inside, mask))
+                dx_norm = tf.stop_gradient(_get_abs_mean_foreground(dx_inside, mask))
+                dy_norm = tf.math.square(dy_norm)
+                dx_norm = tf.math.square(dx_norm)
+                dy_norm = tf.maximum(self.displacement_grad_weight, dy_norm) # compensate grad weight if pred displacement are too low
+                dx_norm = tf.maximum(self.displacement_grad_weight, dx_norm)
+                #print(f"dx norm: {dx_norm} dy norm: {dy_norm}")
                 if self.displacement_grad_weight!=1:
                     g_weight = get_grad_weight_fun(self.displacement_grad_weight)
                     dy_inside = g_weight(dy_inside)
