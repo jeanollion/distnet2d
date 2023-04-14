@@ -10,7 +10,7 @@ import numpy as np
 from .attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
-from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorChannel, l2
+from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorChannel, l2, get_grad_weight_fun
 from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
@@ -22,7 +22,7 @@ class DistnetModel(Model):
         edm_loss_weight:float=1, edm_lovasz_loss_weight:float=1, edm_lovasz_label_loss_weight:float=0,
         contour_loss_weight:float = 1,
         center_loss_weight:float=1, center_lovasz_loss_weight:float=1, center_unicity_loss_weight:float=1e-1,
-        displacement_loss_weight:float=1, displacement_lovasz_loss_weight:float=0,
+        displacement_loss_weight:float=1, displacement_grad_weight:float=1, displacement_lovasz_loss_weight:float=0,
         center_displacement_loss_weight:float=1e-1, center_displacement_grad_weight_center:float=1e-1, center_displacement_grad_weight_displacement:float=1e-1, # ratio : init: center/motion = 10-100 . trained : motion/center = 10-100
         category_loss_weight:float=1,
         max_objects_number:int = 0,
@@ -52,6 +52,7 @@ class DistnetModel(Model):
         self.center_weight = center_loss_weight
         self.center_unicity_weight = center_unicity_loss_weight
         self.displacement_weight = displacement_loss_weight
+        self.displacement_grad_weight = displacement_grad_weight
         self.center_displacement_weight = center_displacement_loss_weight
         self.category_weight = category_loss_weight
         self.gradient_safe_mode=gradient_safe_mode
@@ -197,7 +198,14 @@ class DistnetModel(Model):
                         mask = tf.concat([mask, mask_lt], -1)
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
-                d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
+                dy_norm = _get_abs_mean_foreground(y[1+inc], mask)
+                dx_norm = _get_abs_mean_foreground(y[2+inc], mask)
+                #print(f"dx norm: {dx_norm} dy norm: {dy_norm}")
+                if self.displacement_grad_weight!=1:
+                    g_weight = get_grad_weight_fun(self.displacement_grad_weight)
+                    dy_inside = g_weight(dy_inside)
+                    dx_inside = g_weight(dx_inside)
+                d_loss = self.displacement_loss(y[1+inc], dy_inside)/dy_norm + self.displacement_loss(y[2+inc], dx_inside)/dx_norm
                 losses["displacement"] = d_loss
                 loss_weights["displacement"] = displacement_weight
 
@@ -309,6 +317,14 @@ class DistnetModel(Model):
             self.set_inference(False)
             self.trainable=True
             self.compile()
+
+def _get_abs_mean_foreground(data, mask):
+    data = tf.reshape(tf.math.abs(data), [-1])
+    mask = tf.reshape(mask, [-1])
+    data = tf.boolean_mask(data, mask)
+    return tf.cond(tf.equal(tf.shape(data)[0], 0),
+                   lambda: 1.,
+                   lambda: tf.reduce_mean(data))
 
 def get_distnet_2d(input_shape,
             frame_window:int,

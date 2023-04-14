@@ -1,22 +1,9 @@
 import tensorflow as tf
 from .coordinate_op_2d import get_weighted_mean_2d_fun, get_center_distance_spread_fun
-from ..model.layers import WeigthedGradient
+from .losses import get_grad_weight_fun
 import numpy as np
 
-def get_grad_weight_fun(weight):
-    @tf.custom_gradient
-    def wgrad(x):
-        def grad(dy):
-            if isinstance(dy, tuple): #and len(dy)>1
-                #print(f"gradient is tuple of length: {len(dy)}")
-                return (y * weight for y in dy)
-            elif isinstance(dy, list):
-                #print(f"gradient is list of length: {len(dy)}")
-                return [y * weight for y in dy]
-            else:
-                return dy * weight
-        return x, grad
-    return wgrad
+
 
 def get_motion_losses(spatial_dims, motion_range:int, center_displacement_grad_weight_center:float, center_displacement_grad_weight_displacement:float, center_scale:float, next:bool, frame_window:int, long_term:bool=False, center_motion:bool = True, center_unicity:bool=True, max_objects_number:int=0):
     nan = tf.cast(float('NaN'), tf.float32)

@@ -2,6 +2,21 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 import numpy as np
 
+def get_grad_weight_fun(weight):
+    @tf.custom_gradient
+    def wgrad(x):
+        def grad(dy):
+            if isinstance(dy, tuple): #and len(dy)>1
+                #print(f"gradient is tuple of length: {len(dy)}")
+                return (y * weight for y in dy)
+            elif isinstance(dy, list):
+                #print(f"gradient is list of length: {len(dy)}")
+                return [y * weight for y in dy]
+            else:
+                return dy * weight
+        return x, grad
+    return wgrad
+
 class MeanSquaredErrorChannel(tf.keras.losses.Loss):
     def call(self, y_true, y_pred):
         return tf.math.square(y_pred - y_true)
