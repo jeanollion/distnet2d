@@ -15,6 +15,7 @@ from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
 from ..utils.agc import adaptive_clip_grad
+from ..utils.rgs import scale_losses
 from .gradient_accumulator import GradientAccumulator
 
 class DistnetModel(Model):
@@ -41,6 +42,7 @@ class DistnetModel(Model):
         gradient_safe_mode = False,
         gradient_log_dir:str=None,
         accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False,
+        use_rgs = False,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
@@ -87,16 +89,28 @@ class DistnetModel(Model):
         self.use_agc = use_agc
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
+        self.use_rgs = use_rgs
+        self.rgs_parameters = None
         self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
         if gradient_log_dir is not None:
             self.grad_writer = tf.summary.create_file_writer(gradient_log_dir)
         else:
             self.grad_writer = None
-        self.loss_groups = [["edm", "edm_lh", "edm_lh_label", "contour", "center", "center_lh", "displacement", "displacement_lh", "category"], ["center_displacement", "center_unicity"]]
+        # self.loss_groups = [["edm", "edm_lh", "edm_lh_label", "contour", "center", "center_lh", "displacement", "displacement_lh", "category"], ["center_displacement", "center_unicity"]]
+        self.loss_groups = [["edm", "edm_lh", "edm_lh_label", "contour", "center", "center_lh", "displacement", "displacement_lh", "category", "center_displacement", "center_unicity"]]
 
     def train_step(self, data):
         if self.use_grad_acc:
             self.gradient_accumulator.init_train_step()
+        if self.use_rgs and self.rgs_parameters is None:
+            self.rgs_parameters = dict()
+            self.rgs_parameters["edm"] = [t for t in self.trainable_variables if t.name.startswith("DecoderSegEDM0") and "/kernel" in t.name ]
+            self.rgs_parameters["edm_lh"] = self.rgs_parameters["edm"]
+            self.rgs_parameters["center"] = [t for t in self.trainable_variables if t.name.startswith("DecoderCenter0") and "/kernel" in t.name ]
+            self.rgs_parameters["category"] = [t for t in self.trainable_variables if t.name.startswith("DecoderCat0") and "/kernel" in t.name ]
+            self.rgs_parameters["displacement"] = [t for t in self.trainable_variables if (t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0")) and "/kernel" in t.name ]
+            self.rgs_parameters["center_displacement"] = self.rgs_parameters["displacement"] + self.rgs_parameters["center"]
+            self.rgs_parameters["center_unicity"] = self.rgs_parameters["center"]
 
         fw = self.frame_window
         n_frame_pairs = fw * (2 if self.next else 1)
@@ -124,12 +138,11 @@ class DistnetModel(Model):
             else:
                 assert len(y) == 4, f"invalid number of output. Expected: 4 actual {len(y)}"
 
-        with tf.GradientTape(persistent=(self.use_agc and len(self.loss_groups)>1) or self.grad_writer is not None) as tape:
+        with tf.GradientTape(persistent=(self.use_agc and len(self.loss_groups)>1) or self.use_rgs or self.grad_writer is not None) as tape:
             y_pred = self(x, training=True)  # Forward pass
             # compute loss
             losses = dict()
             loss_weights = dict()
-
             inc=0
             if edm_weight>0:
                 edm_loss = self.edm_loss(y[inc], y_pred[inc])#, sample_weight = weight_map)
@@ -199,18 +212,19 @@ class DistnetModel(Model):
                         mask = tf.concat([mask, mask_lt], -1)
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
-                dy_norm = tf.stop_gradient(_get_abs_mean_foreground(dy_inside, mask))
-                dx_norm = tf.stop_gradient(_get_abs_mean_foreground(dx_inside, mask))
-                dy_norm = tf.math.square(dy_norm)
-                dx_norm = tf.math.square(dx_norm)
-                dy_norm = tf.maximum(self.displacement_grad_weight, dy_norm) # compensate grad weight if pred displacement are too low
-                dx_norm = tf.maximum(self.displacement_grad_weight, dx_norm)
+                # dy_norm = tf.stop_gradient(_get_abs_mean_foreground(dy_inside, mask))
+                # dx_norm = tf.stop_gradient(_get_abs_mean_foreground(dx_inside, mask))
+                # dy_norm = tf.math.square(dy_norm)
+                # dx_norm = tf.math.square(dx_norm)
+                # dy_norm = tf.maximum(self.displacement_grad_weight, dy_norm) # compensate grad weight if pred displacement are too low
+                # dx_norm = tf.maximum(self.displacement_grad_weight, dx_norm)
                 #print(f"dx norm: {dx_norm} dy norm: {dy_norm}")
                 if self.displacement_grad_weight!=1:
                     g_weight = get_grad_weight_fun(self.displacement_grad_weight)
                     dy_inside = g_weight(dy_inside)
                     dx_inside = g_weight(dx_inside)
-                d_loss = self.displacement_loss(y[1+inc], dy_inside)/dy_norm + self.displacement_loss(y[2+inc], dx_inside)/dx_norm
+                # d_loss = self.displacement_loss(y[1+inc], dy_inside)/dy_norm + self.displacement_loss(y[2+inc], dx_inside)/dx_norm
+                d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
                 losses["displacement"] = d_loss
                 loss_weights["displacement"] = displacement_weight
 
@@ -240,23 +254,28 @@ class DistnetModel(Model):
             losses["category"] = cat_loss
             loss_weights["category"] = category_weight
 
-            losses["loss"] = 0.
-            loss_per_group = []
-            for g in self.loss_groups:
-                loss = 0.
-                loss_count = 0
-                for n in g:
-                    if n in losses:
-                        loss = loss + losses[n] * loss_weights[n]
-                        loss_count = loss_count + 1
-                if loss_count>0:
-                    losses["loss"] = losses["loss"] + loss
-                    if mixed_precision:
-                        loss = self.optimizer.get_scaled_loss(loss)
-                    if self.use_agc or len(loss_per_group)==0:
-                        loss_per_group.append(loss)
-                    else:
-                        loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
+        if self.use_rgs:
+            losses_s = scale_losses(losses, self.rgs_parameters, "edm", tape)
+            if self.displacement_grad_weight != 1:
+                losses_s["displacement"] = losses_s["displacement"] / self.displacement_grad_weight # gradient scaling impact rgs scaling -> compensate
+            print(losses_s)
+        losses["loss"] = 0.
+        loss_per_group = []
+        for g in self.loss_groups:
+            loss = 0.
+            loss_count = 0
+            for n in g:
+                if n in losses:
+                    loss = loss + losses[n] * loss_weights[n]
+                    loss_count = loss_count + 1
+            if loss_count>0:
+                losses["loss"] = losses["loss"] + loss
+                if mixed_precision:
+                    loss = self.optimizer.get_scaled_loss(loss)
+                if self.use_agc or len(loss_per_group)==0:
+                    loss_per_group.append(loss)
+                else:
+                    loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
 
         if self.grad_writer is not None:
             trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
@@ -271,13 +290,13 @@ class DistnetModel(Model):
                             if g is not None:
                                 g = g * w
                                 #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
-                                print(f"{v.name}, loss: {loss_name}, val: {loss_value}, grad: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}] shape: {g.shape}")
+                                print(f"{v.name}, loss: {loss_name}, val: {loss_value}, grad: {tf.math.sqrt(tf.reduce_mean(tf.math.square(g))).numpy()} shape: {g.shape}")
                         if self.use_agc:
                             gradients = adaptive_clip_grad(trainable_vars_tape, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords, grad_scale = w)
                             for v, g in zip(trainable_vars_tape, gradients):
                                 if g is not None:
                                     #tf.summary.histogram(f"grad_{v.name}_loss-{loss_name}", g)
-                                    print(f"AGC: layer: {v.name}, loss: {loss_name}, grad: [{tf.math.reduce_min(g).numpy()}, {tf.reduce_mean(g).numpy()} {tf.reduce_mean(tf.math.abs(g)).numpy()}, {tf.math.reduce_max(g).numpy()}]")
+                                    print(f"AGC: layer: {v.name}, loss: {loss_name}, grad: {tf.math.sqrt(tf.reduce_mean(tf.math.square(g))).numpy()}")
 
         # Compute gradients
         for loss in loss_per_group:
@@ -551,9 +570,14 @@ def get_distnet_2d_erf2(input_shape, # Y, X
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
-                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
-                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
-                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, layer_idx=l_idx, name=f"DecoderCat")
+                param_list_bn = param_list.copy()
+                if param_list.get("n_conv", 0)>0:
+                    param_list_bn["batch_norm"] = True
+                else:
+                    param_list_bn["batch_norm_up"] = True
+                decoder_out["Track"]["dY"] = decoder_op(**param_list_bn, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
+                decoder_out["Track"]["dX"] = decoder_op(**param_list_bn, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
+                decoder_out["Cat"]["Cat"] = decoder_op(**param_list_bn, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, layer_idx=l_idx, name=f"DecoderCat")
                 if predict_center:
                     decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
             else:
