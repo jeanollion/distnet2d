@@ -253,29 +253,30 @@ class DistnetModel(Model):
                     cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
             losses["category"] = cat_loss
             loss_weights["category"] = category_weight
-
-        if self.use_rgs:
-            losses_s = scale_losses(losses, self.rgs_parameters, "edm", tape)
-            if self.displacement_grad_weight != 1:
-                losses_s["displacement"] = losses_s["displacement"] / self.displacement_grad_weight # gradient scaling impact rgs scaling -> compensate
-            print(losses_s)
-        losses["loss"] = 0.
-        loss_per_group = []
-        for g in self.loss_groups:
-            loss = 0.
-            loss_count = 0
-            for n in g:
-                if n in losses:
-                    loss = loss + losses[n] * loss_weights[n]
-                    loss_count = loss_count + 1
-            if loss_count>0:
-                losses["loss"] = losses["loss"] + loss
-                if mixed_precision:
-                    loss = self.optimizer.get_scaled_loss(loss)
-                if self.use_agc or len(loss_per_group)==0:
-                    loss_per_group.append(loss)
-                else:
-                    loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
+            
+        # TODO temporarily exclude this from gradient tape
+        # if self.use_rgs:
+        #     losses_s = scale_losses(losses, self.rgs_parameters, "edm", tape)
+        #     if self.displacement_grad_weight != 1:
+        #         losses_s["displacement"] = losses_s["displacement"] / self.displacement_grad_weight # gradient scaling impact rgs scaling -> compensate
+        #     print(losses_s)
+            losses["loss"] = 0.
+            loss_per_group = []
+            for g in self.loss_groups:
+                loss = 0.
+                loss_count = 0
+                for n in g:
+                    if n in losses:
+                        loss = loss + losses[n] * loss_weights[n]
+                        loss_count = loss_count + 1
+                if loss_count>0:
+                    losses["loss"] = losses["loss"] + loss
+                    if mixed_precision:
+                        loss = self.optimizer.get_scaled_loss(loss)
+                    if self.use_agc or len(loss_per_group)==0:
+                        loss_per_group.append(loss)
+                    else:
+                        loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
 
         if self.grad_writer is not None:
             trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
