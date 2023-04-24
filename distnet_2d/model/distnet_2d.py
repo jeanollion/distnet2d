@@ -212,19 +212,15 @@ class DistnetModel(Model):
                         mask = tf.concat([mask, mask_lt], -1)
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
-                # dy_norm = tf.stop_gradient(_get_abs_mean_foreground(dy_inside, mask))
-                # dx_norm = tf.stop_gradient(_get_abs_mean_foreground(dx_inside, mask))
-                # dy_norm = tf.math.square(dy_norm)
-                # dx_norm = tf.math.square(dx_norm)
-                # dy_norm = tf.maximum(self.displacement_grad_weight, dy_norm) # compensate grad weight if pred displacement are too low
-                # dx_norm = tf.maximum(self.displacement_grad_weight, dx_norm)
-                #print(f"dx norm: {dx_norm} dy norm: {dy_norm}")
+                norm = tf.stop_gradient( 0.5 * (_get_var_foreground(dy_inside, mask) + _get_var_foreground(dx_inside, mask)) )
+                norm = tf.maximum(self.displacement_grad_weight * displacement_weight, norm) # compensate grad weight if pred displacement are too low
+                #print(f"displacement norm: {norm}")
                 if self.displacement_grad_weight!=1:
                     g_weight = get_grad_weight_fun(self.displacement_grad_weight)
                     dy_inside = g_weight(dy_inside)
                     dx_inside = g_weight(dx_inside)
-                # d_loss = self.displacement_loss(y[1+inc], dy_inside)/dy_norm + self.displacement_loss(y[2+inc], dx_inside)/dx_norm
                 d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
+                d_loss = d_loss / norm
                 losses["displacement"] = d_loss
                 loss_weights["displacement"] = displacement_weight
 
@@ -253,7 +249,7 @@ class DistnetModel(Model):
                     cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
             losses["category"] = cat_loss
             loss_weights["category"] = category_weight
-            
+
         # TODO temporarily exclude this from gradient tape
         # if self.use_rgs:
         #     losses_s = scale_losses(losses, self.rgs_parameters, "edm", tape)
@@ -343,13 +339,13 @@ class DistnetModel(Model):
             self.trainable=True
             self.compile()
 
-def _get_abs_mean_foreground(data, mask):
-    data = tf.reshape(tf.math.abs(data), [-1])
+def _get_var_foreground(data, mask):
+    data = tf.reshape(data, [-1])
     mask = tf.reshape(mask, [-1])
     data = tf.boolean_mask(data, mask)
     return tf.cond(tf.equal(tf.shape(data)[0], 0),
                    lambda: 1.,
-                   lambda: tf.reduce_mean(data))
+                   lambda: tf.math.reduce_variance(data))
 
 def get_distnet_2d(input_shape,
             frame_window:int,
@@ -571,14 +567,14 @@ def get_distnet_2d_erf2(input_shape, # Y, X
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
-                param_list_bn = param_list.copy()
-                if param_list.get("n_conv", 0)>0:
-                    param_list_bn["batch_norm"] = True
-                else:
-                    param_list_bn["batch_norm_up"] = True
-                decoder_out["Track"]["dY"] = decoder_op(**param_list_bn, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
-                decoder_out["Track"]["dX"] = decoder_op(**param_list_bn, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
-                decoder_out["Cat"]["Cat"] = decoder_op(**param_list_bn, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, layer_idx=l_idx, name=f"DecoderCat")
+                # param_list_bn = param_list.copy()
+                # if param_list.get("n_conv", 0)>0:
+                #     param_list_bn["batch_norm"] = True
+                # else:
+                #     param_list_bn["batch_norm_up"] = True
+                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
+                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
+                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, layer_idx=l_idx, name=f"DecoderCat")
                 if predict_center:
                     decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
             else:
