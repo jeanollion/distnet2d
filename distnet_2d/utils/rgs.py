@@ -42,9 +42,15 @@ class RelativeGradientScaler():
         return self.grad_norms is not None
 
     def update(self, losses, tape):
+        gradients = dict()
         with tape.stop_recording():
-            grads = {k:tf.stop_gradient(tape.gradient(losses[k], self.parameters[k])) for k in losses.keys()}
-        self._update_norms(_get_norm(grads))
+            for k in losses.keys():
+                grads = tape.gradient(losses[k], self.parameters[k])
+                if not isinstance(grads, (list, tuple)):
+                    grads = [grads]
+                gradients[k] = [tf.stop_gradient(g) for g in grads]
+        # print(f"losses: {losses.keys()}, norms: {_get_norm(gradients)}")
+        self._update_norms(_get_norm(gradients))
 
     # def update(self, gradients):
     #     grads = {k: [tf.stop_gradient(gradients[i]) for i in indices] for k, indices in self.parameter_indices.items()}
