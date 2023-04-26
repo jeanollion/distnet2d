@@ -15,7 +15,7 @@ from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
 from ..utils.agc import adaptive_clip_grad
-from ..utils.rgs import scale_losses
+from ..utils.rgs import RelativeGradientScaler
 from .gradient_accumulator import GradientAccumulator
 
 class DistnetModel(Model):
@@ -43,6 +43,7 @@ class DistnetModel(Model):
         gradient_log_dir:str=None,
         accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False,
         use_rgs = False,
+        rgs_momentum = 0.98,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
@@ -90,27 +91,29 @@ class DistnetModel(Model):
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
         self.use_rgs = use_rgs
-        self.rgs_parameters = None
+        self.rgs_momentum=rgs_momentum
+        self.rgs = None
         self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
         if gradient_log_dir is not None:
             self.grad_writer = tf.summary.create_file_writer(gradient_log_dir)
         else:
             self.grad_writer = None
-        # self.loss_groups = [["edm", "edm_lh", "edm_lh_label", "contour", "center", "center_lh", "displacement", "displacement_lh", "category"], ["center_displacement", "center_unicity"]]
-        self.loss_groups = [["edm", "edm_lh", "edm_lh_label", "contour", "center", "center_lh", "displacement", "displacement_lh", "category", "center_displacement", "center_unicity"]]
 
     def train_step(self, data):
         if self.use_grad_acc:
             self.gradient_accumulator.init_train_step()
-        if self.use_rgs and self.rgs_parameters is None:
-            self.rgs_parameters = dict()
-            self.rgs_parameters["edm"] = [t for t in self.trainable_variables if t.name.startswith("DecoderSegEDM0") and "/kernel" in t.name ]
-            self.rgs_parameters["edm_lh"] = self.rgs_parameters["edm"]
-            self.rgs_parameters["center"] = [t for t in self.trainable_variables if t.name.startswith("DecoderCenter0") and "/kernel" in t.name ]
-            self.rgs_parameters["category"] = [t for t in self.trainable_variables if t.name.startswith("DecoderCat0") and "/kernel" in t.name ]
-            self.rgs_parameters["displacement"] = [t for t in self.trainable_variables if (t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0")) and "/kernel" in t.name ]
-            self.rgs_parameters["center_displacement"] = self.rgs_parameters["displacement"] + self.rgs_parameters["center"]
-            self.rgs_parameters["center_unicity"] = self.rgs_parameters["center"]
+        if self.use_rgs and self.rgs is None:
+            rgs_parameters = dict()
+            rgs_parameters["edm"] = [(t, i) for i,t in enumerate(self.trainable_variables) if t.name.startswith("DecoderSegEDM0") and "/kernel" in t.name ]
+            rgs_parameters["edm_lh"] = rgs_parameters["edm"]
+            rgs_parameters["center"] = [(t, i) for i,t in enumerate(self.trainable_variables) if t.name.startswith("DecoderCenter0") and "/kernel" in t.name ]
+            rgs_parameters["category"] = [(t, i) for i,t in enumerate(self.trainable_variables) if t.name.startswith("DecoderCat0") and "/kernel" in t.name ]
+            rgs_parameters["displacement"] = [(t, i) for i,t in enumerate(self.trainable_variables) if (t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0")) and "/kernel" in t.name ]
+            if self.center_displacement_weight>0:
+                rgs_parameters["center_displacement"] = rgs_parameters["displacement"] + rgs_parameters["center"]
+            if self.center_unicity_weight>0:
+                rgs_parameters["center_unicity"] = rgs_parameters["center"]
+            self.rgs = RelativeGradientScaler(rgs_parameters, "edm", momentum = self.rgs_momentum)
 
         fw = self.frame_window
         n_frame_pairs = fw * (2 if self.next else 1)
@@ -138,7 +141,7 @@ class DistnetModel(Model):
             else:
                 assert len(y) == 4, f"invalid number of output. Expected: 4 actual {len(y)}"
 
-        with tf.GradientTape(persistent=(self.use_agc and len(self.loss_groups)>1) or self.use_rgs or self.grad_writer is not None) as tape:
+        with tf.GradientTape(persistent=self.use_rgs or self.grad_writer is not None) as tape:
             y_pred = self(x, training=True)  # Forward pass
             # compute loss
             losses = dict()
@@ -212,15 +215,15 @@ class DistnetModel(Model):
                         mask = tf.concat([mask, mask_lt], -1)
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
-                norm = tf.stop_gradient( 0.5 * (_get_var_foreground(dy_inside, mask) + _get_var_foreground(dx_inside, mask)) )
-                norm = tf.maximum(self.displacement_grad_weight * displacement_weight, norm) # compensate grad weight if pred displacement are too low
+                # norm = tf.stop_gradient( 0.5 * (_get_var_foreground(dy_inside, mask) + _get_var_foreground(dx_inside, mask)) )
+                # norm = tf.maximum(float(self.displacement_grad_weight * displacement_weight), norm) # compensate grad weight if pred displacement are too low
                 #print(f"displacement norm: {norm}")
                 if self.displacement_grad_weight!=1:
                     g_weight = get_grad_weight_fun(self.displacement_grad_weight)
                     dy_inside = g_weight(dy_inside)
                     dx_inside = g_weight(dx_inside)
                 d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
-                d_loss = d_loss / norm
+                # d_loss = d_loss / norm
                 losses["displacement"] = d_loss
                 loss_weights["displacement"] = displacement_weight
 
@@ -250,30 +253,19 @@ class DistnetModel(Model):
             losses["category"] = cat_loss
             loss_weights["category"] = category_weight
 
-        # TODO temporarily exclude this from gradient tape
-        # if self.use_rgs:
-        #     losses_s = scale_losses(losses, self.rgs_parameters, "edm", tape)
-        #     if self.displacement_grad_weight != 1:
-        #         losses_s["displacement"] = losses_s["displacement"] / self.displacement_grad_weight # gradient scaling impact rgs scaling -> compensate
-        #     print(losses_s)
-            losses["loss"] = 0.
-            loss_per_group = []
-            for g in self.loss_groups:
-                loss = 0.
-                loss_count = 0
-                for n in g:
-                    if n in losses:
-                        loss = loss + losses[n] * loss_weights[n]
-                        loss_count = loss_count + 1
-                if loss_count>0:
-                    losses["loss"] = losses["loss"] + loss
-                    if mixed_precision:
-                        loss = self.optimizer.get_scaled_loss(loss)
-                    if self.use_agc or len(loss_per_group)==0:
-                        loss_per_group.append(loss)
-                    else:
-                        loss_per_group[0] = loss_per_group[0] + loss # no need to have separate losses
-
+            if self.use_rgs:
+                self.rgs.update(losses, tape)
+                self.rgs.scale_gradients(losses)
+            loss = 0.
+            loss_output = 0.
+            for k, l in losses.items():
+                loss_output += l * loss_weights[k]
+                loss += l
+            if mixed_precision:
+                loss = self.optimizer.get_scaled_loss(loss)
+            losses["loss"] = loss_output
+            if not self.use_rgs: # if RGS: loss weights are not taken into acount
+                loss = loss_output
         if self.grad_writer is not None:
             trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
             with self.grad_writer.as_default(step=self._train_counter):
@@ -296,32 +288,19 @@ class DistnetModel(Model):
                                     print(f"AGC: layer: {v.name}, loss: {loss_name}, grad: {tf.math.sqrt(tf.reduce_mean(tf.math.square(g))).numpy()}")
 
         # Compute gradients
-        for loss in loss_per_group:
-            gradients = tape.gradient(loss, self.trainable_variables)
-            if mixed_precision:
-                gradients = self.optimizer.get_unscaled_gradients(gradients)
-            if self.use_agc:
-                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
-            if not self.use_grad_acc and len(loss_per_group)==1:
-                self.optimizer.apply_gradients(zip(gradients, self.trainable_variables)) #Update weights
-            else:
-                self.gradient_accumulator.accumulate_gradients(gradients)
-        if self.use_grad_acc or len(loss_per_group)>1:
+        gradients = tape.gradient(loss, self.trainable_variables)
+        if mixed_precision:
+            gradients = self.optimizer.get_unscaled_gradients(gradients)
+        # if self.use_rgs:
+        #     self.rgs.update(gradients)
+        if self.use_agc:
+            gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
+        if not self.use_grad_acc:
+            self.optimizer.apply_gradients(zip(gradients, self.trainable_variables)) #Update weights
+        else:
+            self.gradient_accumulator.accumulate_gradients(gradients)
             self.gradient_accumulator.apply_gradients()
         return losses
-        # gradient safe mode
-        # def t_fn():# if any of the gradients are NaN, set loss metric to NaN
-        #     return losses["loss"]
-        #     #return tf.constant(float('NaN'))
-        # def f_fn(): # if all gradients are valid apply them
-        #     self.optimizer.apply_gradients(grads_and_vars, experimental_aggregate_gradients=False)
-        #     return losses["loss"]
-        # grad_nan=[tf.reduce_any(tf.math.is_nan(g)) for g,_ in grads_and_vars if g is not None]
-        # grad_nan=tf.reduce_any(grad_nan)
-        # losses["loss"] = tf.cond(grad_nan, t_fn, f_fn)
-        # # printlosses={k:v.numpy() for k,v in losses.items()}
-        # # print(f"losses: {printlosses}")
-        # return losses
 
     def set_inference(self, inference:bool=True):
         for layer in self.layers:
