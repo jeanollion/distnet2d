@@ -28,7 +28,10 @@ def _unitwise_norm(x):
     return _compute_norm(x, axis, keepdims)
 
 def _get_norm(gradients):
-    return {k : tf.math.reduce_mean([_unitwise_norm(g) for g in grads], keepdims = False) for k, grads in gradients.items()}
+    norms = [tf.stop_gradient(_unitwise_norm(g)) for g in gradients if g is not None]
+    if len(norms)==0:
+        return None
+    return tf.math.reduce_mean(tf.stack(norms), keepdims = False)
 
 class RelativeGradientScaler():
     def __init__(self, parameters, ref_key, momentum=0.98):
@@ -37,38 +40,55 @@ class RelativeGradientScaler():
         self.parameter_indices = {k:list(zip(*p))[1] for k, p in parameters.items()}
         self.ref_key = ref_key
         self.grad_norms = None
-
-    def initialized(self):
-        return self.grad_norms is not None
+        self.key_index = {k:i for i, k in enumerate(parameters.keys())}
+        self.norm_accumulation = [
+            tf.Variable(0., trainable=False, name=f"norm_{k}",
+            synchronization=tf.VariableSynchronization.ON_READ,
+            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA,
+            dtype=tf.float32) for k in self.key_index.keys()
+        ]
+        self.initialized = [
+            tf.Variable(False, trainable=False, name=f"init_{k}",
+            synchronization=tf.VariableSynchronization.ON_READ,
+            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA,
+            dtype=tf.bool) for k in self.key_index.keys()
+        ]
 
     def update(self, losses, tape):
-        gradients = dict()
-        with tape.stop_recording():
-            for k in losses.keys():
-                grads = tape.gradient(losses[k], self.parameters[k])
+        for k, l in losses.items():
+            with tape.stop_recording():
+                grads = tape.gradient(l, self.parameters[k])
                 if not isinstance(grads, (list, tuple)):
                     grads = [grads]
-                gradients[k] = [tf.stop_gradient(g) for g in grads]
-        # print(f"losses: {losses.keys()}, norms: {_get_norm(gradients)}")
-        self._update_norms(_get_norm(gradients))
+            # print(f"losses: {losses.keys()}, norms: {_get_norm(gradients)}")
+            norm = _get_norm(grads)
+            if norm is not None:
+                self._update_norm(norm, k)
 
     # def update(self, gradients):
     #     grads = {k: [tf.stop_gradient(gradients[i]) for i in indices] for k, indices in self.parameter_indices.items()}
     #     self._update_norms(_get_norm(grads), scaled_gradients=True)
 
-    def _update_norms(self, norms, scaled_gradients = False):
+    def _update_norm(self, norm, key, scaled_gradients = False):
         # print(f"update norm: {norms}")
-        if self.grad_norms is None:
-            self.grad_norms = norms
-        else:
-            for k, w in norms.items():
-                # print(f"update weight: {k} was: {self.grad_norms[k]}, new: {w} next: {self.grad_norms[k] * self.momentum + w * (1 - self.momentum)}")
-                if scaled_gradients:
-                    w  = w * self.relative_weights[k] # gradient was computed after applying the previous weight -> compensate
-                self.grad_norms[k] = self.grad_norms[k] * self.momentum + w * (1 - self.momentum)
+        i = self.key_index[key]
+        def init():
+            self.initialized[i].assign(True)
+            return norm
+        def update():
+            if scaled_gradients:
+                n  = norm * self.norm_accumulation[i] # gradient was computed after applying the previous weight -> compensate
+            else:
+                n = norm
+            return self.norm_accumulation[i] * self.momentum + n * (1. - self.momentum)
+        #print(f"norm: {key} = {self.norm_accumulation[i]} init: {self.initialized[i]}")
+        self.norm_accumulation[i].assign(tf.cond(self.initialized[i], update, init))
+        #print(f"norm: {key} = {self.norm_accumulation[i]} from: {norm}")
 
     def scale_gradients(self, losses):
+        ref_idx = self.key_index[self.ref_key]
         for k, l in losses.items():
             if k!=self.ref_key:
-                g_weight = get_grad_weight_fun(self.grad_norms[self.ref_key]/self.grad_norms[k])
+                i = self.key_index[k]
+                g_weight = get_grad_weight_fun(self.norm_accumulation[ref_idx]/self.norm_accumulation[i])
                 losses[k] = g_weight(l)
