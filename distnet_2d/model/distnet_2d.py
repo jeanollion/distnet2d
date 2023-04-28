@@ -215,13 +215,14 @@ class DistnetModel(Model):
                         mask = tf.concat([mask, mask_lt], -1)
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
-                # norm = tf.stop_gradient( 0.5 * (_get_var_foreground(dy_inside, mask) + _get_var_foreground(dx_inside, mask)) )
-                # norm = tf.maximum(float(self.displacement_grad_weight * displacement_weight), norm) # compensate grad weight if pred displacement are too low
-                #print(f"displacement norm: {norm}")
-                if self.displacement_grad_weight!=1:
-                    g_weight = get_grad_weight_fun(self.displacement_grad_weight)
-                    dy_inside = g_weight(dy_inside)
-                    dx_inside = g_weight(dx_inside)
+                norm = 0.5 * (_get_var_foreground(dy_inside, mask) + _get_var_foreground(dx_inside, mask))
+                #norm = tf.math.sqrt(norm)
+                norm = tf.stop_gradient(norm)
+                norm = tf.maximum(float(self.displacement_grad_weight * displacement_weight), norm) # compensate grad weight if pred displacement are too low
+                print(f"displacement norm: {norm}")
+                g_weight = get_grad_weight_fun(self.displacement_grad_weight / norm )
+                dy_inside = g_weight(dy_inside)
+                dx_inside = g_weight(dx_inside)
                 d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
                 # d_loss = d_loss / norm
                 losses["displacement"] = d_loss
@@ -253,19 +254,21 @@ class DistnetModel(Model):
             losses["category"] = cat_loss
             loss_weights["category"] = category_weight
 
-            if self.use_rgs:
-                self.rgs.update(losses, tape)
-                self.rgs.scale_gradients(losses)
+            # if self.use_rgs:
+            #     self.rgs.update(losses, tape)
+            #     self.rgs.scale_gradients(losses)
             loss = 0.
-            loss_output = 0.
             for k, l in losses.items():
-                loss_output += l * loss_weights[k]
-                loss += l
+                loss += l * loss_weights[k]
             if mixed_precision:
                 loss = self.optimizer.get_scaled_loss(loss)
-            losses["loss"] = loss_output
-            if not self.use_rgs: # if RGS: loss weights are not taken into acount
-                loss = loss_output
+            losses["loss"] = loss
+            # if self.use_rgs: # if RGS: loss weights are not taken into acount
+            #     loss = 0.
+            #     for k, l in losses.items():
+            #         loss += l
+            #     if mixed_precision:
+            #         loss = self.optimizer.get_scaled_loss(loss)
         if self.grad_writer is not None:
             trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
             with self.grad_writer.as_default(step=self._train_counter):
@@ -291,8 +294,6 @@ class DistnetModel(Model):
         gradients = tape.gradient(loss, self.trainable_variables)
         if mixed_precision:
             gradients = self.optimizer.get_unscaled_gradients(gradients)
-        # if self.use_rgs:
-        #     self.rgs.update(gradients)
         if self.use_agc:
             gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
         if not self.use_grad_acc:
