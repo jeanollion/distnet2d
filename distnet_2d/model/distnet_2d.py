@@ -103,9 +103,10 @@ class DistnetModel(Model):
             ags_parameters["edm_lh"] = ags_parameters["edm"]
             ags_parameters["center"] = [t for t in self.trainable_variables if t.name.startswith("DecoderCenter0") and "/kernel" in t.name ]
             ags_parameters["category"] = [t for t in self.trainable_variables if t.name.startswith("DecoderCat0") and "/kernel" in t.name ]
-            ags_parameters["displacement"] = [t for t in self.trainable_variables if (t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0")) and "/kernel" in t.name ]
-            if self.center_displacement_weight>0:
-                ags_parameters["center_displacement"] = ags_parameters["displacement"] + ags_parameters["center"]
+            ags_parameters["dY"] = [t for t in self.trainable_variables if t.name.startswith("DecoderTrackY0") and "/kernel" in t.name ]
+            ags_parameters["dX"] = [t for t in self.trainable_variables if t.name.startswith("DecoderTrackX0") and "/kernel" in t.name ]
+            # if self.center_displacement_weight>0:
+            #     ags_parameters["center_displacement"] = ags_parameters["displacement"] + ags_parameters["center"]
             if self.center_unicity_weight>0:
                 ags_parameters["center_unicity"] = ags_parameters["center"]
             self.ags.init_parameters(ags_parameters)
@@ -211,23 +212,27 @@ class DistnetModel(Model):
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
                 if self.normalize_displacement:
-                    norm = 0.5 * (_get_var_foreground(dy_inside, mask) + _get_var_foreground(dx_inside, mask))
+                    norm_y = _get_var_foreground(dy_inside, mask)
+                    norm_x = _get_var_foreground(dx_inside, mask)
                     #norm = tf.math.sqrt(norm)
-                    norm = tf.stop_gradient(norm)
-                    norm = tf.maximum(float(self.displacement_grad_weight * displacement_weight), norm) # compensate grad weight if pred displacement are too low
+                    norm_y = tf.stop_gradient(norm_y)
+                    norm_x = tf.stop_gradient(norm_x)
+                    norm_y = tf.maximum(float(self.displacement_grad_weight * displacement_weight), norm_y) # compensate grad weight if pred displacement are too low
+                    norm_x = tf.maximum(float(self.displacement_grad_weight * displacement_weight), norm_x)
                     #print(f"displacement norm: {norm}")
-                    g_weight = get_grad_weight_fun(self.displacement_grad_weight / norm )
+                    g_weight_y = get_grad_weight_fun(self.displacement_grad_weight / norm_y )
+                    g_weight_x = get_grad_weight_fun(self.displacement_grad_weight / norm_x )
+                    dy_inside = g_weight_y(dy_inside)
+                    dx_inside = g_weight_x(dx_inside)
                 elif self.displacement_grad_weight !=1:
                     g_weight = get_grad_weight_fun(self.displacement_grad_weight )
-                else:
-                    g_weight = None
-                if g_weight is not None:
                     dy_inside = g_weight(dy_inside)
                     dx_inside = g_weight(dx_inside)
-                d_loss = self.displacement_loss(y[1+inc], dy_inside) + self.displacement_loss(y[2+inc], dx_inside)
-                # d_loss = d_loss / norm
-                losses["displacement"] = d_loss
-                loss_weights["displacement"] = displacement_weight
+
+                losses["dY"] = self.displacement_loss(y[1+inc], dy_inside)
+                loss_weights["dY"] = displacement_weight
+                losses["dX"] = self.displacement_loss(y[2+inc], dx_inside)
+                loss_weights["dX"] = displacement_weight
 
             n_motion_loss =(1 if center_displacement_weight>0 else 0) + (1 if self.center_unicity_weight>0 else 0)
             if n_motion_loss>0:
@@ -271,7 +276,7 @@ class DistnetModel(Model):
             #     if mixed_precision:
             #         loss = self.optimizer.get_scaled_loss(loss)
         if self.print_gradients:
-            trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
+            trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
             for loss_name, loss_value in losses.items():
                 if loss_name != "loss" :
                     w = loss_weights[loss_name] # outside tape: cannot modify loss_value -> need to apply w to gradient itself
