@@ -641,6 +641,7 @@ def get_distnet_2d_erf3(input_shape, # Y, X
             upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
             downsampling_mode:str = "maxpool_and_stride", #maxpool, stride, maxpool_and_stride
             combine_kernel_size:int = 1,
+            pair_combine_kernel_size:int = 1,
             skip_stop_gradient:bool = True,
             skip_connections:bool = False,
             skip_combine_mode:str="conv", #conv, wsconv
@@ -679,7 +680,7 @@ def get_distnet_2d_erf3(input_shape, # Y, X
         if attention:
             attention_op = SpatialAttention2D(positional_encoding="2D", name="Attention")
             attention_skip_op = Combine(filters=feature_filters, name="AttentionSkip")
-        pair_combine_op = Combine(filters=feature_filters, name="FeaturePairCombine")
+        pair_combine_op = Combine(filters=feature_filters, kernel_size = pair_combine_kernel_size, name="FeaturePairCombine")
         all_pair_combine_op = Combine(filters=combine_filters, compensate_gradient = True, name="AllFeaturePairCombine")
         feature_pair_feature_combine_op = Combine(filters=feature_filters, name="FeaturePairFeatureCombine")
 
@@ -758,7 +759,7 @@ def get_distnet_2d_erf3(input_shape, # Y, X
                     feature_next.append(all_features[c])
         feature_prev = Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
         feature_next = Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
-        feature_pair = pair_combine_op([feature_prev, feature_next, feature_next-feature_prev])
+        feature_pair = pair_combine_op([feature_prev, feature_next]) # , feature_next-feature_prev
         if attention:
             attention_result = attention_op([feature_prev, feature_next])
             feature_pair = attention_skip_op([attention_result, feature_pair])
