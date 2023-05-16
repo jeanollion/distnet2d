@@ -43,11 +43,12 @@ def _unitwise_norm(x):
 #         raise ValueError(f"Got a parameter with shape not in [1, 2, 4, 5]! {x}")
 
 class AdaptativeGradientScaler():
-    def __init__(self, clip_factor:float, eps:float=1e-3, grad_eps:float= 1e-6):
+    def __init__(self, clip_factor:float, unitwise:bool = True, eps:float=1e-3, grad_eps:float= 1e-6):
         self.eps=eps
         self.grad_eps = grad_eps
         self.clip_factor = clip_factor
         self.scale = None
+        self.unitwise=unitwise
 
     def init_parameters(self, parameters:dict):
         self.parameters = parameters
@@ -70,6 +71,8 @@ class AdaptativeGradientScaler():
         max_norm = tf.math.maximum(p_norm, self.eps) * self.clip_factor
         grad_norm = _unitwise_norm(grads)
         scale = tf.math.divide(max_norm, tf.math.maximum(grad_norm, self.grad_eps))
+        if not self.unitwise:
+            scale = tf.math.reduce_mean(scale)
         # print(f"all scales: {scale}")
         scale = tf.math.minimum(1., scale)
         #return scale
@@ -86,10 +89,10 @@ class AdaptativeGradientScaler():
             scales = [self._get_scale(p,g) for p,g in zip(self.parameters[k], grads) if g is not None]
             if len(scales)>0:
                 scale = tf.math.reduce_mean(tf.stack(scales), axis = 0, keepdims = False)
-                scale = tf.stop_gradient(scale) # TODO : necessary ? 
+                scale = tf.stop_gradient(scale) # TODO : necessary ?
                 i = self.key_index[k]
                 self.scale[i].assign(scale)
-                # print(f"loss: {k} scale: {scale}")
+                print(f"loss: {k} scale: {scale}")
 
     def scale_gradients(self, losses):
         for k, l in losses.items():

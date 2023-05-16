@@ -42,7 +42,7 @@ class DistnetModel(Model):
         long_term:bool = False,
         print_gradients:bool=False, # eager mode only
         accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False, # lower clip factor clips more
-        use_ags = False, ags_clip_factor = 0.1, ags_eps = 1e-3, ags_grad_eps = 1e-6,
+        use_ags = False, ags_clip_factor = 0.1, ags_unitwise=True, ags_eps = 1e-3, ags_grad_eps = 1e-6,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
@@ -89,7 +89,7 @@ class DistnetModel(Model):
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
         self.use_ags = use_ags
-        self.ags = AdaptativeGradientScaler(ags_clip_factor, ags_eps, ags_grad_eps)
+        self.ags = AdaptativeGradientScaler(ags_clip_factor, ags_unitwise, ags_eps, ags_grad_eps)
         self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
         self.print_gradients=print_gradients
         self.normalize_displacement=normalize_displacement
@@ -338,9 +338,13 @@ def get_distnet_2d(input_shape,
             config,
             extract_per_decoder_type:bool = False,
             combine_pairs:bool = False,
+            skip:bool = False,
             name: str="DiSTNet2D",
             **kwargs):
-    if extract_per_decoder_type:
+    if skip:
+        fun = get_distnet_2d_erf4
+        assert combine_pairs and extract_per_decoder_type, "invalid args with skip"
+    elif extract_per_decoder_type:
         fun = get_distnet_2d_erf3 if combine_pairs else get_distnet_2d_erf2
     else:
         assert not combine_pairs
@@ -759,7 +763,7 @@ def get_distnet_2d_erf3(input_shape, # Y, X
                     feature_next.append(all_features[c])
         feature_prev = Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
         feature_next = Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
-        feature_pair = pair_combine_op([feature_prev, feature_next]) # , feature_next-feature_prev
+        feature_pair = pair_combine_op([feature_prev, feature_next, feature_next-feature_prev])
         if attention:
             attention_result = attention_op([feature_prev, feature_next])
             feature_pair = attention_skip_op([attention_result, feature_pair])
@@ -772,6 +776,173 @@ def get_distnet_2d_erf3(input_shape, # Y, X
         outputs = []
         feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_chan, inference_conv_idx=frame_window, filters = feature_filters, name = f"SegmentationFeatures")(combined_features) # (N_OUT x B, Y, X, F)
         feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_OUT x B, Y, X, F)
+
+        for decoder_name, is_segmentation in decoder_is_segmentation.items():
+            if is_segmentation is not None:
+                d_layers = decoder_layers[decoder_name]
+                for output_name in output_per_decoder[decoder_name]:
+                    if output_name in decoder_out[decoder_name]:
+                        d_out = decoder_out[decoder_name][output_name]
+                        layer_output_name = decoder_output_names[decoder_name][output_name]
+                        skip = skip_per_decoder[decoder_name]
+                        up = feature_per_frame if is_segmentation else feature_per_frame_pair
+                        for op in decoder_feature_op[decoder_name][0]:
+                            up = op(up)
+                        for l, res in zip(d_layers[::-1], residuals[:-1]):
+                            up = l([up, res if skip else None])
+                        up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
+                        up = BatchToChannel2D(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up)
+                        outputs.append(up)
+        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_contours = False, predict_center=predict_center, spatial_dims=spatial_dims, long_term=long_term, category_background=category_background, **kwargs)
+
+def get_distnet_2d_erf4(input_shape, # Y, X
+            encoder_settings:list,
+            feature_settings: list,
+            feature_blending_settings: list,
+            feature_decoder_settings:list,
+            decoder_settings: list,
+            upsampling_mode:str="tconv", # tconv, up_nn, up_bilinear
+            downsampling_mode:str = "maxpool_and_stride", #maxpool, stride, maxpool_and_stride
+            combine_kernel_size:int = 1,
+            pair_combine_kernel_size:int = 1,
+            skip_stop_gradient:bool = True,
+            skip_connections:bool = False,
+            skip_combine_mode:str="conv", #conv, wsconv
+            attention : bool = True,
+            frame_window:int = 1,
+            next:bool=True,
+            long_term:bool = True,
+            predict_center = True,
+            category_background = False,
+            name: str="DiSTNet2D",
+            **kwargs,
+    ):
+        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
+        assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
+        spatial_dims = ensure_multiplicity(2, input_shape)
+        if isinstance(spatial_dims, tuple):
+            spatial_dims = list(spatial_dims)
+        if frame_window<=1:
+            long_term = False
+        n_chan = frame_window * (2 if next else 1) + 1
+        # define enconder operations
+        encoder_layers = []
+        contraction_per_layer = []
+        no_residual_layer = []
+        last_input_filters = 1
+        for l_idx, param_list in enumerate(encoder_settings):
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
+            last_input_filters = out_filters
+            encoder_layers.append(op)
+            contraction_per_layer.append(contraction)
+            no_residual_layer.append(residual_filters==0)
+        # define feature operations
+        feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", last_input_filters=out_filters)
+        combine_filters = int(feature_filters * n_chan / 2.)
+        combine_features_op = Combine(filters=combine_filters, compensate_gradient = True, name="CombineFeatures")
+        if attention:
+            attention_op = SpatialAttention2D(positional_encoding="2D", name="Attention")
+        pair_combine_op = Combine(filters=feature_filters, kernel_size = pair_combine_kernel_size, name="FeaturePairCombine")
+        all_pair_combine_op = Combine(filters=combine_filters, compensate_gradient = True, name="AllFeaturePairCombine")
+        feature_pair_feature_combine_op = Combine(filters=feature_filters, name="FeaturePairFeatureCombine")
+
+        for f in feature_blending_settings:
+            if "filters" not in f or f["filters"]<0:
+                f["filters"] = combine_filters
+        feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(feature_blending_settings, "FeatureBlendingSequence", last_input_filters=combine_filters)
+
+        feature_skip_op = Combine(filters=feature_filters, name="FeatureSkip")
+        feature_pair_skip_op = Combine(filters=feature_filters, name="FeaturePairSkip")
+
+        # define decoder operations
+        decoder_layers={"Seg":[], "Center":[], "Track":[], "Cat":[]}
+        get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
+        decoder_feature_op={n: get_seq_and_filters(parse_param_list(feature_decoder_settings, f"Features{n}", last_input_filters=feature_filters)) for n in decoder_layers.keys()}
+        decoder_out={"Seg":{}, "Center":{}, "Track":{}, "Cat":{}}
+        output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"], "Cat": ["Cat"]}
+        n_frame_pairs = n_chan -1
+        if long_term:
+            n_frame_pairs = n_frame_pairs + (frame_window-1) * (2 if next else 1)
+        decoder_is_segmentation = {"Seg": True, "Center": True, "Track": False, "Cat": False}
+        skip_per_decoder = {"Seg": skip_connections, "Center": False, "Track": False, "Cat": False}
+        output_inc = 0
+        seg_out = ["Output0_EDM"]
+        activation_out = ["linear"]
+
+        for l_idx, param_list in enumerate(decoder_settings):
+            if l_idx==0:
+                decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderSegEDM")
+                # param_list_bn = param_list.copy()
+                # if param_list.get("n_conv", 0)>0:
+                #     param_list_bn["batch_norm"] = True
+                # else:
+                #     param_list_bn["batch_norm_up"] = True
+                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackY")
+                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderTrackX")
+                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, layer_idx=l_idx, name=f"DecoderCat")
+                if predict_center:
+                    decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, layer_idx=l_idx, name=f"DecoderCenter")
+            else:
+                for decoder_name, d_layers in decoder_layers.items():
+                    d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", layer_idx=l_idx, name=f"Decoder{decoder_name}") )
+        decoder_output_names = dict()
+        oi = 0
+        for n, o_ns in output_per_decoder.items():
+            decoder_output_names[n] = dict()
+            for o_n in o_ns:
+                decoder_output_names[n][o_n] = f"Output{oi}_{o_n}"
+                oi += 1
+        # Create GRAPH
+        input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
+        input_merged = ChannelToBatch2D(compensate_gradient = False, name = "MergeInputs")(input)
+        downsampled = [input_merged]
+        residuals = []
+        for l in encoder_layers:
+            down, res = l(downsampled[-1])
+            downsampled.append(down)
+            residuals.append(res)
+        residuals = residuals[::-1]
+
+        feature = downsampled[-1]
+        for op in feature_convs:
+            feature = op(feature)
+
+        all_features = SplitBatch2D(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
+        combined_features = combine_features_op(all_features)
+        feature_prev = []
+        feature_next = []
+        for i in range(1, n_chan):
+            feature_prev.append(all_features[i-1])
+            feature_next.append(all_features[i])
+        if long_term:
+            for c in range(0, frame_window-1):
+                feature_prev.append(all_features[c])
+                feature_next.append(all_features[frame_window])
+            if next:
+                for c in range(frame_window+2, n_chan):
+                    feature_prev.append(all_features[frame_window])
+                    feature_next.append(all_features[c])
+        feature_prev = Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
+        feature_next = Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
+        if attention:
+            attention_result = attention_op([feature_prev, feature_next])
+            feature_pair = pair_combine_op([feature_prev, feature_next, attention_result])
+        else:
+            feature_pair = pair_combine_op([feature_prev, feature_next])
+
+        all_feature_pairs = SplitBatch2D(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pair)
+        combined_feature_pairs = all_pair_combine_op(all_feature_pairs)
+        combined_features = feature_pair_feature_combine_op([combined_features, combined_feature_pairs])
+        for op in feature_blending_convs:
+            combined_features = op(combined_features)
+
+        outputs = []
+        feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_chan, inference_conv_idx=frame_window, filters = feature_filters, name = f"SegmentationFeatures")(combined_features) # (N_CHAN x B, Y, X, F)
+        feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
+
+        # skip connections
+        feature_per_frame = feature_skip_op([stop_gradient(feature, "FeatureSkipStopGradient"), feature_per_frame])
+        feature_per_frame_pair = feature_pair_skip_op([stop_gradient(feature_pair, "FeaturePairSkipStopGradient" ), feature_per_frame_pair])
 
         for decoder_name, is_segmentation in decoder_is_segmentation.items():
             if is_segmentation is not None:

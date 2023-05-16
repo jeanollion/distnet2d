@@ -296,7 +296,7 @@ def get_center_scale_range(dataset, raw_feature_name:str = "/raw", fluorescence:
     fluorescence : bool
         in fluoresence mode:
             mode M is computed, corresponding to the Mp centile: M = centile(Mp). center_range = [centile(Mp-fluo_centile_extent), centile(Mp+fluo_centile_extent)]
-            scale_range = [centile(fluo_centile_range[0]) - M, centile(fluo_centile_range[0]) + M ]
+            scale_range = [centile(fluo_centile_range[0]) - M, centile(fluo_centile_range[1]) - M ]
         in transmitted light mode: with transmitted_light_per_image_mode=True center_range = [mean - tl_sd_factor*sd, mean + tl_sd_factor*sd]; scale_range = [sd/tl_sd_factor, sd*tl_sd_factor]
     tl_sd_factor : float
         use in the computation of transmitted light ranges cf description of fluorescence parameter
