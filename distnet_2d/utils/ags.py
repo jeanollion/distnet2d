@@ -92,7 +92,7 @@ class AdaptativeGradientScaler():
                 scale = tf.stop_gradient(scale) # TODO : necessary ?
                 i = self.key_index[k]
                 self.scale[i].assign(scale)
-                print(f"loss: {k} scale: {scale}")
+                #print(f"loss: {k} scale: {scale}")
 
     def scale_gradients(self, losses):
         for k, l in losses.items():
