@@ -944,8 +944,8 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
 
         # skip connections
-        feature_per_frame = feature_skip_op([feature, "FeatureSkipStopGradient", feature_per_frame])
-        feature_per_frame_pair = feature_pair_skip_op([feature_pair, "FeaturePairSkipStopGradient", feature_per_frame_pair])
+        feature_per_frame = feature_skip_op([feature, feature_per_frame])
+        feature_per_frame_pair = feature_pair_skip_op([feature_pair, feature_per_frame_pair])
 
         for decoder_name, is_segmentation in decoder_is_segmentation.items():
             if is_segmentation is not None:
