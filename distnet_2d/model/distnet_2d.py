@@ -11,7 +11,7 @@ from .attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorChannel, l2, get_grad_weight_fun
-from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError, MeanAbsoluteError
+from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError, MeanAbsoluteError, Huber
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
 from ..utils.agc import adaptive_clip_grad
@@ -29,9 +29,9 @@ class DistnetModel(Model):
         category_loss_weight:float=1,
         max_objects_number:int = 0,
         center_scale:float=0, # 0 : computed automatically
-        edm_loss= MeanSquaredError(),
-        center_loss = MeanAbsoluteError(),
-        displacement_loss = MeanAbsoluteError(),
+        edm_loss= Huber(),
+        center_loss = Huber(),
+        displacement_loss = Huber(),
         category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
         category_class_frequency_range=[1/50, 50],
         category_background = True,
