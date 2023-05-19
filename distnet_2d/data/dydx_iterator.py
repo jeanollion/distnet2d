@@ -6,6 +6,7 @@ from scipy.ndimage import center_of_mass, find_objects, maximum_filter, map_coor
 from scipy.ndimage.measurements import mean
 from skimage.transform import rescale
 from skimage.feature import peak_local_max
+import skfmm
 from math import copysign, isnan
 import sys
 import itertools
@@ -438,42 +439,29 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
     #         if l in no_next:
     #             noNextArr[r]=True
 
-def _draw_centers(centerIm, labels_map_centers, edm, labelIm): # TODO design choice: draw gaussian and use L2 regression ?
+def _draw_centers(centerIm, labels_map_centers, edm, labelIm):
     if len(labels_map_centers)==0:
         return
-    Y, X = centerIm.shape
-    Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-    #sigmas = map_coordinates(edm, np.array(list(labels_map_centers.values())).T, prefilter=False)
-    #centerIm.fill(-1)
-    # point
-    for i, (label, center) in enumerate(labels_map_centers.items()): # in case center prediction is a classification
-        if isnan(center[0]) or isnan(center[1]):
-            pass
-            # print(f"Warning label: {label} nan center")
-        else:
-            # drawn = False
-            # for dy,dx in itertools.product(range(2), range(2)):
-            #     if int(center[0])==center[0]:
-            #         dy = 0
-            #     if int(center[1])==center[1]:
-            #         dx = 0
-            #     y = int(center[0])+dy
-            #     x = int(center[1])+dx
-            #     if labelIm[y, x] == label:
-            #         drawn = True
-            #         centerIm[y, x] = 1
-            #     if not drawn: # center is outside.. draw it anyway
-            #         centerIm[int(center[0]+0.5), int(center[1]+0.5)] = 1
-                    # print(f"Warning Label: {label} center {center} is outside")
-            #gaussian
+    # euclidean disance
+    # Y, X = centerIm.shape
+    # Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
+    # for i, (label, center) in enumerate(labels_map_centers.items()): # in case center prediction is a classification
+    #     if isnan(center[0]) or isnan(center[1]):
+    #         pass
+    #     else:
+    #         # distance to center
+    #         mask = labelIm==label
+    #         if mask.sum()>0:
+    #             d = np.sqrt(np.square(Y-center[0])+np.square(X-center[1]))
+    #             centerIm[mask] = d[mask]
 
-            #sigma_sq = max(2, 0.25 * (sigmas[i]**2))
-            # sigma_sq = 4
-            # d = np.square(center[0] - Y) + np.square(center[1] - X)
-            # np.add(centerIm, np.exp(-d / sigma_sq), out=centerIm)
-            # distance to center
-            mask = labelIm==label
-            if mask.sum()>0:
-                #w = -1# -1./max(1, 0.5 * (sigmas[i]**2))
-                d = np.sqrt(np.square(Y-center[0])+np.square(X-center[1]))
-                centerIm[mask] = d[mask]
+    # geodesic distance to center
+    count = 0
+    m = np.ones_like(labelIm)
+    for center in labels_map_centers.values():
+        if not (isnan(center[0]) or isnan(center[1])):
+            m[int(round(center[0])), int(round(center[1]))] = 0
+            count+=1
+    if count>0:
+        m = ma.masked_array(m, ~labelIm.astype(np.bool))
+        centerIm[:] = skfmm.distance(m)

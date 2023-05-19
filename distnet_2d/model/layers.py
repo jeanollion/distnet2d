@@ -339,6 +339,24 @@ class NConvToBatch2D(Layer):
         # output = get_print_grad_fun(f"{self.name} after concat")(output)
         return output
 
+class SelectFeature(Layer):
+    def __init__(self, inference_conv_idx:int, name: str="SelectFeature"):
+        super().__init__(name=name)
+        self.inference_mode=False
+        self.inference_conv_idx=inference_conv_idx
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"inference_conv_idx":self.inference_conv_idx})
+        return config
+
+    def call(self, input): # (N x B, Y, X, F), N x (B, Y, X, F)
+        input_concat, input_split = input
+        if self.inference_mode: # only produce one output
+            return input_split[self.inference_conv_idx]
+        else:
+            return input_concat
+
 class ChannelToBatch2D(Layer):
     def __init__(self, compensate_gradient:bool = False, name: str="ChannelToBatch2D"):
         self.compensate_gradient=compensate_gradient

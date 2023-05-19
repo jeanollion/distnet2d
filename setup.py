@@ -24,5 +24,5 @@ setuptools.setup(
         'Programming Language :: Python :: 3',
     ],
     python_requires='>=3',
-    install_requires=['numpy', 'scipy', 'tensorflow', 'keras_preprocessing', 'edt>=2.0.2', 'dataset_iterator>=0.2.9', 'elasticdeform>=0.4.7']
+    install_requires=['numpy', 'scipy', 'tensorflow', 'keras_preprocessing', 'edt>=2.0.2', 'skfmm', 'dataset_iterator>=0.2.9', 'elasticdeform>=0.4.7']
 )

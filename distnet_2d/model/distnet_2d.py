@@ -2,7 +2,7 @@
 
 import tensorflow as tf
 import tensorflow_probability as tfp
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel2D, SplitBatch2D, ChannelToBatch2D, NConvToBatch2D
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel2D, SplitBatch2D, ChannelToBatch2D, NConvToBatch2D, SelectFeature
 from tensorflow.keras.layers import Conv2D, MaxPool2D, Concatenate
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -11,7 +11,7 @@ from .attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from .utils import get_layer_dtype
 from ..utils.losses import weighted_binary_crossentropy, weighted_loss_by_category, balanced_category_loss, edm_contour_loss, balanced_background_binary_crossentropy, MeanSquaredErrorChannel, l2, get_grad_weight_fun
-from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError
+from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError, MeanAbsoluteError
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.objectwise_motion_losses import get_motion_losses
 from ..utils.agc import adaptive_clip_grad
@@ -30,8 +30,8 @@ class DistnetModel(Model):
         max_objects_number:int = 0,
         center_scale:float=0, # 0 : computed automatically
         edm_loss= MeanSquaredError(),
-        center_loss = MeanSquaredError(),
-        displacement_loss = MeanSquaredError(),
+        center_loss = MeanAbsoluteError(),
+        displacement_loss = MeanAbsoluteError(),
         category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
         category_class_frequency_range=[1/50, 50],
         category_background = True,
@@ -42,7 +42,7 @@ class DistnetModel(Model):
         long_term:bool = False,
         print_gradients:bool=False, # eager mode only
         accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False, # lower clip factor clips more
-        use_ags = False, ags_clip_factor = 0.1, ags_unitwise=True, ags_eps = 1e-3, ags_grad_eps = 1e-6,
+        use_ags = False, ags_clip_factor = 0.1, ags_unitwise=True, ags_eps = 1e-3, ags_grad_eps = 1e-6, ags_print:bool = False,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.displacement_lovasz_weight = displacement_lovasz_loss_weight
@@ -89,7 +89,7 @@ class DistnetModel(Model):
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
         self.use_ags = use_ags
-        self.ags = AdaptativeGradientScaler(ags_clip_factor, ags_unitwise, ags_eps, ags_grad_eps)
+        self.ags = AdaptativeGradientScaler(ags_clip_factor, ags_unitwise, ags_eps, ags_grad_eps, print_scales=ags_print)
         self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
         self.print_gradients=print_gradients
         self.normalize_displacement=normalize_displacement
@@ -310,7 +310,7 @@ class DistnetModel(Model):
 
     def set_inference(self, inference:bool=True):
         for layer in self.layers:
-            if isinstance(layer, (NConvToBatch2D, BatchToChannel2D)):
+            if isinstance(layer, (NConvToBatch2D, BatchToChannel2D, SelectFeature)):
                 layer.inference_mode = inference
 
     def save(self, *args, inference:bool, **kwargs):
@@ -944,8 +944,10 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
 
         # skip connections
-        feature_per_frame = feature_skip_op([feature, feature_per_frame])
-        feature_per_frame_pair = feature_pair_skip_op([feature_pair, feature_per_frame_pair])
+        feature_skip = SelectFeature(inference_conv_idx=frame_window, name = "SelectFeature")([feature, all_features])
+        feature_pair_skip = SelectFeature(inference_conv_idx=frame_window-1, name = "SelectFeaturePair")([feature_pair, all_feature_pairs])
+        feature_per_frame = feature_skip_op([feature_skip, feature_per_frame])
+        feature_per_frame_pair = feature_pair_skip_op([feature_pair_skip, feature_per_frame_pair])
 
         for decoder_name, is_segmentation in decoder_is_segmentation.items():
             if is_segmentation is not None:
