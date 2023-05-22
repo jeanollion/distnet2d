@@ -341,15 +341,13 @@ def get_distnet_2d(input_shape,
             skip:bool = False,
             name: str="DiSTNet2D",
             **kwargs):
-    if skip:
-        fun = get_distnet_2d_erf4
-        assert combine_pairs and extract_per_decoder_type, "invalid args with skip"
-    elif extract_per_decoder_type:
-        fun = get_distnet_2d_erf3 if combine_pairs else get_distnet_2d_erf2
+
+    if extract_per_decoder_type:
+        fun = get_distnet_2d_erf4 if combine_pairs else get_distnet_2d_erf2
     else:
         assert not combine_pairs
         fun = get_distnet_2d_erf
-    return fun(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, combine_kernel_size=config.combine_kernel_size, skip_stop_gradient=False, skip_connections=False, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=True, frame_window=frame_window, next=next, name=name, **kwargs)
+    return fun(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, combine_kernel_size=config.combine_kernel_size, skip_stop_gradient=False, skip_connections=[-1] if skip else [], encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=True, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_erf(input_shape, # Y, X
             encoder_settings:list,
@@ -806,7 +804,7 @@ def get_distnet_2d_erf4(input_shape, # Y, X
             combine_kernel_size:int = 1,
             pair_combine_kernel_size:int = 1,
             skip_stop_gradient:bool = True,
-            skip_connections:bool = False,
+            skip_connections = False, # bool or list
             skip_combine_mode:str="conv", #conv, wsconv
             attention : bool = True,
             frame_window:int = 1,
@@ -825,6 +823,14 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         if frame_window<=1:
             long_term = False
         n_chan = frame_window * (2 if next else 1) + 1
+        if skip_connections == False:
+            skip_connections = []
+        elif skip_connections == True:
+            skip_connections = [i for i in range(len(encoder_settings)+1)]
+        else:
+            assert isinstance(skip_connections, (list))
+            skip_connections = [i if i>=0 else len(encoder_settings)+1+i for i in skip_connections]
+        print(f"skip: {skip_connections}, feature skip: {len(encoder_settings) in skip_connections}")
         # define enconder operations
         encoder_layers = []
         contraction_per_layer = []
@@ -851,8 +857,9 @@ def get_distnet_2d_erf4(input_shape, # Y, X
                 f["filters"] = combine_filters
         feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(feature_blending_settings, "FeatureBlendingSequence", last_input_filters=combine_filters)
 
-        feature_skip_op = Combine(filters=feature_filters, name="FeatureSkip")
-        feature_pair_skip_op = Combine(filters=feature_filters, name="FeaturePairSkip")
+        if len(encoder_settings) in skip_connections:
+            feature_skip_op = Combine(filters=feature_filters, name="FeatureSkip")
+            feature_pair_skip_op = Combine(filters=feature_filters, name="FeaturePairSkip")
 
         # define decoder operations
         decoder_layers={"Seg":[], "Center":[], "Track":[], "Cat":[]}
@@ -864,7 +871,7 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         if long_term:
             n_frame_pairs = n_frame_pairs + (frame_window-1) * (2 if next else 1)
         decoder_is_segmentation = {"Seg": True, "Center": True, "Track": False, "Cat": False}
-        skip_per_decoder = {"Seg": skip_connections, "Center": False, "Track": False, "Cat": False}
+        skip_per_decoder = {"Seg": skip_connections, "Center": [], "Track": [], "Cat": []}
         output_inc = 0
         seg_out = ["Output0_EDM"]
         activation_out = ["linear"]
@@ -944,10 +951,11 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
 
         # skip connections
-        feature_skip = SelectFeature(inference_conv_idx=frame_window, name = "SelectFeature")([feature, all_features])
-        feature_pair_skip = SelectFeature(inference_conv_idx=frame_window-1, name = "SelectFeaturePair")([feature_pair, all_feature_pairs])
-        feature_per_frame = feature_skip_op([feature_skip, feature_per_frame])
-        feature_per_frame_pair = feature_pair_skip_op([feature_pair_skip, feature_per_frame_pair])
+        if len(encoder_settings) in skip_connections:
+            feature_skip = SelectFeature(inference_conv_idx=frame_window, name = "SelectFeature")([feature, all_features])
+            feature_pair_skip = SelectFeature(inference_conv_idx=frame_window-1, name = "SelectFeaturePair")([feature_pair, all_feature_pairs])
+            feature_per_frame = feature_skip_op([feature_skip, feature_per_frame])
+            feature_per_frame_pair = feature_pair_skip_op([feature_pair_skip, feature_per_frame_pair])
 
         for decoder_name, is_segmentation in decoder_is_segmentation.items():
             if is_segmentation is not None:
@@ -960,9 +968,9 @@ def get_distnet_2d_erf4(input_shape, # Y, X
                         up = feature_per_frame if is_segmentation else feature_per_frame_pair
                         for op in decoder_feature_op[decoder_name][0]:
                             up = op(up)
-                        for l, res in zip(d_layers[::-1], residuals[:-1]):
-                            up = l([up, res if skip else None])
-                        up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
+                        for i, (l, res) in enumerate(zip(d_layers[::-1], residuals[:-1])):
+                            up = l([up, res if len(d_layers)-1-i in skip else None])
+                        up = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
                         up = BatchToChannel2D(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up)
                         outputs.append(up)
         return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_contours = False, predict_center=predict_center, spatial_dims=spatial_dims, long_term=long_term, category_background=category_background, **kwargs)

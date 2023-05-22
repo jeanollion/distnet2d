@@ -62,7 +62,7 @@ class ImageDataGenerator2D(ImageDataGenerator):
     histogram_normalization_scale
 
     """
-    def __init__(self, rotate90:bool=False, interpolation_order=1, perform_illumination_augmentation:bool = True, gaussian_blur_range:list=[1, 2], noise_intensity:float = 0.1, histogram_scaling_mode:str="AUTO", min_centile_range = [0, 5], max_centile_range=[95, 99.5], min_histogram_range:float=0.1, min_histogram_to_zero:bool=False, invert:bool=False, histogram_normalization_center=None, histogram_normalization_scale=None, histogram_voodoo_n_points:int=5, histogram_voodoo_intensity:float=0.5, illumination_voodoo_n_points:int=5, illumination_voodoo_intensity:float=0.6, **kwargs):
+    def __init__(self, rotate90:bool=False, interpolation_order=1, perform_illumination_augmentation:bool = True, gaussian_blur_range:list=[1, 2], noise_intensity:float = 0.1, histogram_scaling_mode:str="AUTO", min_centile_range = [0.1, 5], max_centile_range=[95, 99.9], random_min_max_saturate=True, min_histogram_range:float=0.1, min_histogram_to_zero:bool=False, invert:bool=False, histogram_normalization_center=None, histogram_normalization_scale=None, histogram_voodoo_n_points:int=5, histogram_voodoo_intensity:float=0.5, illumination_voodoo_n_points:int=5, illumination_voodoo_intensity:float=0.6, **kwargs):
         assert histogram_scaling_mode in ["PHASE_CONTRAST", "RANDOM_MIN_MAX", "FLUORESCENCE", "TRANSMITTED_LIGHT", "AUTO", "NONE"], "invalid histogram scaling mode"
         if histogram_scaling_mode=="FLUORESCENCE" or histogram_scaling_mode=="TRANSMITTED_LIGHT" or (histogram_scaling_mode=="AUTO" and histogram_normalization_center is not None and histogram_normalization_scale is not None):
             assert histogram_normalization_center is not None and histogram_normalization_scale is not None, "in FLUORESCENCE or TRANSMITTED_LIGHT mode histogram_normalization_center and histogram_normalization_scale must be not None"
@@ -84,7 +84,7 @@ class ImageDataGenerator2D(ImageDataGenerator):
             assert min_centile_range[1]<max_centile_range[0], "invalid min and max range"
             self.min_centile_range=min_centile_range
             self.max_centile_range=max_centile_range
-
+            self.random_min_max_saturate = random_min_max_saturate
         self.histogram_scaling_mode=histogram_scaling_mode
         if gaussian_blur_range is None:
             gaussian_blur_range=0
@@ -192,7 +192,11 @@ class ImageDataGenerator2D(ImageDataGenerator):
                 min0, min1, max0, max1 = np.percentile(img, self.min_centile_range+self.max_centile_range)
                 cmin = uniform(min0, min1)
                 cmax = uniform(max0, max1)
-                img = pp.adjust_histogram_range(img, min = 0, max = 1, initial_range=[cmin, cmax]) # will saturate values under cmin or over cmax, as in real life.
+                if self.random_min_max_saturate:
+                    img = pp.adjust_histogram_range(img, min = 0, max = 1, initial_range=[cmin, cmax]) # will saturate values under cmin or over cmax, as in real life.
+                else:
+                    scale = 1. / (cmax - cmin)
+                    img = (img - cmin) * scale
                 #gmin, min0, min1, max0, max1, gmax = np.percentile(img, [0] + self.min_centile_range+self.max_centile_range + [100])
                 # vmin = (gmin - cmin) / (cmax - cmin)
                 # vmax = 1 + (gmax - cmax) / (cmax - cmin)
