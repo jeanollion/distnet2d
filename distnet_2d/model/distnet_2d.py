@@ -830,7 +830,6 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         else:
             assert isinstance(skip_connections, (list))
             skip_connections = [i if i>=0 else len(encoder_settings)+1+i for i in skip_connections]
-        print(f"skip: {skip_connections}, feature skip: {len(encoder_settings) in skip_connections}")
         # define enconder operations
         encoder_layers = []
         contraction_per_layer = []

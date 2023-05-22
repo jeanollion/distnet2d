@@ -23,11 +23,11 @@ class MeanSquaredErrorChannel(tf.keras.losses.Loss):
 
 
 class PseudoHuber(tf.keras.losses.Loss):
-    def __init__(self, delta:float = 1, **kwargs):
-        self.delta = delta
-        self.delta_sq = delta * delta
+    def __init__(self, delta:float = 1., **kwargs):
+        self.delta = float(delta)
+        self.delta_sq = self.delta * self.delta
         super().__init__(**kwargs)
-        
+
     def call(self, y_true, y_pred):
         return tf.multiply(self.delta_sq, tf.sqrt(1. + tf.square((y_true - y_pred)/self.delta)) - 1.)
 
