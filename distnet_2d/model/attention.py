@@ -4,7 +4,7 @@ from tensorflow.keras.models import Model
 import numpy as np
 
 class SpatialAttention2D(Layer):
-    def __init__(self, positional_encoding=True, filters=0, return_attention=False, name="Attention"):
+    def __init__(self, positional_encoding:bool=True, filters:int=0, return_attention:bool=False, l2_reg:float=0, name="Attention"):
         '''
             filters : number of output channels
             if positional_encoding: filters must correspond to input channel number
@@ -14,10 +14,11 @@ class SpatialAttention2D(Layer):
         self.positional_encoding=positional_encoding
         self.filters = filters
         self.return_attention=return_attention
+        self.l2_reg=l2_reg
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"positional_encoding": self.positional_encoding, "filters":self.filters, "return_attention":self.return_attention})
+      config.update({"positional_encoding": self.positional_encoding, "filters":self.filters, "return_attention":self.return_attention, "l2_reg":self.l2_reg})
       return config
 
     def build(self, input_shape):
@@ -26,14 +27,14 @@ class SpatialAttention2D(Layer):
         self.spatial_dim = np.prod(self.spatial_dims)
         if self.filters<=0:
             self.filters = input_shape[-1]
-        self.wq = Dense(self.filters, name="Q")
-        self.wk = Dense(self.filters, name="K")
-        self.wv = Dense(self.filters, name="V")
+        self.wq = Dense(self.filters, name="Q", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.wk = Dense(self.filters, name="K", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.wv = Dense(self.filters, name="V", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
         if self.positional_encoding=="2D":
-            self.pos_embedding_y = Embedding(self.spatial_dims[0], input_shape[-1], name="PosEncY")
-            self.pos_embedding_x = Embedding(self.spatial_dims[1], input_shape[-1], name="PosEncX")
+            self.pos_embedding_y = Embedding(self.spatial_dims[0], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncY")
+            self.pos_embedding_x = Embedding(self.spatial_dims[1], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncX")
         elif self.positional_encoding:
-            self.pos_embedding = Embedding(self.spatial_dim, input_shape[-1], name="PosEnc") # TODO test other positional encoding. in particular that encodes X and Y. see : https://github.com/tatp22/multidim-positional-encoding
+            self.pos_embedding = Embedding(self.spatial_dim, input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEnc") # TODO test other positional encoding. in particular that encodes X and Y. see : https://github.com/tatp22/multidim-positional-encoding
         super().build(input_shape)
 
     def call(self, x):

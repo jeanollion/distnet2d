@@ -112,10 +112,10 @@ class ASABlendD3v3():
             {"filters":1., "op":"conv", "weighted_sum":False, "batch_norm":batch_norm, "dropout_rate":0},
         ]
         self.feature_blending_settings = [
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
-            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout},
+            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False}
         ]
         self.feature_decoder_settings = [
             {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
@@ -152,10 +152,10 @@ class ASABlendD2v3():
             {"filters":1., "op":"conv", "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
         ]
         self.feature_blending_settings = [
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":False},
-            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":batch_norm, "batch_norm":False}
         ]
         self.feature_decoder_settings = [
             {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},

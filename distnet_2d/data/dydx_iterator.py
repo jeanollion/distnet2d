@@ -27,8 +27,6 @@ class DyDxIterator(TrackingIterator):
         extract_tile_function = extract_tile_random_zoom_function(tile_shape=(128, 128), n_tiles=8, zoom_range=[0.6, 1.6], aspect_ratio_range=[0.75, 1.5], random_channel_jitter_shape=[50, 50] ),
         elasticdeform_parameters:dict = {},
         downscale_displacement_and_categories=1,
-        return_contours = False,
-        contour_sigma = 0.5,
         return_center = False,
         center_mode = "MEDOID", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
         return_label_rank = False,
@@ -42,8 +40,6 @@ class DyDxIterator(TrackingIterator):
         self.erase_edge_cell_size=erase_edge_cell_size
         self.aug_frame_subsampling=aug_frame_subsampling
         self.output_float16=output_float16
-        self.return_contours=return_contours
-        self.contour_sigma=contour_sigma
         self.return_center=return_center
         self.center_mode=center_mode
         self.return_label_rank=return_label_rank
@@ -239,12 +235,6 @@ class DyDxIterator(TrackingIterator):
         channel_inc = 0
         edm[edm==0] = -1
         all_channels.insert(channel_inc, edm)
-        if self.return_contours:
-            channel_inc += 1
-            #contour = edm == 1
-            mul = - 1. / (self.contour_sigma * self.contour_sigma)
-            contour = np.where(edm>0, np.exp(np.square(edm-1) * mul), 0.)
-            all_channels.insert(channel_inc, contour)
         if self.return_center:
             channel_inc+=1
             all_channels.insert(channel_inc, centerIm)
@@ -268,7 +258,7 @@ class DyDxIterator(TrackingIterator):
             all_channels.insert(channel_inc, centerArr)
         if self.output_float16:
             for i, c in enumerate(all_channels):
-                if not ( self.return_contours and i==1 or self.return_categories and i==3+channel_inc or self.return_label_rank and (i==channel_inc or i==channel_inc+1) ): # softmax / sigmoid activation -> float32
+                if not ( self.return_categories and i==3+channel_inc or self.return_label_rank and (i==channel_inc or i==channel_inc+1) ): # softmax / sigmoid activation -> float32
                     all_channels[i] = c.astype('float16', copy=False)
         return all_channels
 

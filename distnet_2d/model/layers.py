@@ -468,6 +468,7 @@ class Combine(Layer):
             weight_scaled:bool = False,
             activation: str="relu",
             compensate_gradient:bool = False,
+            l2_reg: float=0,
             name: str="Combine",
         ):
         self.activation = activation
@@ -475,11 +476,12 @@ class Combine(Layer):
         self.kernel_size=kernel_size
         self.weight_scaled = weight_scaled
         self.compensate_gradient = compensate_gradient
+        self.l2_reg=l2_reg
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "weight_scaled":self.weight_scaled, "compensate_gradient":self.compensate_gradient})
+      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "weight_scaled":self.weight_scaled, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg})
       return config
 
     def build(self, input_shape):
@@ -490,6 +492,7 @@ class Combine(Layer):
                 kernel_size=self.kernel_size,
                 padding='same',
                 activation=self.activation,
+                kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
                 name="Conv1x1")
         else:
             self.combine_conv = Conv2D(
@@ -497,6 +500,7 @@ class Combine(Layer):
                 kernel_size=self.kernel_size,
                 padding='same',
                 activation=self.activation,
+                kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
                 name="Conv1x1")
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./len(input_shape))
@@ -541,6 +545,7 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             weight_scaled : bool = False,
             batch_norm : bool = True,
             activation:str = "relu",
+            l2_reg: float=0,
             name: str="ResConv1D",
     ):
         super().__init__(name=name)
@@ -551,10 +556,11 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
         self.batch_norm=batch_norm
         self.weight_scaled=weight_scaled
         self.weighted_sum=weighted_sum
+        self.l2_reg=l2_reg
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg})
       return config
 
     def build(self, input_shape):
@@ -566,7 +572,8 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             strides=1,
             padding='same',
             name=f"{self.name}/1_{self.kernel_size}x1",
-            activation=self.activation
+            activation=self.activation,
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.convX1 = conv_fun(
             filters=input_channels,
@@ -574,7 +581,8 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             strides=1,
             padding='same',
             name=f"{self.name}/1_1x{self.kernel_size}",
-            activation="linear"
+            activation="linear",
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.convY2 = conv_fun(
             filters=input_channels,
@@ -583,7 +591,8 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             strides=1,
             padding='same',
             name=f"{self.name}/2_{self.kernel_size}x1",
-            activation=self.activation
+            activation=self.activation,
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.convX2 = conv_fun(
             filters=input_channels,
@@ -592,7 +601,8 @@ class ResConv1D(Layer): # Non-bottleneck-1D from ERFNet
             strides=1,
             padding='same',
             name=f"{self.name}/2_1x{self.kernel_size}",
-            activation="linear"
+            activation="linear",
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
@@ -632,6 +642,7 @@ class ResConv2D(Layer):
             batch_norm : bool = True,
             weight_scaled:bool = False,
             activation:str = "relu",
+            l2_reg:float = 0,
             name: str="ResConv1D",
     ):
         super().__init__(name=name)
@@ -642,10 +653,11 @@ class ResConv2D(Layer):
         self.batch_norm=batch_norm
         self.weight_scaled = weight_scaled
         self.weighted_sum = weighted_sum
+        self.l2_reg = l2_reg
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg})
       return config
 
     def build(self, input_shape):
@@ -657,7 +669,8 @@ class ResConv2D(Layer):
             strides=1,
             padding='same',
             name=f"{self.name}/1_{self.kernel_size}x{self.kernel_size}",
-            activation="linear"
+            activation="linear",
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.conv2 = conv_fun(
             filters=input_channels,
@@ -666,7 +679,8 @@ class ResConv2D(Layer):
             strides=1,
             padding='same',
             name=f"{self.name}/2_{self.kernel_size}x{self.kernel_size}",
-            activation="linear"
+            activation="linear",
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
         self.activation_layer = tf.keras.activations.get(self.activation)
@@ -704,6 +718,7 @@ class Conv2DBNDrop(Layer):
             dropout_rate:float = 0.3,
             batch_norm : bool = True,
             activation:str = "relu",
+            l2_reg:float = 0,
             name: str="ResConv1D",
     ):
         super().__init__(name=name)
@@ -714,10 +729,11 @@ class Conv2DBNDrop(Layer):
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.strides=strides
+        self.l2_reg = l2_reg
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides})
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "l2_reg":self.l2_reg})
       return config
 
     def build(self, input_shape):
@@ -728,7 +744,8 @@ class Conv2DBNDrop(Layer):
             strides=self.strides,
             padding='same',
             name=f"{self.name}/{self.kernel_size}",
-            activation="linear"
+            activation="linear",
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
@@ -754,6 +771,7 @@ class Conv2DTransposeBNDrop(Layer):
             dropout_rate:float = 0,
             batch_norm : bool = False,
             activation:str = "relu",
+            l2_reg:float = 0,
             name: str="ResConv2D",
     ):
         super().__init__(name=name)
@@ -763,10 +781,11 @@ class Conv2DTransposeBNDrop(Layer):
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.strides=strides
+        self.l2_reg=l2_reg
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides})
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "l2_reg":self.l2_reg})
       return config
 
     def build(self, input_shape):
@@ -776,6 +795,7 @@ class Conv2DTransposeBNDrop(Layer):
             strides=self.strides,
             padding='same',
             activation="linear",
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
             name=f"{self.name}/tConv{self.kernel_size}x{self.kernel_size}",
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
