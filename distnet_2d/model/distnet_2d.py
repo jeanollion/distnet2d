@@ -195,8 +195,10 @@ class DistnetModel(Model):
                 loss += l * loss_weights[k]
             if mixed_precision:
                 loss = self.optimizer.get_scaled_loss(loss)
-            loss += tf.add_n(self.losses) # regularizers
-            print(f"reg loss: {len(self.losses)} values: {self.losses}")
+
+            # print(f"reg loss: {len(self.losses)} values: {self.losses}")
+            if len(self.losses)>0:
+                loss += tf.add_n(self.losses) # regularizers
             losses["loss"] = loss
 
         if self.print_gradients:
