@@ -94,7 +94,7 @@ class DyDxIterator(TrackingIterator):
                         batch_by_channel[2][b][...,n_frames+inc] = batch_by_channel[1][b][...,n_frames+inc-1]
         # get previous labels and store in -666 output_position BEFORE applying tiling and elastic deform
         self._get_prev_label(batch_by_channel, n_frames)
-        batch_by_channel[-1] = batch_by_channel[0].shape[0] # batch size is recorded here: in case of tiling it will be usefull
+        batch_by_channel[-2] = batch_by_channel[0].shape[0] # batch size is recorded here: in case of tiling it will be usefull
         del batch_by_channel[2] # remove prevRegionLabels
         if n_frames>1: # remove unused frames
             sel = self._get_end_points(n_frames, False)
@@ -204,7 +204,7 @@ class DyDxIterator(TrackingIterator):
         if self.return_categories:
             categoryIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
         labels_map_prev = batch_by_channel[-666]
-        batch_size = batch_by_channel[-1]
+        batch_size = batch_by_channel[-2]
         if labelIms.shape[0]>batch_size:
             n_tiles = labelIms.shape[0]//batch_size
             #print("batch size: {}, n_tiles: {}".format(batch_size, n_tiles))

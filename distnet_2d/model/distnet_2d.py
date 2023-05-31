@@ -38,7 +38,7 @@ class DistnetModel(Model):
         predict_center = True,
         long_term:bool = True,
         print_gradients:bool=False, # eager mode only
-        accum_steps=1, use_agc=False, agc_clip_factor=2, agc_eps=1e-3, agc_exclude_output=False, # lower clip factor clips more
+        accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False, # lower clip factor clips more
         use_ags = False, ags_clip_factor = 0.1, ags_unitwise=True, ags_eps = 1e-3, ags_grad_eps = 1e-6, ags_print:bool = False,
         **kwargs):
         super().__init__(*args, **kwargs)

@@ -34,7 +34,7 @@ class SpatialAttention2D(Layer):
             self.pos_embedding_y = Embedding(self.spatial_dims[0], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncY")
             self.pos_embedding_x = Embedding(self.spatial_dims[1], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncX")
         elif self.positional_encoding:
-            self.pos_embedding = Embedding(self.spatial_dim, input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEnc") # TODO test other positional encoding. in particular that encodes X and Y. see : https://github.com/tatp22/multidim-positional-encoding
+            self.pos_embedding = Embedding(self.spatial_dim, input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEnc")
         super().build(input_shape)
 
     def call(self, x):
