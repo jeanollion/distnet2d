@@ -357,8 +357,8 @@ class SelectFeature(Layer):
         else:
             return input_concat
 
-class ChannelToBatch2D(Layer):
-    def __init__(self, compensate_gradient:bool = False, name: str="ChannelToBatch2D"):
+class ChannelToBatch(Layer):
+    def __init__(self, compensate_gradient:bool = False, name: str="ChannelToBatch"):
         self.compensate_gradient=compensate_gradient
         super().__init__(name=name)
 
@@ -368,19 +368,23 @@ class ChannelToBatch2D(Layer):
         return config
 
     def build(self, input_shape):
-        self.target_shape = [-1, input_shape[1], input_shape[2]]
+        self.rank = len(input_shape.as_list())
+        self.perm = [self.rank-1, 0] + [i for i in range(1, self.rank-1)]
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(float(input_shape[-1]))
         super().build(input_shape)
 
     def call(self, input): # (B, Y, X, C)
-        input = tf.transpose(input, perm=[3, 0, 1, 2]) # (C, B, Y, X)
-        input = tf.reshape(input, self.target_shape) # (C x B, Y, X)
+        shape = tf.shape(input)
+        target_shape  = tf.concat([[-1], [shape[i] for i in range(1, self.rank-1)]], 0) if self.rank>2 else [-1]
+        input = tf.transpose(input, perm=self.perm) # (C, B, Y, X)
+        input = tf.reshape(input, target_shape) # (C x B, Y, X)
+        input = tf.expand_dims(input, -1) # (C x B, Y, X, 1)
         if self.compensate_gradient:
             input = self.grad_fun(input)
-        return tf.expand_dims(input, -1) # (C x B, Y, X, 1)
+        return input
 
-class SplitBatch2D(Layer):
+class SplitBatch(Layer):
     def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="SplitBatch2D"):
         self.n_splits=n_splits
         self.compensate_gradient=compensate_gradient
@@ -392,22 +396,22 @@ class SplitBatch2D(Layer):
       return config
 
     def build(self, input_shape):
-        self.target_shape = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
+        self.rank = len(input_shape.as_list())
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./self.n_splits)
         super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
-        #input = get_print_grad_fun(f"{self.name} before split")(input)
+        shape = tf.shape(input)
+        target_shape  = tf.concat([[self.n_splits, -1], [shape[i] for i in range(1, self.rank)]], 0)
         if self.compensate_gradient:
             input = self.grad_fun(input) # so that gradient are averaged over N (number of frames)
-        input = tf.reshape(input, self.target_shape) # (N, B, Y, X, C)
+        input = tf.reshape(input, target_shape) # (N, B, Y, X, C)
         splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
-        #splits[0] = get_print_grad_fun(f"{self.name} after split")(splits[0])
         return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
 
-class BatchToChannel2D(Layer):
-    def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="BatchToChannel2D"):
+class BatchToChannel(Layer):
+    def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="BatchToChannel"):
         self.n_splits=n_splits
         self.compensate_gradient = compensate_gradient
         self.inference_mode=False
@@ -419,8 +423,9 @@ class BatchToChannel2D(Layer):
       return config
 
     def build(self, input_shape):
-        self.target_shape1 = [self.n_splits, -1, input_shape[1], input_shape[2], input_shape[3]]
-        self.target_shape2 = [-1, input_shape[1], input_shape[2], self.n_splits * input_shape[-1]]
+        input_shape = input_shape.as_list()
+        self.rank = len(input_shape)
+        self.perm = [1] + [i+1 for i in range(1, self.rank-1)] + [0, self.rank] # (B, [DIMS], N, F)
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./self.n_splits)
         super().build(input_shape)
@@ -430,9 +435,13 @@ class BatchToChannel2D(Layer):
             return input
         if self.compensate_gradient:
             input = self.grad_fun(input)
-        input = tf.reshape(input, shape = self.target_shape1) # (N, B, Y, X, F)
-        input = tf.transpose(input, perm=[1, 2, 3, 0, 4]) # (B, Y, X, N, F)
-        return tf.reshape(input, self.target_shape2) # (B, Y, X, N x F)
+        shape = tf.shape(input)
+        dims = [shape[i] for i in range(1, self.rank-1)] if self.rank>2 else []
+        target_shape1 = tf.concat([[self.n_splits, -1], dims, shape[-1:]], 0) if self.rank>2 else tf.concat([[self.n_splits, -1], shape[-1:]], 0)
+        target_shape2 = tf.concat([[-1], dims, [self.n_splits * shape[-1]]], 0) if self.rank>2 else [-1, self.n_splits * shape[-1]]
+        input = tf.reshape(input, shape = target_shape1) # (N, B, Y, X, F)
+        input = tf.transpose(input, perm=self.perm) # (B, Y, X, N, F)
+        return tf.reshape(input, target_shape2) # (B, Y, X, N x F)
 
 def get_grad_weight_fun(weight):
     @tf.custom_gradient

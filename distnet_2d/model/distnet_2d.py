@@ -2,7 +2,7 @@
 
 import tensorflow as tf
 import tensorflow_probability as tfp
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel2D, SplitBatch2D, ChannelToBatch2D, NConvToBatch2D, SelectFeature
+from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature
 from tensorflow.keras.layers import Conv2D, MaxPool2D, Concatenate
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -56,7 +56,7 @@ class DistnetModel(Model):
         self.edm_loss = edm_loss
         self.center_loss=center_loss
         self.displacement_loss = displacement_loss
-        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_scale=center_scale, next = next, frame_window=frame_window, long_term=long_term, center_motion = center_displacement_loss_weight>0, center_unicity=center_unicity_loss_weight>0, max_objects_number=max_objects_number)
+        self.motion_losses = get_motion_losses(spatial_dims, motion_range = frame_window * (2 if next else 1), center_displacement_grad_weight_center=center_displacement_grad_weight_center, center_displacement_grad_weight_displacement=center_displacement_grad_weight_displacement, center_scale=center_scale, next = next, frame_window=frame_window, long_term=long_term, center_motion = center_displacement_loss_weight>0, center_unicity=center_unicity_loss_weight>0, max_objects_number=max_objects_number) if spatial_dims is not None else None
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
@@ -236,7 +236,7 @@ class DistnetModel(Model):
 
     def set_inference(self, inference:bool=True):
         for layer in self.layers:
-            if isinstance(layer, (NConvToBatch2D, BatchToChannel2D, SelectFeature)):
+            if isinstance(layer, (NConvToBatch2D, BatchToChannel, SelectFeature)):
                 layer.inference_mode = inference
 
     def save(self, *args, inference:bool, **kwargs):
@@ -363,7 +363,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                 oi += 1
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
-        input_merged = ChannelToBatch2D(compensate_gradient = False, name = "MergeInputs")(input)
+        input_merged = ChannelToBatch(compensate_gradient = False, name = "MergeInputs")(input)
         downsampled = [input_merged]
         residuals = []
         for l in encoder_layers:
@@ -376,7 +376,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
         for op in feature_convs:
             feature = op(feature)
 
-        all_features = SplitBatch2D(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
+        all_features = SplitBatch(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
         combined_features = combine_features_op(all_features)
         if attention:
             attention_result = []
@@ -410,7 +410,7 @@ def get_distnet_2d_erf(input_shape, # Y, X
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
                             up = l([up, res if skip else None])
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
-                        up = BatchToChannel2D(n_splits = n_out, compensate_gradient = False, name = layer_output_name)(up)
+                        up = BatchToChannel(n_splits = n_out, compensate_gradient = False, name = layer_output_name)(up)
                         outputs.append(up)
         return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_center=predict_center, spatial_dims=spatial_dims, long_term=long_term, category_background=category_background, **kwargs)
 
@@ -507,7 +507,7 @@ def get_distnet_2d_erf2(input_shape, # Y, X
                 oi += 1
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
-        input_merged = ChannelToBatch2D(compensate_gradient = False, name = "MergeInputs")(input)
+        input_merged = ChannelToBatch(compensate_gradient = False, name = "MergeInputs")(input)
         downsampled = [input_merged]
         residuals = []
         for l in encoder_layers:
@@ -520,7 +520,7 @@ def get_distnet_2d_erf2(input_shape, # Y, X
         for op in feature_convs:
             feature = op(feature)
 
-        all_features = SplitBatch2D(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
+        all_features = SplitBatch(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
         combined_features = combine_features_op(all_features)
         if attention:
             attention_result = []
@@ -556,7 +556,7 @@ def get_distnet_2d_erf2(input_shape, # Y, X
                         for l, res in zip(d_layers[::-1], residuals[:-1]):
                             up = l([up, res if skip else None])
                         up = d_out([up, residuals[-1] if skip else None]) # (N_OUT x B, Y, X, F)
-                        up = BatchToChannel2D(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up)
+                        up = BatchToChannel(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up)
                         outputs.append(up)
         return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_center=predict_center, spatial_dims=spatial_dims, long_term=long_term, category_background=category_background, **kwargs)
 
@@ -585,9 +585,12 @@ def get_distnet_2d_erf4(input_shape, # Y, X
     ):
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
-        spatial_dims = ensure_multiplicity(2, input_shape)
-        if isinstance(spatial_dims, tuple):
-            spatial_dims = list(spatial_dims)
+        if attention:
+            spatial_dims = ensure_multiplicity(2, input_shape)
+            if isinstance(spatial_dims, tuple):
+                spatial_dims = list(spatial_dims)
+        else:
+            spatial_dims = [None, None]
         if frame_window<=1:
             long_term = False
         n_chan = frame_window * (2 if next else 1) + 1
@@ -668,7 +671,7 @@ def get_distnet_2d_erf4(input_shape, # Y, X
                 oi += 1
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
-        input_merged = ChannelToBatch2D(compensate_gradient = False, name = "MergeInputs")(input)
+        input_merged = ChannelToBatch(compensate_gradient = False, name = "MergeInputs")(input)
         downsampled = [input_merged]
         residuals = []
         for l in encoder_layers:
@@ -682,7 +685,7 @@ def get_distnet_2d_erf4(input_shape, # Y, X
             feature = op(feature)
 
         # combine individual features
-        all_features = SplitBatch2D(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
+        all_features = SplitBatch(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
         combined_features = combine_features_op(all_features)
 
         # frame pairs
@@ -707,7 +710,7 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         else:
             feature_pair = pair_combine_op([feature_prev, feature_next])
 
-        all_feature_pairs = SplitBatch2D(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pair)
+        all_feature_pairs = SplitBatch(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pair)
         combined_feature_pairs = all_pair_combine_op(all_feature_pairs)
         combined_features = feature_pair_feature_combine_op([combined_features, combined_feature_pairs])
         for op in feature_blending_convs:
@@ -738,9 +741,9 @@ def get_distnet_2d_erf4(input_shape, # Y, X
                         for i, (l, res) in enumerate(zip(d_layers[::-1], residuals[:-1])):
                             up = l([up, res if len(d_layers)-1-i in skip else None])
                         up = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
-                        up = BatchToChannel2D(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up)
+                        up = BatchToChannel(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up)
                         outputs.append(up)
-        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_center=predict_center, spatial_dims=spatial_dims, long_term=long_term, category_background=category_background, **kwargs)
+        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_center=predict_center, spatial_dims=spatial_dims if attention else None, long_term=long_term, category_background=category_background, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
