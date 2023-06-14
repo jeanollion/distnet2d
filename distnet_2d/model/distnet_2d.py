@@ -273,7 +273,7 @@ def get_distnet_2d(input_shape,
     else:
         assert not combine_pairs
         fun = get_distnet_2d_erf
-    return fun(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, combine_kernel_size=config.combine_kernel_size, skip_stop_gradient=False, skip_connections=[-1] if skip else [], encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=True, frame_window=frame_window, next=next, name=name, **kwargs)
+    return fun(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=False, skip_connections=[-1] if skip else [], encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_erf(input_shape, # Y, X
             encoder_settings:list,
@@ -612,12 +612,12 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         # define feature operations
         feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", l2_reg=l2_reg, last_input_filters=out_filters)
         combine_filters = int(feature_filters * n_chan / 2.)
-        combine_features_op = Combine(filters=combine_filters, compensate_gradient = True, l2_reg=l2_reg, name="CombineFeatures")
+        combine_features_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="CombineFeatures")
         if attention:
             attention_op = SpatialAttention2D(positional_encoding="2D", l2_reg=l2_reg, name="Attention")
         pair_combine_op = Combine(filters=feature_filters, kernel_size = pair_combine_kernel_size, l2_reg=l2_reg, name="FeaturePairCombine")
-        all_pair_combine_op = Combine(filters=combine_filters, compensate_gradient = True, l2_reg=l2_reg, name="AllFeaturePairCombine")
-        feature_pair_feature_combine_op = Combine(filters=feature_filters, l2_reg=l2_reg, name="FeaturePairFeatureCombine")
+        all_pair_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="AllFeaturePairCombine")
+        feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, l2_reg=l2_reg, name="FeaturePairFeatureCombine") # change here was feature_filters
 
         for f in feature_blending_settings:
             if "filters" not in f or f["filters"]<0:

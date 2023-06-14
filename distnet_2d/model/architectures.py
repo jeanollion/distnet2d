@@ -167,10 +167,11 @@ class ASABlendD2v3():
         ]
 
 class ASABlendD2v4():
-    def __init__(self, filters:int = 128, batch_norm:bool = True, dropout:float=0.2):
+    def __init__(self, filters:int = 128, batch_norm:bool = True, dropout:float=0.2, attention:bool = True, combine_kernel_size:int=1, pair_combine_kernel_size:int=1):
         self.name = f"asa-blend2-d2-{filters}"
-        self.attention = True
-        self.combine_kernel_size = 1
+        self.attention = attention
+        self.combine_kernel_size = combine_kernel_size
+        self.pair_combine_kernel_size = pair_combine_kernel_size
         self.downsampling_mode="maxpool_and_stride"
         self.upsampling_mode ="tconv"
         self.encoder_settings = [
@@ -185,8 +186,54 @@ class ASABlendD2v4():
         ]
         self.feature_settings = [
             {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":2 if attention else 3, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":filters, "op":"selfattention" if attention else "res2d", "kernel_size":5, "dilation":2 if attention else 4, "dropout_rate":0 if attention else dropout },
             {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":filters, "op":"selfattention"},
+            {"op":"res2d", "dilation":2 if attention else 3, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
+        ]
+        self.feature_blending_settings = [
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False}
+        ]
+        self.feature_decoder_settings = [
+            {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
+        ]
+        self.decoder_settings = [
+            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
+            {"filters":32, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
+        ]
+
+class ASABlendD3v4():
+    def __init__(self, filters:int = 192, batch_norm:bool = True, dropout:float=0.2, attention:bool = True, combine_kernel_size:int=1, pair_combine_kernel_size:int=1):
+        self.name = f"asa-blend2-d3-{filters}"
+        self.attention = attention
+        self.combine_kernel_size = combine_kernel_size
+        self.pair_combine_kernel_size = pair_combine_kernel_size
+        self.downsampling_mode="maxpool_and_stride"
+        self.upsampling_mode ="tconv"
+        self.encoder_settings = [
+            [
+                {"filters":32, "downscale":2, "dropout_rate":0}
+            ],
+            [
+                {"filters":32, "dropout_rate":0},
+                {"filters":64, "downscale":2, "dropout_rate":0}
+            ],
+            [
+                {"filters":64, "op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
+                {"filters":64, "op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
+                {"filters":64, "op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
+                {"filters":filters, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
+            ]
+        ]
+        self.feature_settings = [
+            {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":filters, "op":"selfattention" if attention else "conv"},
             {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
             {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
             {"filters":1., "op":"conv", "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
@@ -203,5 +250,6 @@ class ASABlendD2v4():
         ]
         self.decoder_settings = [
             {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
-            {"filters":32, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
+            {"filters":32, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0},
+            {"filters":64, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
         ]
