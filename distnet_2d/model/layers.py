@@ -652,6 +652,7 @@ class ResConv2D(Layer):
             weight_scaled:bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
+            split_conv:bool = False,
             name: str="ResConv1D",
     ):
         super().__init__(name=name)
@@ -663,15 +664,15 @@ class ResConv2D(Layer):
         self.weight_scaled = weight_scaled
         self.weighted_sum = weighted_sum
         self.l2_reg = l2_reg
-
+        self.split_conv=split_conv
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "split_conv":self.split_conv})
       return config
 
     def build(self, input_shape):
         input_channels = int(input_shape[-1])
-        conv_fun = WSConv2D if self.weight_scaled else tf.keras.layers.Conv2D
+        conv_fun = WSConv2D if self.weight_scaled else (SplitConv2D if self.split_conv else tf.keras.layers.Conv2D)
         self.conv1 = conv_fun(
             filters=input_channels,
             kernel_size=self.kernel_size,
@@ -679,7 +680,7 @@ class ResConv2D(Layer):
             padding='same',
             name=f"{self.name}/1_{self.kernel_size}x{self.kernel_size}",
             activation="linear",
-            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
+            #kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.conv2 = conv_fun(
             filters=input_channels,
@@ -689,7 +690,7 @@ class ResConv2D(Layer):
             padding='same',
             name=f"{self.name}/2_{self.kernel_size}x{self.kernel_size}",
             activation="linear",
-            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
+            #kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
         self.activation_layer = tf.keras.activations.get(self.activation)
@@ -819,6 +820,66 @@ class Conv2DTransposeBNDrop(Layer):
 
     def call(self, input, training=None):
         x = self.conv(input)
+        if self.batch_norm:
+            x = self.bn(x, training = training)
+        if self.dropout_rate>0:
+            x = self.drop(x, training = training)
+        return self.activation_layer(x)
+
+class SplitConv2D(Layer):
+    def __init__(
+            self,
+            filters:int=0,
+            kernel_size: int=3,
+            dilation_rate: int = 1,
+            strides: int = 1,
+            dropout_rate:float = 0,
+            batch_norm : bool = False,
+            activation:str = "relu",
+            padding:str = "same",
+            kernel_regularizer = None,
+            name: str="SplitConv2D",
+    ):
+        super().__init__(name=name)
+        self.kernel_size = kernel_size
+        self.dilation = dilation_rate
+        self.activation=activation
+        self.dropout_rate=dropout_rate
+        self.batch_norm=batch_norm
+        self.strides=strides
+        self.padding=padding
+        self.kernel_regularizer = kernel_regularizer
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "padding":self.padding, "l2_reg":self.l2_reg})
+      return config
+
+    def build(self, input_shape):
+        input_filters = input_shape.as_list()[-1]
+        assert input_filters % 3==0, f"number of filters must be divisible by 3"
+        self.filters = input_filters // 3
+        conv_fun = lambda name: tf.keras.layers.Conv2D(
+            filters=self.filters,
+            kernel_size=self.kernel_size,
+            dilation_rate = self.dilation,
+            strides=self.strides,
+            padding=self.padding,
+            name=name,
+            activation="linear",
+            kernel_regularizer=self.kernel_regularizer
+        )
+        self.convs = [conv_fun(f"{self.name}/{self.kernel_size}_{i}") for i in range(3)]
+        self.activation_layer = tf.keras.activations.get(self.activation)
+        if self.dropout_rate>0:
+            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+        if self.batch_norm:
+            self.bn = tf.keras.layers.BatchNormalization()
+        super().build(input_shape)
+
+    def call(self, input, training=None):
+        inputs = tf.split(input, 3, axis=-1)
+        x = tf.concat([ self.convs[i](tf.concat([inputs[i], inputs[(i+1)%3]], -1)) for i in range(3) ], -1)
         if self.batch_norm:
             x = self.bn(x, training = training)
         if self.dropout_rate>0:

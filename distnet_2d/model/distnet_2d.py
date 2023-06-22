@@ -2,7 +2,7 @@
 
 import tensorflow as tf
 import tensorflow_probability as tfp
-from .layers import ConvNormAct, Bneck, UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature
+from .layers import UpSamplingLayer2D, StopGradient, Combine, WeigthedGradient, ResConv1D, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature
 from tensorflow.keras.layers import Conv2D, MaxPool2D, Concatenate
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Layer
@@ -273,7 +273,7 @@ def get_distnet_2d(input_shape,
     else:
         assert not combine_pairs
         fun = get_distnet_2d_erf
-    return fun(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=False, skip_connections=[-1] if skip else [], encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, frame_window=frame_window, next=next, name=name, **kwargs)
+    return fun(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=False, skip_connections=[-1] if skip else [], encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_erf(input_shape, # Y, X
             encoder_settings:list,
@@ -570,6 +570,7 @@ def get_distnet_2d_erf4(input_shape, # Y, X
             downsampling_mode:str = "maxpool_and_stride", #maxpool, stride, maxpool_and_stride
             combine_kernel_size:int = 1,
             pair_combine_kernel_size:int = 1,
+            blending_filter_factor:float = 0.5,
             skip_stop_gradient:bool = True,
             skip_connections = False, # bool or list
             skip_combine_mode:str="conv", #conv, wsconv
@@ -614,7 +615,8 @@ def get_distnet_2d_erf4(input_shape, # Y, X
             no_residual_layer.append(residual_filters==0)
         # define feature operations
         feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", l2_reg=l2_reg, last_input_filters=out_filters)
-        combine_filters = int(feature_filters * n_chan / 2.)
+        combine_filters = int(feature_filters * n_chan  * blending_filter_factor)
+        print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
         combine_features_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="CombineFeatures")
         if attention:
             attention_op = SpatialAttention2D(positional_encoding="2D", l2_reg=l2_reg, name="Attention")
@@ -671,6 +673,7 @@ def get_distnet_2d_erf4(input_shape, # Y, X
                 oi += 1
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
+        print(f"input dims: {input.shape}")
         input_merged = ChannelToBatch(compensate_gradient = False, name = "MergeInputs")(input)
         downsampled = [input_merged]
         residuals = []
@@ -938,12 +941,12 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
         return ResConv1D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled = weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}/ResConv1D{kernel_size}x{kernel_size}")
     elif op =="res2d" or op == "resconv2d":
-        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
+        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, split_conv=split_conv, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
         self_attention_op = SpatialAttention2D(positional_encoding="2D", l2_reg=l2_reg, name=f"{name}/SelfAttention")
