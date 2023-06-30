@@ -733,19 +733,19 @@ def get_distnet_2d_erf4(input_shape, # Y, X
         for decoder_name, is_segmentation in decoder_is_segmentation.items():
             if is_segmentation is not None:
                 d_layers = decoder_layers[decoder_name]
+                skip = skip_per_decoder[decoder_name]
+                up = feature_per_frame if is_segmentation else feature_per_frame_pair
+                for op in decoder_feature_op[decoder_name][0]:
+                    up = op(up)
+                for i, (l, res) in enumerate(zip(d_layers[::-1], residuals[:-1])):
+                    up = l([up, res if len(d_layers)-1-i in skip else None])
                 for output_name in output_per_decoder[decoder_name]:
                     if output_name in decoder_out[decoder_name]:
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
-                        skip = skip_per_decoder[decoder_name]
-                        up = feature_per_frame if is_segmentation else feature_per_frame_pair
-                        for op in decoder_feature_op[decoder_name][0]:
-                            up = op(up)
-                        for i, (l, res) in enumerate(zip(d_layers[::-1], residuals[:-1])):
-                            up = l([up, res if len(d_layers)-1-i in skip else None])
-                        up = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
-                        up = BatchToChannel(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up)
-                        outputs.append(up)
+                        up_out = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
+                        up_out = BatchToChannel(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up_out)
+                        outputs.append(up_out)
         return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, predict_center=predict_center, spatial_dims=spatial_dims if attention else None, long_term=long_term, category_background=category_background, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
