@@ -167,7 +167,7 @@ class ASABlendD2v3():
         ]
 
 class ASABlendD2v4():
-    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, attention:bool = True, combine_kernel_size:int=1, pair_combine_kernel_size:int=1):
+    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, attention:bool = True, combine_kernel_size:int=1, pair_combine_kernel_size:int=5):
         self.name = f"asa-blend2-d2-{filters}"
         self.attention = attention
         self.combine_kernel_size = combine_kernel_size
@@ -209,7 +209,7 @@ class ASABlendD2v4():
         ]
 
 class ASABlendD3v4():
-    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, attention:bool = True, combine_kernel_size:int=1, pair_combine_kernel_size:int=1):
+    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, attention:bool = True, combine_kernel_size:int=1, pair_combine_kernel_size:int=5):
         self.name = f"asa-blend2-d3-{filters}"
         self.attention = attention
         self.combine_kernel_size = combine_kernel_size
@@ -228,16 +228,15 @@ class ASABlendD3v4():
             [
                 {"filters":64, "op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
                 {"filters":64, "op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
-                {"filters":64, "op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
                 {"filters":filters, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
             ]
         ]
         self.feature_settings = [
             {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":2 if attention else 3, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":filters, "op":"selfattention" if attention else "res2d", "kernel_size":5, "dilation":2 if attention else 4, "dropout_rate":0 if attention else dropout },
             {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":filters, "op":"selfattention" if attention else "conv"},
-            {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":2 if attention else 3, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
             {"filters":1., "op":"conv", "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
         ]
         self.feature_blending_settings = [

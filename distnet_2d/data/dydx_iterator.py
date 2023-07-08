@@ -22,7 +22,7 @@ class DyDxIterator(TrackingIterator):
         return_categories:bool = True,
         erase_edge_cell_size:int = 50,
         aug_remove_prob:float = 0.01,
-        aug_frame_subsampling = 4, # either int: subsampling interval will be drawn uniformly in [frame_window,aug_frame_subsampling] or callable that generate an subsampling interval (int)
+        aug_frame_subsampling = 4, # either int: frame number interval will be drawn uniformly in [frame_window,aug_frame_subsampling] or callable that generate an frame number interval (int)
         frame_window=1,
         extract_tile_function = extract_tile_random_zoom_function(tile_shape=(128, 128), n_tiles=8, zoom_range=[0.6, 1.6], aspect_ratio_range=[0.75, 1.5], random_channel_jitter_shape=[50, 50] ),
         elasticdeform_parameters:dict = {},
