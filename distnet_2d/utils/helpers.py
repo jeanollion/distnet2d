@@ -6,10 +6,6 @@ import shutil
 import edt
 from dataset_iterator import MultiChannelIterator
 
-def convert_probabilities_to_logits(y_pred): # y_pred should be a tensor: tf.convert_to_tensor(y_pred, np.float32)
-      y_pred = K.clip(y_pred, K.epsilon(), 1 - K.epsilon())
-      return K.log(y_pred / (1 - y_pred))
-
 def ensure_multiplicity(n, object):
     if object is None:
         return [None] * n
@@ -37,12 +33,6 @@ def append_to_list(l, element):
     else:
         l.append(element)
 
-def get_earse_small_values_function(thld):
-    def earse_small_values(im):
-        im[im<thld]=0
-        return im
-    return earse_small_values
-
 def step_decay_schedule(initial_lr=1e-3, minimal_lr=1e-5, decay_factor=0.50, step_size=50):
     if minimal_lr>initial_lr:
         raise ValueError("Minimal LR should be inferior to initial LR")
@@ -50,44 +40,6 @@ def step_decay_schedule(initial_lr=1e-3, minimal_lr=1e-5, decay_factor=0.50, ste
         lr = max(initial_lr * (decay_factor ** np.floor(epoch/step_size)), minimal_lr)
         return lr
     return LearningRateScheduler(schedule, verbose=1)
-
-
-def evaluate_model(iterator, model, metrics, metric_names, xp_idx_in_path=2, position_idx_in_path=3, progress_callback=None):
-    try:
-        import pandas as pd
-    except ImportError as error:
-        print("Pandas not installed")
-        return
-
-    arr, paths, labels, indices = iterator.evaluate(model, metrics, progress_callback=progress_callback)
-    df = pd.DataFrame(arr)
-    if len(metric_names)+2 != df.shape[1]:
-        raise ValueError("Invalid loss / accuracy name: expected: {} names, got: {} names".format(df.shape[1]-2, len(metric_names)))
-    df.columns=["Idx", "dsIdx"]+metric_names
-    df["Indices"] = pd.Series(indices)
-    dsInfo = np.asarray([p.split('/') for p in paths])
-    df["XP"] = pd.Series(dsInfo[:,xp_idx_in_path])
-    df["Position"] = pd.Series(dsInfo[:,position_idx_in_path])
-    return df
-
-def displayProgressBar(max): # this progress bar is compatible with google colab
-    from IPython.display import HTML, display
-    def progress(value=0, max=max):
-        return HTML("""
-            <progress
-                value='{value}'
-                max='{max}',
-                style='width: 100%'
-            >
-                {value}
-            </progress>
-        """.format(value=value, max=max))
-    out = display(progress(), display_id=True)
-    currentProgress=[0]
-    def callback():
-        currentProgress[0]+=1
-        out.update(progress(currentProgress[0]))
-    return callback
 
 def predict_average_flip_rotate(model, batch, allow_permute_axes = True, training=False):
     list_flips=[0,1,2] if allow_permute_axes else [0, 1]
@@ -132,59 +84,3 @@ AUG_FUN_2D = [
     lambda img : np.flip(img, axis=2),
     lambda img : np.transpose(img, axes=(0, 2, 1, 3))
 ]
-
-def get_nd_gaussian_kernel(radius=1, sigma=0, ndim=2):
-    size = 2 * radius + 1
-    if ndim == 1:
-        coords = [np.mgrid[-radius:radius:complex(0, size)]]
-    elif ndim==2:
-        coords = np.mgrid[-radius:radius:complex(0, size), -radius:radius:complex(0, size)]
-    elif ndim==3:
-        coords = np.mgrid[-radius:radius:complex(0, size), -radius:radius:complex(0, size), -radius:radius:complex(0, size)]
-    elif ndim==4:
-        coords = np.mgrid[-radius:radius:complex(0, size), -radius:radius:complex(0, size), -radius:radius:complex(0, size), -radius:radius:complex(0, size)]
-    else:
-        raise ValueError("Up to 4D supported")
-
-    # Need an (N, ndim) array of coords pairs.
-    stacked = np.column_stack([c.flat for c in coords])
-    mu = np.array([0.0]*ndim)
-    s = np.array([sigma if sigma>0 else radius]*ndim)
-    covariance = np.diag(s**2)
-    z = multivariate_normal.pdf(stacked, mean=mu, cov=covariance)
-    z = z.reshape(coords[0].shape) # Reshape back to a (N, N) grid.
-    return z/z.sum()
-
-def get_foreground_and_contour_proportion(dataset, label_keyword="regionLabels", group_keyword=None, return_class_weights=False):
-    params = dict(dataset=dataset,
-              channel_keywords=[label_keyword],
-              group_keyword=group_keyword,
-              output_channels=[],
-              perform_data_augmentation=False,
-              batch_size=1,
-              shuffle=False)
-    it = MultiChannelIterator(**params)
-    shape = it[0].shape
-    ds_size = len(it)
-    sum = np.zeros(shape=(ds_size, 3), dtype=np.float64)
-    for i in range(ds_size):
-        labels = it[i][0,...,0]
-        edm = edt.edt(labels, black_border=False)
-        sum[i, 0] = np.prod(labels.shape)
-        sum[i, 1] = np.sum(edm>1)
-        sum[i, 2] = np.sum(edm==1)
-    it._close_datasetIO()
-    size = np.sum(sum[:,0])
-    contours = np.sum(sum[:,2])
-    fg = np.sum(sum[:,1])
-    p_fg = fg/size
-    p_cont = contours/size
-    if return_class_weights:
-        p_bck = 1 - p_fg - p_cont
-        return compute_class_weights([p_bck, p_fg, p_cont])
-    else:
-        return p_fg, p_cont
-
-def compute_class_weights(class_proportions):
-    n_classes = len(class_proportions)
-    return [1./(n_classes * p) for p in class_proportions]

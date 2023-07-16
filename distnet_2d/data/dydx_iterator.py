@@ -17,20 +17,20 @@ from .medoid import get_medoid
 class DyDxIterator(TrackingIterator):
     def __init__(self,
         dataset,
-        channel_keywords:list=['/raw', '/regionLabels', '/prevRegionLabels'], # channel @1 must be label & @2 previous label
+        extract_tile_function, # = extract_tile_random_zoom_function(tile_shape=(128, 128), n_tiles=8, zoom_range=[0.6, 1.6], aspect_ratio_range=[0.75, 1.5], random_channel_jitter_shape=[50, 50] ),
+        frame_window:int,
+        aug_frame_subsampling, # either int: frame number interval will be drawn uniformly in [frame_window,aug_frame_subsampling] or callable that generate an frame number interval (int)
+        erase_edge_cell_size:int,
         next:bool = True,
         return_categories:bool = True,
-        erase_edge_cell_size:int = 50,
+        channel_keywords:list=['/raw', '/regionLabels', '/prevRegionLabels'], # channel @1 must be label & @2 previous label
         aug_remove_prob:float = 0.01,
-        aug_frame_subsampling = 4, # either int: frame number interval will be drawn uniformly in [frame_window,aug_frame_subsampling] or callable that generate an frame number interval (int)
-        frame_window=1,
-        extract_tile_function = extract_tile_random_zoom_function(tile_shape=(128, 128), n_tiles=8, zoom_range=[0.6, 1.6], aspect_ratio_range=[0.75, 1.5], random_channel_jitter_shape=[50, 50] ),
         elasticdeform_parameters:dict = {},
         downscale_displacement_and_categories=1,
-        return_center = False,
+        return_center = True,
         center_mode = "MEDOID", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
         return_label_rank = False,
-        long_term:bool = False,
+        long_term:bool = True,
         output_float16=False,
         **kwargs):
         assert len(channel_keywords)==3, 'keyword should contain 3 elements in this order: grayscale input images, object labels, object previous labels'

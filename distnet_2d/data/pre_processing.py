@@ -28,27 +28,6 @@ def batch_wise_fun(fun):
 def apply_and_stack_channel(*funcs):
 	return lambda batch : np.concatenate([fun(batch) for fun in funcs], -1)
 
-def identity(batch):
-	return batch
-
-def weight_map_mask_class_balance(batch, max_background_ratio=0, set_background_to_one=False, dtype=np.float32):
-	wm = np.ones(shape = batch.shape, dtype=dtype)
-	if max_background_ratio<0:
-		return wm
-	n_nonzeros = np.count_nonzero(batch)
-	if n_nonzeros!=0:
-		n_tot = np.prod(batch.shape)
-		p_back = (n_tot - n_nonzeros) / n_tot
-		background_ratio = (n_tot - n_nonzeros) / n_nonzeros
-		if max_background_ratio>0 and background_ratio>max_background_ratio:
-			p_back = max_background_ratio / (1 + max_background_ratio)
-		if set_background_to_one:
-			wm[batch!=0] = p_back / (1 - p_back)
-		else:
-			wm[batch!=0] = p_back
-			wm[batch==0] = 1-p_back
-	return wm
-
 def binarize(img, dtype=np.float32):
 	return np.where(img, dtype(1), dtype(0))
 
