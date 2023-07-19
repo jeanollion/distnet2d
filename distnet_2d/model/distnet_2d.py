@@ -30,6 +30,7 @@ class DistnetModel(Model):
         next = True,
         frame_window = 1,
         long_term:bool = True,
+        predict_next_displacement:bool = False,
         print_gradients:bool=False, # eager mode only
         accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False, # lower clip factor clips more
         **kwargs):
@@ -41,6 +42,7 @@ class DistnetModel(Model):
         self.category_weight = category_loss_weight
         self.spatial_dims = spatial_dims
         self.next = next
+        self.predict_next_displacement=predict_next_displacement
         self.frame_window = frame_window
         self.edm_loss = edm_loss
         self.center_loss=center_loss
@@ -75,13 +77,14 @@ class DistnetModel(Model):
 
         fw = self.frame_window
         n_frame_pairs = fw * (2 if self.next else 1)
+        n_fp_mul = 2 if self.predict_next_displacement else 1
         if self.long_term:
             n_frame_pairs += (fw - 1) * (2 if self.next else 1)
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
-        displacement_weight = self.displacement_weight #/ 2. # y & x
+        displacement_weight = self.displacement_weight / (2. * n_fp_mul) # y & x
         # displacement_weight /= (fw * (2. if self.next else 1)) # mean per channel # should it be divided by channel ?
-        category_weight = self.category_weight / float(n_frame_pairs)
+        category_weight = self.category_weight / (n_fp_mul * float(n_frame_pairs))
         edm_weight = self.edm_weight
         center_weight = self.center_weight
         inc = 1
@@ -97,6 +100,7 @@ class DistnetModel(Model):
             losses = dict()
             loss_weights = dict()
 
+            cell_mask = tf.math.greater(y[0], 0)
             # edm
             inc=0
             if edm_weight>0:
@@ -104,27 +108,38 @@ class DistnetModel(Model):
                 losses["edm"] = edm_loss
                 loss_weights["edm"] = edm_weight
             if self.edm_lovasz_weight>0:
-                edm_loss_lh = lovasz_hinge(y_pred[inc], tf.math.greater(y[inc], 0), channel_axis=True)
+                edm_loss_lh = lovasz_hinge(y_pred[inc], cell_mask, channel_axis=True)
                 losses["edm_lh"] = edm_loss_lh
                 loss_weights["edm_lh"] = self.edm_lovasz_weight
 
             # center
             inc+=1
             if center_weight>0:
-                center_pred_inside=tf.where(tf.math.greater(y[0], 0), y_pred[inc], 0) # do not predict anything outside
+                center_pred_inside=tf.where(cell_mask, y_pred[inc], 0) # do not predict anything outside
                 center_loss = self.center_loss(y[inc], center_pred_inside)
                 losses["center"] = center_loss
                 loss_weights["center"] = center_weight
 
             #regression displacement loss
             if displacement_weight>0:
-                mask = tf.math.greater(y[0][...,1:], 0)
+                mask = cell_mask[...,1:]
+                if self.predict_next_displacement:
+                    mask_next = cell_mask[...,:-1]
                 if self.long_term and fw>1:
-                    mask_lt = tf.tile(mask[...,fw-1:fw], [1, 1, 1, fw-1])
-                    if self.next:
-                        mask = tf.concat([mask, mask_lt, mask[...,fw+1:]], -1)
+                    mask_center = tf.tile(mask[...,fw-1:fw], [1, 1, 1, fw-1])
+                    if self.predict_next_displacement:
+                        if self.next:
+                            mask = tf.concat([mask, mask_center, cell_mask[...,-fw+1:], mask_next, cell_mask[...,:fw-1], mask_center], -1)
+                        else:
+                            mask = tf.concat([mask, mask_center, mask_next, cell_mask[...,:fw-1]], -1)
                     else:
-                        mask = tf.concat([mask, mask_lt], -1)
+                        if self.next:
+                            mask = tf.concat([mask, mask_center, cell_mask[...,-fw+1:]], -1)
+                        else:
+                            mask = tf.concat([mask, mask_center], -1)
+                elif self.predict_next_displacement:
+                    mask = tf.concat([mask, mask_next], -1)
+
                 dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
                 dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
 
@@ -134,16 +149,17 @@ class DistnetModel(Model):
                 loss_weights["dX"] = displacement_weight
 
             # category loss
-            cat_loss = 0
-            for i in range(n_frame_pairs):
-                if not self.category_background:
-                    inside_mask = tf.math.greater(y[3+inc][...,i:i+1], 0)
-                    cat_pred_inside=tf.where(inside_mask, y_pred[3+inc][...,3*i:3*i+3], 1)
-                    cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], cat_pred_inside)
-                else:
-                    cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
-            losses["category"] = cat_loss
-            loss_weights["category"] = category_weight
+            if category_weight>0:
+                cat_loss = 0
+                for i in range(n_frame_pairs * n_fp_mul):
+                    if not self.category_background:
+                        inside_mask = tf.math.greater(y[3+inc][...,i:i+1], 0)
+                        cat_pred_inside=tf.where(inside_mask, y_pred[3+inc][...,3*i:3*i+3], 1)
+                        cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], cat_pred_inside)
+                    else:
+                        cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
+                losses["category"] = cat_loss
+                loss_weights["category"] = category_weight
 
             loss = 0.
             for k, l in losses.items():
@@ -232,6 +248,7 @@ def get_distnet_2d_model(input_shape, # Y, X
             frame_window:int = 1,
             next:bool=True,
             long_term:bool = True,
+            predict_next_displacement:bool = False,
             category_background = False,
             l2_reg:float = 0,
             name: str="DiSTNet2D",
@@ -291,23 +308,22 @@ def get_distnet_2d_model(input_shape, # Y, X
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
         decoder_feature_op={n: get_seq_and_filters(parse_param_list(feature_decoder_settings, f"Features{n}", l2_reg=l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
         decoder_out={"Seg":{}, "Center":{}, "Track":{}, "Cat":{}}
-        output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"], "Cat": ["Cat"]}
+        output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"] if not predict_next_displacement else ["dY", "dX", "dYNext", "dXNext"], "Cat": ["Cat"] if not predict_next_displacement else ["Cat", "CatNext"]}
         n_frame_pairs = n_chan -1
         if long_term:
             n_frame_pairs = n_frame_pairs + (frame_window-1) * (2 if next else 1)
         decoder_is_segmentation = {"Seg": True, "Center": True, "Track": False, "Cat": False}
         skip_per_decoder = {"Seg": skip_connections, "Center": [], "Track": [], "Cat": []}
-        output_inc = 0
-        seg_out = ["Output0_EDM"]
-        activation_out = ["linear"]
+
 
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderSegEDM")
-                decoder_out["Track"]["dY"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrackY")
-                decoder_out["Track"]["dX"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrackX")
-                decoder_out["Cat"]["Cat"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderCat")
                 decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderCenter")
+                for dTrackName in output_per_decoder["Track"]:
+                    decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}")
+                for dCatName in output_per_decoder["Cat"]:
+                    decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}")
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}") )
@@ -366,7 +382,6 @@ def get_distnet_2d_model(input_shape, # Y, X
         for op in feature_blending_convs:
             combined_features = op(combined_features)
 
-        outputs = []
         feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_chan, inference_conv_idx=frame_window, filters = feature_filters, name = f"SegmentationFeatures")(combined_features) # (N_CHAN x B, Y, X, F)
         feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
 
@@ -377,6 +392,7 @@ def get_distnet_2d_model(input_shape, # Y, X
             feature_per_frame = feature_skip_op([feature_skip, feature_per_frame])
             feature_per_frame_pair = feature_pair_skip_op([feature_pair_skip, feature_per_frame_pair])
 
+        outputs=[]
         for decoder_name, is_segmentation in decoder_is_segmentation.items():
             if is_segmentation is not None:
                 d_layers = decoder_layers[decoder_name]
@@ -386,14 +402,23 @@ def get_distnet_2d_model(input_shape, # Y, X
                     up = op(up)
                 for i, (l, res) in enumerate(zip(d_layers[::-1], residuals[:-1])):
                     up = l([up, res if len(d_layers)-1-i in skip else None])
+                output_per_dec = dict()
                 for output_name in output_per_decoder[decoder_name]:
                     if output_name in decoder_out[decoder_name]:
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
+                        if not is_segmentation and predict_next_displacement:
+                            layer_output_name += "_" # will be concatenated -> output name is used @ concat
                         up_out = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
                         up_out = BatchToChannel(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up_out)
-                        outputs.append(up_out)
-        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention else None, long_term=long_term, category_background=category_background, **kwargs)
+                        output_per_dec[output_name] = up_out
+                if predict_next_displacement: # merge outputs ending by Next
+                    for k in list(output_per_dec.keys()):
+                        if k.endswith("Next"):
+                            output_name = k.replace("Next", "")
+                            output_per_dec[output_name] = Concatenate(axis = -1, name = decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop(k)])
+                outputs.extend(output_per_dec.values())
+        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention else None, long_term=long_term, category_background=category_background, predict_next_displacement=predict_next_displacement, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
