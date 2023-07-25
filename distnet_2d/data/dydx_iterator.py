@@ -3,7 +3,6 @@ from dataset_iterator.tile_utils import extract_tile_random_zoom_function
 import numpy as np
 import numpy.ma as ma
 from scipy.ndimage import center_of_mass, find_objects, maximum_filter, map_coordinates
-from scipy.ndimage.measurements import mean
 from skimage.transform import rescale
 from skimage.feature import peak_local_max
 import skfmm
@@ -73,8 +72,8 @@ class DyDxIterator(TrackingIterator):
             if self.aug_frame_subsampling is not None :
                 if callable(self.aug_frame_subsampling):
                     n_frames = self.aug_frame_subsampling()
-                elif self.aug_frame_subsampling>1:
-                    n_frames = np.random.randint(self.aug_frame_subsampling)+self.frame_window
+                elif self.aug_frame_subsampling>self.frame_window:
+                    n_frames = np.max(self.frame_window, np.random.randint(self.aug_frame_subsampling))
                 else:
                     n_frames = self.frame_window
             else:
