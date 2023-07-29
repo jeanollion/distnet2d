@@ -30,7 +30,7 @@ class DistnetModel(Model):
         next = True,
         frame_window = 1,
         long_term:bool = True,
-        predict_next_displacement:bool = False,
+        predict_next_displacement:bool = True,
         print_gradients:bool=False, # eager mode only
         accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False, # lower clip factor clips more
         **kwargs):
@@ -248,7 +248,7 @@ def get_distnet_2d_model(input_shape, # Y, X
             frame_window:int = 1,
             next:bool=True,
             long_term:bool = True,
-            predict_next_displacement:bool = False,
+            predict_next_displacement:bool = True,
             category_background = False,
             l2_reg:float = 0,
             name: str="DiSTNet2D",

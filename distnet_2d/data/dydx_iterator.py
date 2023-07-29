@@ -31,7 +31,7 @@ class DyDxIterator(TrackingIterator):
         center_mode = "MEDOID", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
         return_label_rank = False,
         long_term:bool = True,
-        return_next_displacement:bool = False,
+        return_next_displacement:bool = True,
         output_float16=False,
         **kwargs):
         assert len(channel_keywords)==2, 'keyword should contain 2 elements in this order: grayscale input images, object labels'
