@@ -72,8 +72,8 @@ class DyDxIterator(TrackingIterator):
             if self.aug_frame_subsampling is not None :
                 if callable(self.aug_frame_subsampling):
                     n_frames = self.aug_frame_subsampling()
-                elif self.aug_frame_subsampling>self.frame_window:
-                    n_frames = np.max(self.frame_window, np.random.randint(self.aug_frame_subsampling))
+                elif self.aug_frame_subsampling > self.frame_window:
+                    n_frames = max(self.frame_window, np.random.randint(self.aug_frame_subsampling))
                 else:
                     n_frames = self.frame_window
             else:
