@@ -28,7 +28,7 @@ class DistnetModel(Model):
         category_class_frequency_range=[1/50, 50],
         category_background = False,
         next = True,
-        frame_window = 1,
+        frame_window = 3,
         long_term:bool = True,
         predict_next_displacement:bool = True,
         print_gradients:bool=False, # eager mode only

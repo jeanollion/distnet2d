@@ -1,7 +1,14 @@
-class ASABlendD2():
-    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, attention:bool = True, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1]):
-        prefix = "asa-" if attention else ""
-        self.name = f"{prefix}blend2-d2-{filters}"
+def get_architecture(architecture_type:str, **kwargs):
+    if architecture_type.lower()=="blend":
+        arch = BlendD2 if kwargs.pop("n_downsampling", 2) == 2 else BlendD3
+        return arch(**kwargs)
+    else:
+        raise ValueError(f"Unknown architecture type: {architecture_type}")
+
+class BlendD2():
+    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:bool = False, attention:bool = False, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1]):
+        prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
+        self.name = f"{prefix}blendD2-{filters}"
         self.skip_connections=skip_connections
         self.attention = attention
         self.combine_kernel_size = combine_kernel_size
@@ -42,10 +49,10 @@ class ASABlendD2():
             {"filters":32, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
         ]
 
-class ASABlendD3():
-    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, attention:bool = True, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1]):
-        prefix = "asa-" if attention else ""
-        self.name = f"{prefix}blend2-d3-{filters}"
+class BlendD3():
+    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:bool = False, attention:bool = False, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1]):
+        prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
+        self.name = f"{prefix}blendD3-{filters}"
         self.skip_connections=skip_connections
         self.attention = attention
         self.combine_kernel_size = combine_kernel_size
@@ -69,10 +76,10 @@ class ASABlendD3():
         ]
         self.feature_settings = [
             {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":2 if attention else 3, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":filters, "op":"selfattention" if attention else "res2d", "kernel_size":5, "dilation":2 if attention else 4, "dropout_rate":0 if attention else dropout },
+            {"op":"res2d", "dilation":2 if self_attention else 3, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":filters, "op":"selfattention" if self_attention else "res2d", "kernel_size":5, "dilation":2 if self_attention else 4, "dropout_rate":0 if self_attention else dropout },
             {"op":"res2d", "dilation":2, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":2 if attention else 3, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":2 if self_attention else 3, "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
             {"filters":1., "op":"conv", "kernel_size":5, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
         ]
         self.feature_blending_settings = [
