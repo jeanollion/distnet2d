@@ -4,15 +4,15 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="DiST_Net_2D",
-    version="0.1.0",
+    name="DiSTNet2D",
+    version="0.1.1",
     author="Jean Ollion",
     author_email="jean.ollion@polytechnique.org",
     description="keras implementation of DiSTNet 2D",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/jeanollion/distnet",
-    download_url = 'https://github.com/jeanollion/distnet/archive/v0.1.0.tar.gz',
+    url="https://github.com/jeanollion/distnet2d",
+    download_url = 'https://github.com/jeanollion/distnet2d/archive/v0.1.1.tar.gz',
     packages=setuptools.find_packages(),
     keywords = ['Segmentation', 'Tracking', 'SelfAttention', 'Tensorflow', 'Keras'],
     classifiers=[
