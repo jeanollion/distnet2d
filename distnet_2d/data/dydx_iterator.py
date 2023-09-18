@@ -86,21 +86,21 @@ class DyDxIterator(TrackingIterator):
         # correction for oob @ previous labels : add identity links
         prevLinks = batch_by_channel['arrays'][0]
         for b in range(prevLinks.shape[0]):
-            for i in range(n_frames):
-                inc = n_frames - i
-                prev_inc = aug_param_array[b][ref_channel].get(f"prev_inc_{inc}", inc)
-                if prev_inc!=inc:
-                    #print(f"oob prev: n_frames={n_frames}, idx:{i} inc={inc} actual inc:{prev_inc} will replace at {i+1}")
-                    all_labels = np.unique(batch_by_channel[1][b][...,i])
-                    for y, l in enumerate(all_labels):
-                        prevLinks[b][y,:,i+1] = l
-                if self.channels_next[1]:
-                    next_inc = aug_param_array[b][ref_channel].get(f"next_inc_{inc}", inc)
-                    if next_inc!=inc:
-                        #print(f"oob next: n_frames={n_frames}, idx:{i} inc={inc} actual inc:{next_inc} will replace prev labels at {n_frames+inc}")
-                        all_labels = np.unique(batch_by_channel[1][b][...,n_frames+inc-1])
-                        for y, l in enumerate(all_labels):
-                            prevLinks[b][y,:,n_frames+inc] = l
+            if n_frames > 0 :
+                for i in range(n_frames):
+                    inc = n_frames - i
+                    prev_inc = aug_param_array[b][ref_channel].get(f"prev_inc_{inc}", inc)
+                    if prev_inc!=inc:
+                        #print(f"oob prev: n_frames={n_frames}, idx:{i} inc={inc} actual inc:{prev_inc} will replace at {i+1}")
+                        self._set_identity_link(prevLinks, b, i+1)
+                    if self.channels_next[1]:
+                        next_inc = aug_param_array[b][ref_channel].get(f"next_inc_{inc}", inc)
+                        if next_inc!=inc:
+                            #print(f"oob next: n_frames={n_frames}, idx:{i} inc={inc} actual inc:{next_inc} will replace prev labels at {n_frames+inc}")
+                            self._set_identity_link(prevLinks, b, n_frames + inc)
+            else: # n_frame == 0 ->
+                for c in range(1, prevLinks.shape[-1]):
+                    self._set_identity_link(prevLinks, b, c)
         # get previous labels and store in batch_by_channel BEFORE applying tiling and elastic deform
         self._get_prev_label(batch_by_channel, n_frames)
         batch_by_channel[-2] = batch_by_channel[0].shape[0] # batch size is recorded here: in case of tiling it will be usefull
@@ -129,6 +129,10 @@ class DyDxIterator(TrackingIterator):
                 batch_by_channel[c] = batch_by_channel[c].astype('float16')
 
         return batch_by_channel, aug_param_array, ref_channel
+
+    @staticmethod
+    def _set_identity_link(prev_label, b, c): # prev_label = (batch, label, 2, channels)
+        prev_label[b, :, 1, c] = prev_label[b, :, 0, c]
 
     def _get_frames_to_augment(self, img, chan_idx, aug_params):
         if self.aug_all_frames:
