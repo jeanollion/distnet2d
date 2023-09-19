@@ -25,7 +25,7 @@ class DyDxIterator(TrackingIterator):
         channel_keywords:list=['/raw', '/regionLabels'], # channel @1 must be label
         array_keywords:list=['/linksPrev'],
         aug_remove_prob:float = 0.01,
-        elasticdeform_parameters:dict = {},
+        elasticdeform_parameters:dict = None,
         downscale_displacement_and_categories=1,
         return_center = True,
         center_mode = "MEDOID", # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
