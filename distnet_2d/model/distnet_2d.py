@@ -1,5 +1,3 @@
-# gradient accumulation code from : # from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
-
 import tensorflow as tf
 import tensorflow_probability as tfp
 from .layers import StopGradient, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature
@@ -241,7 +239,7 @@ def get_distnet_2d_model(input_shape, # Y, X
             combine_kernel_size:int = 1,
             pair_combine_kernel_size:int = 1,
             blending_filter_factor:float = 0.5,
-            skip_stop_gradient:bool = True,
+            skip_stop_gradient:bool = False,
             skip_connections = False, # bool or list
             skip_combine_mode:str="conv", #conv, wsconv
             attention : bool = True,
@@ -575,7 +573,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         for params in param_list:
             total_contraction *= params.get("downscale", 1)
             params["downscale"] = 1
-    # split into squence with no stride (for residual) and the rest of the sequence
+    # split into sequence with no stride (for residual) and the rest of the sequence
     i = 0
     if param_list[0].get("downscale", 1)==1:
         residual_filters = last_input_filters

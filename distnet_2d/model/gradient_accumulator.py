@@ -1,5 +1,5 @@
 import tensorflow as tf
-
+# gradient accumulation code from : # from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
 class GradientAccumulator():
     def __init__(self, accum_steps, model):
         self.model = model
