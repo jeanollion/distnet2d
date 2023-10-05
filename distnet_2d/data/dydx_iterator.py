@@ -215,7 +215,7 @@ class DyDxIterator(TrackingIterator):
         centerIm = np.zeros(labelIms.shape, dtype=self.dtype) if self.return_center else None
         if self.return_label_rank:
             labelIm = np.zeros(labelIms.shape, dtype=np.int32)
-            # noNextArr = np.zeros(labelIms.shape[:1]+(2 * self.frame_window if return_next else self.frame_window, self.n_label_max), dtype=np.bool)
+            # noNextArr = np.zeros(labelIms.shape[:1]+(2 * self.frame_window if return_next else self.frame_window, self.n_label_max), dtype=bool)
             prevLabelArr = np.zeros(labelIms.shape[:1]+(n_motion, self.n_label_max), dtype=np.int32)
             centerArr = np.zeros(labelIms.shape[:1]+labelIms.shape[-1:]+(self.n_label_max,2), dtype=np.float32)
             centerArr.fill(np.nan)
@@ -523,5 +523,5 @@ def _draw_centers(centerIm, labels_map_centers, edm, labelIm):
             m[int(round(center[0])), int(round(center[1]))] = 0
             count+=1
     if count>0:
-        m = ma.masked_array(m, ~labelIm.astype(np.bool))
+        m = ma.masked_array(m, ~labelIm.astype(bool))
         centerIm[:] = skfmm.distance(m)

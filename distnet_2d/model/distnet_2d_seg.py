@@ -24,17 +24,17 @@ class DistnetModelSeg(tf.keras.Model):
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
 
-        with tf.GradientTape(persistent=self.print_gradients) as tape:
+        with tf.GradientTape(persistent=False) as tape:
             y_pred = self(x, training=True)  # Forward pass
             # compute loss
             losses = dict()
             # edm
             edm_loss = self.edm_loss(y[0], y_pred[0])
-            losses["edm"] = edm_loss
+            losses["EDM"] = edm_loss
             # center
-            center_pred_inside = tf.where(tf.math.greater(y[0], 0), y_pred[1], 0) # do not predict anything outside
-            center_loss = self.center_loss(y[1], center_pred_inside)
-            losses["center"] = center_loss
+            center_pred_inside = tf.where(tf.math.greater(y[0], 0), y_pred[1], 0) # do not compute loss outside cells
+            gcdm_loss = self.gcdm_loss(y[1], center_pred_inside)
+            losses["GCDM"] = gcdm_loss
 
             loss = 0.
             for k, l in losses.items():
@@ -161,8 +161,9 @@ def get_distnet_2d_seg_model(encoder_settings: list,
     input = tf.keras.layers.Input(shape=input_shape + [input_channels], name="Input")
     print(f"input dims: {input.shape}")
     if shared_encoder:
-        input = ChannelToBatch(compensate_gradient=False, name="MergeInputs")(input)
-    downsampled = [input]
+        downsampled = [ChannelToBatch(compensate_gradient=False, name="MergeInputs")(input)]
+    else:
+        downsampled = [input]
     residuals = []
     for i, l in enumerate(encoder_layers):
         down, res = l(downsampled[-1])
