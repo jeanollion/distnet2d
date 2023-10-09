@@ -26,7 +26,7 @@ class NConvToBatch2D(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self.convs = [
-            tf.keras.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
+            tf.keras.layers.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
         for i in range(self.n_conv)]
 
         if self.compensate_gradient and self.n_conv>1:
@@ -217,7 +217,7 @@ class Combine(tf.keras.layers.Layer):
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
                 name="Conv1x1")
         else:
-            self.combine_conv = tf.keras.Conv2D(
+            self.combine_conv = tf.keras.layers.Conv2D(
                 filters=self.filters,
                 kernel_size=self.kernel_size,
                 padding='same',
