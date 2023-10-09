@@ -3,14 +3,14 @@ from ..utils.helpers import ensure_multiplicity
 import tensorflow as tf
 import numpy as np
 
-class StopGradient(tf.keras.Layer):
+class StopGradient(tf.keras.layers.Layer):
     def __init__(self, name:str="StopGradient"):
         super().__init__(name=name)
 
     def call(self, input):
         return tf.stop_gradient( input, name=self.name )
 
-class NConvToBatch2D(tf.keras.Layer):
+class NConvToBatch2D(tf.keras.layers.Layer):
     def __init__(self, n_conv:int, inference_conv_idx:int, filters:int, compensate_gradient:bool = False, name: str="NConvToBatch2D"):
         super().__init__(name=name)
         self.n_conv = n_conv
@@ -52,7 +52,7 @@ class NConvToBatch2D(tf.keras.Layer):
         # output = get_print_grad_fun(f"{self.name} after concat")(output)
         return output
 
-class SelectFeature(tf.keras.Layer):
+class SelectFeature(tf.keras.layers.Layer):
     def __init__(self, inference_conv_idx:int, name: str="SelectFeature"):
         super().__init__(name=name)
         self.inference_mode=False
@@ -70,7 +70,7 @@ class SelectFeature(tf.keras.Layer):
         else:
             return input_concat
 
-class ChannelToBatch(tf.keras.Layer):
+class ChannelToBatch(tf.keras.layers.Layer):
     def __init__(self, compensate_gradient:bool = False, name: str="ChannelToBatch"):
         self.compensate_gradient=compensate_gradient
         super().__init__(name=name)
@@ -97,7 +97,7 @@ class ChannelToBatch(tf.keras.Layer):
             input = self.grad_fun(input)
         return input
 
-class SplitBatch(tf.keras.Layer):
+class SplitBatch(tf.keras.layers.Layer):
     def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="SplitBatch2D"):
         self.n_splits=n_splits
         self.compensate_gradient=compensate_gradient
@@ -123,7 +123,7 @@ class SplitBatch(tf.keras.Layer):
         splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
         return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
 
-class BatchToChannel(tf.keras.Layer):
+class BatchToChannel(tf.keras.layers.Layer):
     def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="BatchToChannel"):
         self.n_splits=n_splits
         self.compensate_gradient = compensate_gradient
