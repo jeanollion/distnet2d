@@ -1,20 +1,16 @@
 from tensorflow import pad
-from tensorflow.keras.layers import Layer, GlobalAveragePooling2D, Reshape, Conv2D, Multiply, Conv3D, UpSampling2D
-from tensorflow.keras import Model, backend
 from ..utils.helpers import ensure_multiplicity
-from tensorflow.python.keras.engine.input_spec import InputSpec
 import tensorflow as tf
 import numpy as np
-from keras.utils import conv_utils
 
-class StopGradient(Layer):
+class StopGradient(tf.keras.Layer):
     def __init__(self, name:str="StopGradient"):
         super().__init__(name=name)
 
     def call(self, input):
         return tf.stop_gradient( input, name=self.name )
 
-class NConvToBatch2D(Layer):
+class NConvToBatch2D(tf.keras.Layer):
     def __init__(self, n_conv:int, inference_conv_idx:int, filters:int, compensate_gradient:bool = False, name: str="NConvToBatch2D"):
         super().__init__(name=name)
         self.n_conv = n_conv
@@ -30,7 +26,7 @@ class NConvToBatch2D(Layer):
 
     def build(self, input_shape):
         self.convs = [
-            Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
+            tf.keras.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
         for i in range(self.n_conv)]
 
         if self.compensate_gradient and self.n_conv>1:
@@ -56,7 +52,7 @@ class NConvToBatch2D(Layer):
         # output = get_print_grad_fun(f"{self.name} after concat")(output)
         return output
 
-class SelectFeature(Layer):
+class SelectFeature(tf.keras.Layer):
     def __init__(self, inference_conv_idx:int, name: str="SelectFeature"):
         super().__init__(name=name)
         self.inference_mode=False
@@ -74,7 +70,7 @@ class SelectFeature(Layer):
         else:
             return input_concat
 
-class ChannelToBatch(Layer):
+class ChannelToBatch(tf.keras.Layer):
     def __init__(self, compensate_gradient:bool = False, name: str="ChannelToBatch"):
         self.compensate_gradient=compensate_gradient
         super().__init__(name=name)
@@ -101,7 +97,7 @@ class ChannelToBatch(Layer):
             input = self.grad_fun(input)
         return input
 
-class SplitBatch(Layer):
+class SplitBatch(tf.keras.Layer):
     def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="SplitBatch2D"):
         self.n_splits=n_splits
         self.compensate_gradient=compensate_gradient
@@ -127,7 +123,7 @@ class SplitBatch(Layer):
         splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
         return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
 
-class BatchToChannel(Layer):
+class BatchToChannel(tf.keras.Layer):
     def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="BatchToChannel"):
         self.n_splits=n_splits
         self.compensate_gradient = compensate_gradient
@@ -186,7 +182,7 @@ def get_print_grad_fun(message):
         return x, grad
     return wgrad
 
-class Combine(Layer):
+class Combine(tf.keras.layers.Layer):
     def __init__(
             self,
             filters: int,
@@ -221,7 +217,7 @@ class Combine(Layer):
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
                 name="Conv1x1")
         else:
-            self.combine_conv = Conv2D(
+            self.combine_conv = tf.keras.Conv2D(
                 filters=self.filters,
                 kernel_size=self.kernel_size,
                 padding='same',
@@ -260,7 +256,7 @@ class WeigthedGradient(tf.keras.layers.Layer):
                 return dy * self.weight
         return x, grad
 
-class ResConv2D(Layer):
+class ResConv2D(tf.keras.layers.Layer):
     def __init__(
             self,
             kernel_size: int=3,
@@ -272,7 +268,7 @@ class ResConv2D(Layer):
             activation:str = "relu",
             l2_reg:float = 0,
             split_conv:bool = False,
-            name: str="ResConv1D",
+            name: str="ResConv2D",
     ):
         super().__init__(name=name)
         self.kernel_size = kernel_size
@@ -337,7 +333,7 @@ class ResConv2D(Layer):
         else:
             return self.activation_layer(input + x)
 
-class Conv2DBNDrop(Layer):
+class Conv2DBNDrop(tf.keras.layers.Layer):
     def __init__(
             self,
             filters:int,
@@ -348,7 +344,7 @@ class Conv2DBNDrop(Layer):
             batch_norm : bool = True,
             activation:str = "relu",
             l2_reg:float = 0,
-            name: str="ResConv1D",
+            name: str="ConvBNDrop",
     ):
         super().__init__(name=name)
         self.filters = filters
@@ -391,7 +387,7 @@ class Conv2DBNDrop(Layer):
             x = self.drop(x, training = training)
         return self.activation_layer(x)
 
-class Conv2DTransposeBNDrop(Layer):
+class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
     def __init__(
             self,
             filters:int,
@@ -401,7 +397,7 @@ class Conv2DTransposeBNDrop(Layer):
             batch_norm : bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
-            name: str="ResConv2D",
+            name: str="ResConv2DTransposeBNDrop",
     ):
         super().__init__(name=name)
         self.filters = filters
@@ -430,9 +426,7 @@ class Conv2DTransposeBNDrop(Layer):
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"{self.name}/Dropout")
-        if self.batch_norm == "trainablenormalization":
-            self.bn = TrainableNormalization(name = f"{self.name}/TrainableNormalization")
-        elif self.batch_norm:
+        if self.batch_norm:
             #self.bn = MockBatchNormalization(name = f"{self.name}/MockBatchNormalization")
             self.bn = tf.keras.layers.BatchNormalization(name = f"{self.name}/BatchNormalization")
         super().build(input_shape)
@@ -445,7 +439,7 @@ class Conv2DTransposeBNDrop(Layer):
             x = self.drop(x, training = training)
         return self.activation_layer(x)
 
-class SplitConv2D(Layer):
+class SplitConv2D(tf.keras.layers.Layer):
     def __init__(
             self,
             filters:int=0,
@@ -585,113 +579,6 @@ class WSConv2D(tf.keras.layers.Conv2D):
         if self.activation_layer is not None:
             x = self.activation_layer(x) #* self.gamma
         return x
-
-class WSConv2DTranspose(tf.keras.layers.Conv2DTranspose):
-    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, **kwargs):
-        activation = kwargs.get("activation", "linear")
-        gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
-        super().__init__(kernel_initializer="he_normal", *args, **kwargs)
-        self.eps = eps
-        self.use_gain = use_gain
-        self.dropout_rate = dropout_rate
-        self.gamma = gamma
-
-    def build(self, input_shape):
-        super().build(input_shape)
-        if self.use_gain:
-            self.gain = self.add_weight(
-                name="gain",
-                shape=(self.kernel.shape[-1],),
-                initializer="ones",
-                trainable=True,
-                dtype=self.dtype,
-            )
-        else:
-            self.gain = None
-        if self.dropout_rate>0:
-            self.dropout = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({"eps":self.eps, "use_gain": self.use_gain, "dropout_rate":self.dropout_rate, "gamma":self.gamma})
-        return config
-
-    def call(self, inputs, training=None): # code from TF2.11 modified to use standardized weights + apply dropout: https://github.com/keras-team/keras/blob/v2.11.0/keras/layers/convolutional/conv2d_transpose.py#L34-L362
-        inputs_shape = tf.shape(inputs)
-        batch_size = inputs_shape[0]
-        if self.data_format == "channels_first":
-            h_axis, w_axis = 2, 3
-        else:
-            h_axis, w_axis = 1, 2
-
-        height, width = None, None
-        if inputs.shape.rank is not None:
-            dims = inputs.shape.as_list()
-            height = dims[h_axis]
-            width = dims[w_axis]
-        height = height if height is not None else inputs_shape[h_axis]
-        width = width if width is not None else inputs_shape[w_axis]
-
-        kernel_h, kernel_w = self.kernel_size
-        stride_h, stride_w = self.strides
-
-        if self.output_padding is None:
-            out_pad_h = out_pad_w = None
-        else:
-            out_pad_h, out_pad_w = self.output_padding
-
-        # Infer the dynamic output shape:
-        out_height = conv_utils.deconv_output_length(
-            height,
-            kernel_h,
-            padding=self.padding,
-            output_padding=out_pad_h,
-            stride=stride_h,
-            dilation=self.dilation_rate[0],
-        )
-        out_width = conv_utils.deconv_output_length(
-            width,
-            kernel_w,
-            padding=self.padding,
-            output_padding=out_pad_w,
-            stride=stride_w,
-            dilation=self.dilation_rate[1],
-        )
-        if self.data_format == "channels_first":
-            output_shape = (batch_size, self.filters, out_height, out_width)
-        else:
-            output_shape = (batch_size, out_height, out_width, self.filters)
-
-        output_shape_tensor = tf.stack(output_shape)
-        outputs = backend.conv2d_transpose(
-            inputs,
-            _standardize_weight(self.kernel, self.gain, self.eps),
-            output_shape_tensor,
-            strides=self.strides,
-            padding=self.padding,
-            data_format=self.data_format,
-            dilation_rate=self.dilation_rate,
-        )
-
-        if not tf.executing_eagerly() and inputs.shape.rank:
-            # Infer the static output shape:
-            out_shape = self.compute_output_shape(inputs.shape)
-            outputs.set_shape(out_shape)
-
-        if self.use_bias:
-            outputs = tf.nn.bias_add(
-                outputs,
-                self.bias,
-                data_format=conv_utils.convert_data_format(
-                    self.data_format, ndim=4
-                ),
-            )
-
-        if self.dropout_rate>0:
-            x = self.dropout(x, training = training)
-        if self.activation is not None:
-            return self.activation(outputs) #* self.gamma
-        return outputs
 
 class WeightedSum(tf.keras.layers.Layer):
     def __init__(self, per_channel=True, **kwargs):

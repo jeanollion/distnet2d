@@ -1,9 +1,7 @@
 import tensorflow as tf
-from tensorflow.keras.layers import Layer, Dense, Reshape, Embedding, Concatenate, Conv2D
-from tensorflow.keras.models import Model
 import numpy as np
 
-class SpatialAttention2D(Layer):
+class SpatialAttention2D(tf.keras.layers.Layer):
     def __init__(self, positional_encoding:bool=True, filters:int=0, return_attention:bool=False, l2_reg:float=0, name="Attention"):
         '''
             filters : number of output channels
@@ -27,14 +25,14 @@ class SpatialAttention2D(Layer):
         self.spatial_dim = np.prod(self.spatial_dims)
         if self.filters<=0:
             self.filters = input_shape[-1]
-        self.wq = Dense(self.filters, name="Q", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
-        self.wk = Dense(self.filters, name="K", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
-        self.wv = Dense(self.filters, name="V", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.wq = tf.keras.layers.Dense(self.filters, name="Q", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.wk = tf.keras.layers.Dense(self.filters, name="K", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.wv = tf.keras.layers.Dense(self.filters, name="V", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
         if self.positional_encoding=="2D":
-            self.pos_embedding_y = Embedding(self.spatial_dims[0], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncY")
-            self.pos_embedding_x = Embedding(self.spatial_dims[1], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncX")
+            self.pos_embedding_y = tf.keras.layers.Embedding(self.spatial_dims[0], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncY")
+            self.pos_embedding_x = tf.keras.layers.Embedding(self.spatial_dims[1], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncX")
         elif self.positional_encoding:
-            self.pos_embedding = Embedding(self.spatial_dim, input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEnc")
+            self.pos_embedding = tf.keras.layers.Embedding(self.spatial_dim, input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEnc")
         super().build(input_shape)
 
     def call(self, x):

@@ -1,10 +1,11 @@
 import tensorflow as tf
+from tensorflow import keras
 import numpy as np
 from .distnet_2d import encoder_op, decoder_op, parse_param_list
 from .layers import Combine, ChannelToBatch, SplitBatch
 from ..utils.losses import PseudoHuber
 from .gradient_accumulator import GradientAccumulator
-class DistnetModelSeg(tf.keras.Model):
+class DistnetModelSeg(keras.Model):
     def __init__(self, *args,
         edm_loss= PseudoHuber(1),
         gcdm_loss = PseudoHuber(1),

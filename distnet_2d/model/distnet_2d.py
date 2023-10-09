@@ -1,19 +1,14 @@
 import tensorflow as tf
-import tensorflow_probability as tfp
-from .layers import StopGradient, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, WSConv2DTranspose, BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature
-from tensorflow.keras.layers import Conv2D, MaxPool2D, Concatenate
-from tensorflow.keras import Model, Sequential
-from tensorflow.keras.layers import Layer
+from .layers import Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature
 import numpy as np
 from .spatial_attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber
-from tensorflow.keras.losses import CategoricalCrossentropy
 from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.agc import adaptive_clip_grad
 from .gradient_accumulator import GradientAccumulator
 
-class DistnetModel(Model):
+class DistnetModel(tf.keras.Model):
     def __init__(self, *args, spatial_dims,
         edm_loss_weight:float=1, edm_lovasz_loss_weight:float=0,
         center_loss_weight:float=1,
@@ -53,9 +48,9 @@ class DistnetModel(Model):
                 assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
             else:
                 assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
-            self.category_loss=weighted_loss_by_category(CategoricalCrossentropy(), category_weights, remove_background=not category_background)
+            self.category_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(), category_weights, remove_background=not category_background)
         else:
-            self.category_loss = balanced_category_loss(CategoricalCrossentropy(), 4 if category_background else 3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=not category_background)
+            self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(), 4 if category_background else 3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=not category_background)
         self.category_background = category_background
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
         self.long_term = long_term
@@ -366,8 +361,8 @@ def get_distnet_2d_model(input_shape, # Y, X
                 for c in range(frame_window+2, n_chan):
                     feature_prev.append(all_features[frame_window])
                     feature_next.append(all_features[c])
-        feature_prev = Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
-        feature_next = Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
+        feature_prev = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
+        feature_next = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
         if attention:
             attention_result = attention_op([feature_prev, feature_next])
             feature_pair = pair_combine_op([feature_prev, feature_next, attention_result])
@@ -414,7 +409,7 @@ def get_distnet_2d_model(input_shape, # Y, X
                     for k in list(output_per_dec.keys()):
                         if k.endswith("Next"):
                             output_name = k.replace("Next", "")
-                            output_per_dec[output_name] = Concatenate(axis = -1, name = decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop(k)])
+                            output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop(k)])
                 outputs.extend(output_per_dec.values())
         return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention else None, long_term=long_term, category_background=category_background, predict_next_displacement=predict_next_displacement, **kwargs)
 
@@ -427,8 +422,8 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
     if maxpool:
         down_sequence = []
     if maxpool or maxpool_and_stride:
-        down_sequence = down_sequence+[MaxPool2D(pool_size=total_contraction, name=f"{name}/Maxpool{total_contraction}x{total_contraction}")]
-        down_concat = Concatenate(axis=-1, name = f"{name}/DownConcat", dtype="float32")
+        down_sequence = down_sequence+[tf.keras.layers.MaxPool2D(pool_size=total_contraction, name=f"{name}/Maxpool{total_contraction}x{total_contraction}")]
+        down_concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}/DownConcat", dtype="float32")
     def op(input):
         x = input
         if sequence is not None:
@@ -490,7 +485,7 @@ def decoder_op(
             combine = None
         op = op.lower().replace("_", "")
         if op == "res1d" or op=="resconv1d":
-            convs = [ResConv1D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, name=f"{name}/ResConv1D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
+            raise NotImplementedError("ResConv1D are not implemented")
         elif op == "res2d" or op=="resconv2d":
             convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, name=f"{name}/ResConv2D_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         else:
@@ -499,7 +494,7 @@ def decoder_op(
             elif batch_norm or dropout_rate>0:
                 convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
             else:
-                convs = [Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
+                convs = [tf.keras.layers.Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, name=f"{name}/Conv_{i}_{conv_kernel_size}x{conv_kernel_size}") for i in range(n_conv)]
         f = tf.cast(factor, tf.float32)
         def op(input):
             down, res = input
@@ -538,7 +533,7 @@ def upsampling_op(
             name = f"{parent_name}/{name}"
         if mode=="tconv":
             if weight_scaled:
-                upsample = WSConv2DTranspose(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, dropout_rate=dropout_rate, padding='same', name=f"{name}/tConv{kernel_size}x{kernel_size}")
+                raise NotImplementedError("Weight scaled transpose conv is not implemented")
             elif batch_norm or dropout_rate>0:
                 upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}/tConv{kernel_size}x{kernel_size}")
             else:
@@ -614,7 +609,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
 def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
-        return ResConv1D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled = weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}/ResConv1D{kernel_size}x{kernel_size}")
+        raise NotImplementedError("ResConv1D is not implmeneted")
     elif op =="res2d" or op == "resconv2d":
         return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, split_conv=split_conv, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
     assert filters > 0 , "filters must be > 0"
@@ -631,4 +626,4 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
         return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, l2_reg=l2_reg, name=f"{name}/Conv{kernel_size}x{kernel_size}")
     else:
         kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None
-        return Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, name=f"{name}/Conv{kernel_size}x{kernel_size}")
+        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, name=f"{name}/Conv{kernel_size}x{kernel_size}")
