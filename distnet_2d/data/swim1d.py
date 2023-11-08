@@ -3,7 +3,7 @@ import numpy as np
 from random import getrandbits, uniform, choice
 import scipy.ndimage as ndi
 import tensorflow as tf
-def get_swim1D_function(mask_channels:list, distance:int=50, min_gap:int=3, closed_end:bool = True):
+def get_swim1d_function(mask_channels:list, distance:int=50, min_gap:int=3, closed_end:bool = True):
     if not isinstance(mask_channels, (list, tuple)):
         mask_channels = [mask_channels]
     assert len(mask_channels)>=1, "at least one mask channel must be provided"
