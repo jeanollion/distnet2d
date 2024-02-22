@@ -24,5 +24,5 @@ setuptools.setup(
         'Programming Language :: Python :: 3',
     ],
     python_requires='>=3',
-    install_requires=['numpy', 'scipy', 'tensorflow', 'edt>=2.0.2', 'scikit-fmm', 'numba', 'dataset_iterator>=0.3.4', 'elasticdeform>=0.4.7']
+    install_requires=['numpy', 'scipy', 'tensorflow', 'edt>=2.0.2', 'scikit-fmm', 'numba', 'dataset_iterator>=0.3.6', 'elasticdeform>=0.4.7']
 )
