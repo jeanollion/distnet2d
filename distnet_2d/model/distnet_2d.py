@@ -221,7 +221,7 @@ def get_distnet_2d(input_shape,
             name: str="DiSTNet2D",
             **kwargs):
 
-    return get_distnet_2d_model(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=False, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
+    return get_distnet_2d_model(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=False, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_model(input_shape, # Y, X
             encoder_settings:list,
@@ -237,7 +237,9 @@ def get_distnet_2d_model(input_shape, # Y, X
             skip_stop_gradient:bool = False,
             skip_connections = False, # bool or list
             skip_combine_mode:str="conv", #conv, wsconv
-            attention : bool = True,
+            attention : int = 0,
+            attention_dropout:float = 0.1,
+            self_attention: int = 0,
             frame_window:int = 1,
             next:bool=True,
             long_term:bool = True,
@@ -249,7 +251,7 @@ def get_distnet_2d_model(input_shape, # Y, X
     ):
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
-        if attention:
+        if attention>0 or self_attention>0:
             spatial_dims = ensure_multiplicity(2, input_shape)
             if isinstance(spatial_dims, tuple):
                 spatial_dims = list(spatial_dims)
@@ -281,8 +283,8 @@ def get_distnet_2d_model(input_shape, # Y, X
         combine_filters = int(feature_filters * n_chan  * blending_filter_factor)
         print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
         combine_features_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="CombineFeatures")
-        if attention:
-            attention_op = SpatialAttention2D(positional_encoding="2D", l2_reg=l2_reg, name="Attention")
+        if attention>0:
+            attention_op = SpatialAttention2D(num_heads=attention, positional_encoding="2D", dropout=attention_dropout, l2_reg=l2_reg, name="Attention")
         pair_combine_op = Combine(filters=feature_filters, kernel_size = pair_combine_kernel_size, l2_reg=l2_reg, name="FeaturePairCombine")
         all_pair_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="AllFeaturePairCombine")
         feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, l2_reg=l2_reg, name="FeaturePairFeatureCombine") # change here was feature_filters
@@ -363,7 +365,7 @@ def get_distnet_2d_model(input_shape, # Y, X
                     feature_next.append(all_features[c])
         feature_prev = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
         feature_next = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
-        if attention:
+        if attention>0:
             attention_result = attention_op([feature_prev, feature_next])
             feature_pair = pair_combine_op([feature_prev, feature_next, attention_result])
         else:
@@ -411,7 +413,7 @@ def get_distnet_2d_model(input_shape, # Y, X
                             output_name = k.replace("Next", "")
                             output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop(k)])
                 outputs.extend(output_per_dec.values())
-        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention else None, long_term=long_term, category_background=category_background, predict_next_displacement=predict_next_displacement, **kwargs)
+        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention>0 or self_attention>0 else None, long_term=long_term, category_background=category_background, predict_next_displacement=predict_next_displacement, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
@@ -606,7 +608,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, num_attention_heads:int=1, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
         raise NotImplementedError("ResConv1D is not implmeneted")
@@ -614,7 +616,7 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
         return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, split_conv=split_conv, name=f"{name}/ResConv2D{kernel_size}x{kernel_size}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
-        self_attention_op = SpatialAttention2D(positional_encoding="2D", l2_reg=l2_reg, name=f"{name}/SelfAttention")
+        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, positional_encoding="2D", dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}/SelfAttention")
         self_attention_skip_op = Combine(filters=filters, l2_reg=l2_reg, name=f"{name}/SelfAttentionSkip")
         def op(x):
             sa = self_attention_op([x, x])
