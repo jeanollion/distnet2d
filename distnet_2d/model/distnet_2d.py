@@ -235,7 +235,7 @@ def get_distnet_2d_model(input_shape, # Y, X
             pair_combine_kernel_size:int = 1,
             blending_filter_factor:float = 0.5,
             skip_stop_gradient:bool = False,
-            skip_connections = False, # bool or list
+            skip_connections = [-1], # bool or list. -1 = feature level
             skip_combine_mode:str="conv", #conv, wsconv
             attention : int = 0,
             attention_dropout:float = 0.1,
