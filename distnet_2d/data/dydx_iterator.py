@@ -21,10 +21,11 @@ class DyDxIterator(TrackingIterator):
         aug_frame_subsampling, # either int: frame number interval will be drawn uniformly in [frame_window,aug_frame_subsampling] or callable that generate an frame number interval (int)
         erase_edge_cell_size:int,
         next:bool = True,
+        allow_frame_subsampling_direct_neigh:bool = False,
+        aug_remove_prob: float = 0.01,
         return_categories:bool = True,
         channel_keywords:list=['/raw', '/regionLabels'], # channel @1 must be label
         array_keywords:list=['/linksPrev'],
-        aug_remove_prob:float = 0.01,
         elasticdeform_parameters:dict = None,
         downscale_displacement_and_categories=1,
         return_center = True,
@@ -40,6 +41,7 @@ class DyDxIterator(TrackingIterator):
         self.downscale=downscale_displacement_and_categories
         self.erase_edge_cell_size=erase_edge_cell_size
         self.aug_frame_subsampling=aug_frame_subsampling
+        self.allow_frame_subsampling_direct_neigh=allow_frame_subsampling_direct_neigh
         self.output_float16=output_float16
         self.return_center=return_center
         self.center_mode=center_mode
@@ -143,7 +145,7 @@ class DyDxIterator(TrackingIterator):
     def _get_end_points(self, n_frames, pairs):
         return_next = self.channels_next[1]
 
-        if self.frame_window>1 and n_frames>2: # fix closest previous gap to -1
+        if self.frame_window>1 and n_frames>2 and not self.allow_frame_subsampling_direct_neigh: # fix closest previous gap to -1
             end_points = [int( (n_frames-1) * i/(self.frame_window-1) + 0.5) for i in range(0, self.frame_window-1)] + [n_frames-1, n_frames]
         else:
             end_points = [int(n_frames * i/self.frame_window + 0.5) for i in range(0, self.frame_window+1)]
