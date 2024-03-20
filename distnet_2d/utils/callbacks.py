@@ -1,7 +1,8 @@
 from math import cos, pi
 from tensorflow.keras.callbacks import Callback
 from tensorflow.keras import backend
-
+import csv
+import os
 class StopOnLR(Callback):
     def __init__( self, min_lr, **kwargs, ):
         super().__init__()
@@ -44,3 +45,23 @@ class EpsilonCosineDecayCallback(Callback):
         cosine_decay = 0.5 * (1 + cos(pi * step / self.decay_steps))
         decayed = (1 - self.alpha) * cosine_decay + self.alpha
         return self.start_epsilon * decayed
+
+class LogsCallback(Callback):
+    def __init__(self, filepath, start_epoch=0):
+        super().__init__()
+        self.filepath = filepath
+        self.start_epoch=start_epoch
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is not None:
+            epoch += self.start_epoch
+            losses = list(logs.values())
+            losses.insert(0, epoch)
+            filepath = self.filepath.format(epoch=epoch + 1, **logs)
+            with open(filepath, "a") as file_object:
+                writer = csv.writer(file_object, delimiter=';',  quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                if os.path.getsize(filepath) == 0: # write header only if file is empty
+                    headers = list(logs.keys())
+                    headers.insert(0, "epoch")
+                    writer.writerow(headers)
+                writer.writerow(losses)

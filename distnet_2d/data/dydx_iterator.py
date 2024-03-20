@@ -84,7 +84,6 @@ class DyDxIterator(TrackingIterator):
         batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False, **kwargs)
         if not issubclass(batch_by_channel[1].dtype.type, np.integer): # label
             batch_by_channel[1] = batch_by_channel[1].astype(np.int32)
-
         # correction for oob @ previous labels : add identity links
         prevLinks = batch_by_channel['arrays'][0]
         for b in range(prevLinks.shape[0]):
@@ -112,7 +111,6 @@ class DyDxIterator(TrackingIterator):
             #print(f"remove unused frames: nframes: {n_frames*2+1} sel: {sel} channels: {channels}")
             for c in channels:
                 batch_by_channel[c] = batch_by_channel[c][..., sel]
-
         if perform_elasticdeform or perform_tiling: ## elastic deform do not support float16 type -> temporarily convert to float32
             channels = [c for c in batch_by_channel.keys() if not isinstance(c, str) and c>=0]
             converted_from_float16=[]
@@ -120,16 +118,13 @@ class DyDxIterator(TrackingIterator):
                 if batch_by_channel[c].dtype == np.float16:
                     batch_by_channel[c] = batch_by_channel[c].astype('float32')
                     converted_from_float16.append(c)
-
         if perform_elasticdeform:
             self._apply_elasticdeform(batch_by_channel)
         if perform_tiling:
             self._apply_tiling(batch_by_channel)
-
         if perform_elasticdeform or perform_tiling:
             for c in converted_from_float16:
                 batch_by_channel[c] = batch_by_channel[c].astype('float16')
-
         return batch_by_channel, aug_param_array, ref_channel
 
     @staticmethod
@@ -200,7 +195,6 @@ class DyDxIterator(TrackingIterator):
             if return_next:
                 for j in range(0, self.frame_window):
                     self._erase_small_objects_at_edges(labelIms[i,...,self.frame_window+1+j], i, mask_to_erase_next, [m+j for m in mask_to_erase_chan_next], batch_by_channel)
-
         edm = np.zeros(shape = labelIms.shape, dtype=np.float32)
         for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
             edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
@@ -231,25 +225,31 @@ class DyDxIterator(TrackingIterator):
             get_idx = lambda x:x%batch_size # We assume here that the indexing order of tiling is tile x batch
         else:
             get_idx = lambda x:x
+        labels_and_centers = {}
+        for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
+            labels_and_centers[(b, c)] = _get_labels_and_centers(labelIms[b][...,c], edm[b][...,c], self.center_mode)
         for i in range(labelIms.shape[0]):
             bidx = get_idx(i)
             for c in range(0, self.frame_window):
                 sel = [c, c+1]#[c, self.frame_window]
-                _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, center_mode=self.center_mode, centerIm=centerIm[i,...,self.frame_window] if self.return_center and sel[1]==self.frame_window else None, centerImPrev=centerIm[i,...,c] if self.return_center else None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, categoryImNext=categoryImNext[i,...,c] if self.return_categories and ndisp else None, rankIm=labelIm[i,...,self.frame_window] if self.return_label_rank and sel[1]==self.frame_window else None, rankImPrev=labelIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None, centerArr=centerArr[i,self.frame_window] if self.return_label_rank and sel[1]==self.frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None)
+                l_c = [labels_and_centers[(i,s)] for s in sel]
+                _compute_displacement(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, centerIm=centerIm[i,...,self.frame_window] if self.return_center and sel[1]==self.frame_window else None, centerImPrev=centerIm[i,...,c] if self.return_center else None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, categoryImNext=categoryImNext[i,...,c] if self.return_categories and ndisp else None, rankIm=labelIm[i,...,self.frame_window] if self.return_label_rank and sel[1]==self.frame_window else None, rankImPrev=labelIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None, centerArr=centerArr[i,self.frame_window] if self.return_label_rank and sel[1]==self.frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None)
             if return_next:
                 for c in range(self.frame_window, 2*self.frame_window):
                     sel = [c, c+1]#[self.frame_window, c+1]
-                    _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, center_mode=self.center_mode, centerIm=centerIm[i,...,c+1] if self.return_center else None, centerImPrev=None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, categoryImNext=categoryImNext[i,...,c] if self.return_categories and ndisp else None, rankIm=labelIm[i,...,c+1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None, centerArr=centerArr[i,c+1] if self.return_label_rank else None)
+                    l_c = [labels_and_centers[(i, s)] for s in sel]
+                    _compute_displacement(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c], dyIm[i,...,c], dxIm[i,...,c], edm[i][...,sel], dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, centerIm=centerIm[i,...,c+1] if self.return_center else None, centerImPrev=None, categoryIm=categoryIm[i,...,c] if self.return_categories else None, categoryImNext=categoryImNext[i,...,c] if self.return_categories and ndisp else None, rankIm=labelIm[i,...,c+1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None, centerArr=centerArr[i,c+1] if self.return_label_rank else None)
             if self.long_term:
                 off = 2*self.frame_window if return_next else self.frame_window
                 for c in range(0, self.frame_window-1):
                     sel = [c, self.frame_window]
-                    _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c+off], dyIm[i,...,c+off], dxIm[i,...,c+off], edm[i][...,sel], dyImNext=dyImNext[i,...,c+off] if ndisp else None, dxImNext=dxImNext[i,...,c+off] if ndisp else None, center_mode=self.center_mode, centerIm=None, centerImPrev=None, categoryIm=categoryIm[i,...,c+off] if self.return_categories else None, categoryImNext=categoryImNext[i,...,c+off] if self.return_categories and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c+off] if self.return_label_rank else None)
+                    l_c = [labels_and_centers[(i, s)] for s in sel]
+                    _compute_displacement(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c+off], dyIm[i,...,c+off], dxIm[i,...,c+off], edm[i][...,sel], dyImNext=dyImNext[i,...,c+off] if ndisp else None, dxImNext=dxImNext[i,...,c+off] if ndisp else None, centerIm=None, centerImPrev=None, categoryIm=categoryIm[i,...,c+off] if self.return_categories else None, categoryImNext=categoryImNext[i,...,c+off] if self.return_categories and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c+off] if self.return_label_rank else None)
                 if return_next:
                     for c in range(self.frame_window-1, 2*(self.frame_window-1)):
                         sel = [self.frame_window, c+3]
-                        _compute_displacement(labelIms[i][...,sel], labels_map_prev[bidx][c+off], dyIm[i,...,c+off], dxIm[i,...,c+off], edm[i][...,sel], dyImNext=dyImNext[i,...,c+off] if ndisp else None, dxImNext=dxImNext[i,...,c+off] if ndisp else None, center_mode=self.center_mode, centerIm=None, centerImPrev=None, categoryIm=categoryIm[i,...,c+off] if self.return_categories else None, categoryImNext=categoryImNext[i,...,c+off] if self.return_categories and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c+off] if self.return_label_rank else None)
-
+                        l_c = [labels_and_centers[(i, s)] for s in sel]
+                        _compute_displacement(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c+off], dyIm[i,...,c+off], dxIm[i,...,c+off], edm[i][...,sel], dyImNext=dyImNext[i,...,c+off] if ndisp else None, dxImNext=dxImNext[i,...,c+off] if ndisp else None, centerIm=None, centerImPrev=None, categoryIm=categoryIm[i,...,c+off] if self.return_categories else None, categoryImNext=categoryImNext[i,...,c+off] if self.return_categories and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c+off] if self.return_label_rank else None)
         other_output_channels = [chan_idx for chan_idx in self.output_channels if chan_idx!=1 and chan_idx!=2]
         all_channels = [batch_by_channel[chan_idx] for chan_idx in other_output_channels]
         channel_inc = 0
@@ -355,7 +355,7 @@ def _get_labels_and_centers(labelIm, edm, center_mode = "GEOMETRICAL"):
         sum=np.sum(lm_coords_dinv, 0, keepdims=False) # N_ob, 1
         centers = wsum / sum # N_ob, 2
     elif center_mode == "MEDOID":
-        centers = [get_medoid(*np.where(labelIm == l)) for l in labels]
+        centers = [get_medoid(*np.asarray(labelIm == l).nonzero()) for l in labels]
     else:
         raise ValueError(f"Invalid center mode: {center_mode}")
     return dict(zip(labels, centers))
@@ -438,17 +438,15 @@ def _get_category(n_neigh):
     else:
         return 2
 
-def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode, dyImNext=None, dxImNext=None, centerIm=None, centerImPrev=None, categoryIm=None, categoryImNext=None, rankIm=None, rankImPrev=None, prevLabelArr=None, nextLabelArr=None, centerArr=None, centerArrPrev=None):
+def _compute_displacement(labels_map_centers, labelIm, labels_map_prev, dyIm, dxIm, edm, dyImNext=None, dxImNext=None, centerIm=None, centerImPrev=None, categoryIm=None, categoryImNext=None, rankIm=None, rankImPrev=None, prevLabelArr=None, nextLabelArr=None, centerArr=None, centerArrPrev=None):
     assert labelIm.shape[-1] == 2, f"invalid labelIm : {labelIm.shape[-1]} channels instead of 2"
     assert (dxImNext is None) == (dyImNext is None)
-    labels_map_centers = [_get_labels_and_centers(labelIm[...,c], edm[...,c], center_mode) for c in [0, 1]]
     if len(labels_map_centers[-1])==0: # no cells
         return
     curLabelIm = labelIm[...,-1]
     labels_prev = labels_map_centers[0].keys()
     labels_prev_rank = {l:r for r, l in enumerate(labels_prev)}
     labels_map_prev = _subset_label_map_prev(labels_map_prev, labels_prev, labels_map_centers[-1].keys())
-
     for rank, (label, center) in enumerate(labels_map_centers[-1].items()):
         label_prevs = labels_map_prev.get(label, [])
         mask = curLabelIm == label
@@ -465,7 +463,6 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
             categoryIm[mask] = _get_category(len(label_prevs))
         if rankIm is not None:
             rankIm[mask] = rank + 1
-
     if dyImNext is not None:
         labels_next_rank = {l:r for r, l in enumerate(labels_map_centers[-1].keys())}
         labels_map_next = _labels_map_prev_to_next(labels_map_prev)
@@ -485,7 +482,6 @@ def _compute_displacement(labelIm, labels_map_prev, dyIm, dxIm, edm, center_mode
                 categoryImNext[mask] = _get_category(len(label_nexts))
             if rankImPrev is not None:
                 rankImPrev[mask] = rank + 1
-
     if centerIm is not None:
         assert centerIm.shape == dyIm.shape, "invalid shape for center image"
         _draw_centers(centerIm, labels_map_centers[-1], edm[...,1], labelIm[...,1])

@@ -17,14 +17,13 @@ class DistnetModel(tf.keras.Model):
         edm_loss= PseudoHuber(1),
         center_loss = PseudoHuber(1),
         displacement_loss = PseudoHuber(1),
-        category_weights = None, # array of weights: [background, normal, division, no previous cell] or None = auto
+        category_weights = None, # array of weights: [normal, division, no previous cell] or None = auto
         category_class_frequency_range=[1/50, 50],
-        category_background = False,
         next = True,
         frame_window = 3,
         long_term:bool = True,
         predict_next_displacement:bool = True,
-        print_gradients:bool=False, # eager mode only
+        print_gradients:bool=False, # for optimization, available in eager mode only
         accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False, # lower clip factor clips more
         **kwargs):
         super().__init__(*args, **kwargs)
@@ -44,14 +43,10 @@ class DistnetModel(tf.keras.Model):
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
-            if category_background:
-                assert len(category_weights)==4, "4 category weights should be provided: background, normal cell, dividing cell, cell with no previous cell"
-            else:
-                assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
-            self.category_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(), category_weights, remove_background=not category_background)
+            assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
+            self.category_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(), category_weights, remove_background=True)
         else:
-            self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(), 4 if category_background else 3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=not category_background)
-        self.category_background = category_background
+            self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(),3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=True)
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
         self.long_term = long_term
         self.use_grad_acc = accum_steps>1
@@ -69,6 +64,7 @@ class DistnetModel(tf.keras.Model):
             self.gradient_accumulator.init_train_step()
 
         fw = self.frame_window
+        n_frames = fw * (2 if self.next else 1) + 1
         n_frame_pairs = fw * (2 if self.next else 1)
         n_fp_mul = 2 if self.predict_next_displacement else 1
         if self.long_term:
@@ -76,10 +72,9 @@ class DistnetModel(tf.keras.Model):
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
         displacement_weight = self.displacement_weight / (2. * n_fp_mul) # y & x
-        # displacement_weight /= (fw * (2. if self.next else 1)) # mean per channel # should it be divided by channel ?
         category_weight = self.category_weight / (n_fp_mul * float(n_frame_pairs))
-        edm_weight = self.edm_weight
-        center_weight = self.center_weight
+        edm_weight = self.edm_weight / float(n_frames) # divide by channel number ?
+        center_weight = self.center_weight / float(n_frames)# divide by channel number ?
         inc = 1
         if len(y) == 7 + inc: # y = edm, center, dY, dX, cat, true_center, prev_labels, label_rank
             labels, prev_labels, centers = y[-1], y[-2], y[-3]
@@ -145,12 +140,9 @@ class DistnetModel(tf.keras.Model):
             if category_weight>0:
                 cat_loss = 0
                 for i in range(n_frame_pairs * n_fp_mul):
-                    if not self.category_background:
-                        inside_mask = tf.math.greater(y[3+inc][...,i:i+1], 0)
-                        cat_pred_inside=tf.where(inside_mask, y_pred[3+inc][...,3*i:3*i+3], 1)
-                        cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], cat_pred_inside)
-                    else:
-                        cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], y_pred[3+inc][...,4*i:4*i+4])
+                    inside_mask = tf.math.greater(y[3+inc][...,i:i+1], 0)
+                    cat_pred_inside=tf.where(inside_mask, y_pred[3+inc][...,3*i:3*i+3], 1)
+                    cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], cat_pred_inside)
                 losses["category"] = cat_loss
                 loss_weights["category"] = category_weight
 
@@ -244,7 +236,6 @@ def get_distnet_2d_model(input_shape, # Y, X
             next:bool=True,
             long_term:bool = True,
             predict_next_displacement:bool = True,
-            category_background = False,
             l2_reg:float = 0,
             name: str="DiSTNet2D",
             **kwargs,
@@ -318,7 +309,7 @@ def get_distnet_2d_model(input_shape, # Y, X
                 for dTrackName in output_per_decoder["Track"]:
                     decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}")
                 for dCatName in output_per_decoder["Cat"]:
-                    decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=4 if category_background else 3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}")
+                    decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}")
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}") )
@@ -413,7 +404,7 @@ def get_distnet_2d_model(input_shape, # Y, X
                             output_name = k.replace("Next", "")
                             output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop(k)])
                 outputs.extend(output_per_dec.values())
-        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention>0 or self_attention>0 else None, long_term=long_term, category_background=category_background, predict_next_displacement=predict_next_displacement, **kwargs)
+        return DistnetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention>0 or self_attention>0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
