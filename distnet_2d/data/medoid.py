@@ -10,9 +10,10 @@ def get_medoid(Y, X):
 @jit(nopython=True)
 def pairwise_python(Y, X):
     N = Y.shape[0]
-    D = np.zeros((N, N), dtype=np.float32)
+    D = np.empty((N, N), dtype=np.float32) # np.empty -> faster than np.zeros
     for i in range(0, N-1):
         for j in range(i+1, N):
-            D[i, j] = np.sqrt( (Y[i] - Y[j])**2 + (X[i] - X[j])**2 )
-            D[j, i] = D[i, j]
+            D[j, i] = D[i, j] = np.sqrt( (Y[i] - Y[j])**2 + (X[i] - X[j])**2 )
+    for i in range(N): # diagonal is always zero but must be filled as np.empty is used
+        D[i, i] = 0.0
     return D

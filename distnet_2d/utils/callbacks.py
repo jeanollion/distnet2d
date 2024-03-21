@@ -3,6 +3,7 @@ from tensorflow.keras.callbacks import Callback
 from tensorflow.keras import backend
 import csv
 import os
+
 class StopOnLR(Callback):
     def __init__( self, min_lr, **kwargs, ):
         super().__init__()
