@@ -1,8 +1,48 @@
 from math import cos, pi
-from tensorflow.keras.callbacks import Callback
+from tensorflow.keras.callbacks import Callback, ModelCheckpoint
 from tensorflow.keras import backend
 import csv
 import os
+import time
+
+
+class SafeModelCheckpoint(ModelCheckpoint):
+    def __init__(self,
+                 filepath,
+                 n_retry:int = 10,
+                 sleep_time:int = 5,
+                 **kwargs):
+        super().__init__(filepath, **kwargs)
+        self.n_retry = n_retry
+        self.sleep_time = sleep_time
+        self._alternative_path = False
+
+    def _save_model(self, epoch, batch, logs):
+        for i in range(self.n_retry):
+            try:
+                if i == self.n_retry - 1:
+                    self._alternative_path = True
+                super()._save_model(epoch, batch, logs)
+                if i>1:
+                    print(f"model saved after retrying: {i+1}/{self.n_retry}", flush=True)
+            except BlockingIOError as error:
+                print(f"Error saving weights: {error}. Retry: {i+1}/{self.n_retry}", flush=True)
+                time.sleep(self.sleep_time)  # wait for X seconds before trying to save again
+                os.remove(self._get_file_path(epoch, batch, logs))
+                self._alternative_path = False
+            else:
+                self._alternative_path = False
+                return
+
+        # 21:45:07.667:   File "h5py/h5f.pyx", line 126, in h5py.h5f.create
+        # 21:45:07.667: BlockingIOError: [Errno 11] Unable to create file (unable to lock file, errno = 11, error message = 'Resource temporarily unavailable')
+
+    def _get_file_path(self, epoch, batch, logs):
+        path = super()._get_file_path(epoch, batch, logs)
+        if self._alternative_path:
+            split = os.path.splitext(path)
+            path = split[0]+"_tmp"+split[1]
+        return path
 
 class StopOnLR(Callback):
     def __init__( self, min_lr, **kwargs, ):

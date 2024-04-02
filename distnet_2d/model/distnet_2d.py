@@ -4,13 +4,13 @@ import numpy as np
 from .spatial_attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber
-from ..utils.lovasz_loss import lovasz_hinge
 from ..utils.agc import adaptive_clip_grad
 from .gradient_accumulator import GradientAccumulator
+import time
 
 class DistnetModel(tf.keras.Model):
     def __init__(self, *args, spatial_dims,
-        edm_loss_weight:float=1, edm_lovasz_loss_weight:float=0,
+        edm_loss_weight:float=1,
         center_loss_weight:float=1,
         displacement_loss_weight:float=1,
         category_loss_weight:float=1,
@@ -28,7 +28,6 @@ class DistnetModel(tf.keras.Model):
         **kwargs):
         super().__init__(*args, **kwargs)
         self.edm_weight = edm_loss_weight
-        self.edm_lovasz_weight = edm_lovasz_loss_weight
         self.center_weight = center_loss_weight
         self.displacement_weight = displacement_loss_weight
         self.category_weight = category_loss_weight
@@ -59,6 +58,75 @@ class DistnetModel(tf.keras.Model):
         self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
         self.print_gradients=print_gradients
 
+    def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None, return_each_loss:bool=False, central_frame_only:bool=False):
+        assert y is not None
+        assert y_pred is not None
+        losses = dict()
+        loss_weights = dict()
+        fw = self.frame_window
+        n_frames = fw * (2 if self.next else 1) + 1
+        n_frame_pairs = fw * (2 if self.next else 1)
+        n_fp_mul = 2 if self.predict_next_displacement else 1
+        if self.long_term:
+            n_frame_pairs += (fw - 1) * (2 if self.next else 1)
+        cell_mask = tf.math.greater(y[0], 0)
+        if central_frame_only:
+            y_pred[0] = y_pred[0][..., fw:fw+1] # edm
+            y_pred[1] = y_pred[1][..., fw:fw+1] # center
+            if self.predict_next_displacement:
+                y_pred[2] = tf.gather(y_pred[2], indices=[fw-1, n_frame_pairs+fw], axis=-1)  # dy
+                y_pred[3] = tf.gather(y_pred[3], indices=[fw - 1, n_frame_pairs + fw], axis=-1)
+                lm_indices = list(range(n_frame_pairs*6)[3*(fw-1):3*fw]) + list(range(n_frame_pairs*6)[3*(n_frame_pairs+fw):3*(n_frame_pairs+fw+1)])
+                y_pred[4] = tf.gather(y_pred[4], indices=lm_indices, axis=-1) # lm
+            else:
+                y_pred[2] = y_pred[2][..., fw-1:fw] # dy
+                y_pred[3] = y_pred[3][..., fw-1:fw] # dx
+                y_pred[4] = y_pred[4][..., 3*(fw-1):3*fw] # lm
+            fw = 1
+            n_frames = 1
+            n_frame_pairs = 1
+
+        displacement_weight = self.displacement_weight / (2. * n_fp_mul)  # y & x
+        category_weight = self.category_weight / (n_fp_mul * float(n_frame_pairs))
+        edm_weight = self.edm_weight / float(n_frames)  # divide by channel number ?
+        center_weight = self.center_weight / float(n_frames)  # divide by channel number ?
+
+        if edm_weight > 0:
+            edm_loss = self.edm_loss(y[0], y_pred[0])  # , sample_weight = weight_map)
+            losses["edm"] = edm_loss
+            loss_weights["edm"] = edm_weight
+        if center_weight > 0:
+            center_pred_inside = tf.where(cell_mask, y_pred[1], 0)  # do not predict anything outside
+            center_loss = self.center_loss(y[1], center_pred_inside)
+            losses["center"] = center_loss
+            loss_weights["center"] = center_weight
+
+        # regression displacement loss
+        if displacement_weight > 0:
+            if not central_frame_only:
+                loss_dY, loss_dX = self._compute_displacement_loss(y, y_pred, cell_mask)
+            else:
+                loss_dY, loss_dX = self.displacement_loss(y[2], tf.where(cell_mask, y_pred[2], 0)), self.displacement_loss(y[3], tf.where(cell_mask, y_pred[3], 0)) # cell_mask shape has 1 channel -> broadcasted to 2 channel if predict next
+            losses["dY"] = loss_dY
+            loss_weights["dY"] = displacement_weight
+            losses["dX"] = loss_dX
+            loss_weights["dX"] = displacement_weight
+
+        # category loss
+        if category_weight > 0:
+            cat_loss = self._compute_category_loss(y, y_pred, n_frame_pairs, n_fp_mul)
+            losses["category"] = cat_loss
+            loss_weights["category"] = category_weight
+
+        if return_each_loss:
+            return [l for k, l in losses.items()]
+            #return [l * loss_weights[k] for k, l in losses.items()]
+        else:
+            loss = 0.
+            for k, l in losses.items():
+                loss += l * loss_weights[k]
+            return (loss,)
+
     def train_step(self, data):
         if self.use_grad_acc:
             self.gradient_accumulator.init_train_step()
@@ -75,12 +143,10 @@ class DistnetModel(tf.keras.Model):
         category_weight = self.category_weight / (n_fp_mul * float(n_frame_pairs))
         edm_weight = self.edm_weight / float(n_frames) # divide by channel number ?
         center_weight = self.center_weight / float(n_frames)# divide by channel number ?
-        inc = 1
-        if len(y) == 7 + inc: # y = edm, center, dY, dX, cat, true_center, prev_labels, label_rank
-            labels, prev_labels, centers = y[-1], y[-2], y[-3]
-        else :
-            labels = None
-            assert len(y) == 5, f"invalid number of output. Expected: 5 actual {len(y)}"
+        if category_weight>0:
+            assert len(y) == 5 , f"invalid number of output. Expected: >=4 actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = cat
+        else:
+            assert len(y) >= 4, f"invalid number of output. Expected: >=4 actual {len(y)}"  # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = cat
 
         with tf.GradientTape(persistent=self.print_gradients) as tape:
             y_pred = self(x, training=True)  # Forward pass
@@ -90,60 +156,29 @@ class DistnetModel(tf.keras.Model):
 
             cell_mask = tf.math.greater(y[0], 0)
             # edm
-            inc=0
             if edm_weight>0:
-                edm_loss = self.edm_loss(y[inc], y_pred[inc])#, sample_weight = weight_map)
+                edm_loss = self.edm_loss(y[0], y_pred[0]) #, sample_weight = weight_map)
                 losses["edm"] = edm_loss
                 loss_weights["edm"] = edm_weight
-            if self.edm_lovasz_weight>0:
-                edm_loss_lh = lovasz_hinge(y_pred[inc], cell_mask, channel_axis=True)
-                losses["edm_lh"] = edm_loss_lh
-                loss_weights["edm_lh"] = self.edm_lovasz_weight
 
             # center
-            inc+=1
             if center_weight>0:
-                center_pred_inside=tf.where(cell_mask, y_pred[inc], 0) # do not predict anything outside
-                center_loss = self.center_loss(y[inc], center_pred_inside)
+                center_pred_inside=tf.where(cell_mask, y_pred[1], 0) # do not predict anything outside
+                center_loss = self.center_loss(y[1], center_pred_inside)
                 losses["center"] = center_loss
                 loss_weights["center"] = center_weight
 
             #regression displacement loss
             if displacement_weight>0:
-                mask = cell_mask[...,1:]
-                if self.predict_next_displacement:
-                    mask_next = cell_mask[...,:-1]
-                if self.long_term and fw>1:
-                    mask_center = tf.tile(mask[...,fw-1:fw], [1, 1, 1, fw-1])
-                    if self.predict_next_displacement:
-                        if self.next:
-                            mask = tf.concat([mask, mask_center, cell_mask[...,-fw+1:], mask_next, cell_mask[...,:fw-1], mask_center], -1)
-                        else:
-                            mask = tf.concat([mask, mask_center, mask_next, cell_mask[...,:fw-1]], -1)
-                    else:
-                        if self.next:
-                            mask = tf.concat([mask, mask_center, cell_mask[...,-fw+1:]], -1)
-                        else:
-                            mask = tf.concat([mask, mask_center], -1)
-                elif self.predict_next_displacement:
-                    mask = tf.concat([mask, mask_next], -1)
-
-                dy_inside=tf.where(mask, y_pred[1+inc], 0) # do not predict anything outside
-                dx_inside=tf.where(mask, y_pred[2+inc], 0) # do not predict anything outside
-
-                losses["dY"] = self.displacement_loss(y[1+inc], dy_inside)
+                loss_dY, loss_dX = self._compute_displacement_loss(y, y_pred, cell_mask)
+                losses["dY"] = loss_dY
                 loss_weights["dY"] = displacement_weight
-                losses["dX"] = self.displacement_loss(y[2+inc], dx_inside)
+                losses["dX"] = loss_dX
                 loss_weights["dX"] = displacement_weight
 
             # category loss
             if category_weight>0:
-                cat_loss = 0
-                for i in range(n_frame_pairs * n_fp_mul):
-                    inside_mask = tf.math.greater(y[3+inc][...,i:i+1], 0)
-                    cat_pred_inside=tf.where(inside_mask, y_pred[3+inc][...,3*i:3*i+3], 1)
-                    cat_loss = cat_loss + self.category_loss(y[3+inc][...,i:i+1], cat_pred_inside)
-                losses["category"] = cat_loss
+                losses["category"] = self._compute_category_loss(y, y_pred, n_frame_pairs, n_fp_mul)
                 loss_weights["category"] = category_weight
 
             loss = 0.
@@ -189,6 +224,39 @@ class DistnetModel(tf.keras.Model):
             self.gradient_accumulator.accumulate_gradients(gradients)
             self.gradient_accumulator.apply_gradients()
         return losses
+
+    def _compute_displacement_loss(self, y, y_pred, cell_mask):
+        fw = self.frame_window
+        mask = cell_mask[..., 1:]
+        if self.predict_next_displacement:
+            mask_next = cell_mask[..., :-1]
+        if self.long_term and fw > 1:
+            mask_center = tf.tile(mask[..., fw - 1:fw], [1, 1, 1, fw - 1])
+            if self.predict_next_displacement:
+                if self.next:
+                    mask = tf.concat( [mask, mask_center, cell_mask[..., -fw + 1:], mask_next, cell_mask[..., :fw - 1], mask_center], -1)
+                else:
+                    mask = tf.concat([mask, mask_center, mask_next, cell_mask[..., :fw - 1]], -1)
+            else:
+                if self.next:
+                    mask = tf.concat([mask, mask_center, cell_mask[..., -fw + 1:]], -1)
+                else:
+                    mask = tf.concat([mask, mask_center], -1)
+        elif self.predict_next_displacement:
+            mask = tf.concat([mask, mask_next], -1)
+
+        dy_inside = tf.where(mask, y_pred[2], 0)  # do not predict anything outside
+        dx_inside = tf.where(mask, y_pred[3], 0)  # do not predict anything outside
+
+        return self.displacement_loss(y[2], dy_inside), self.displacement_loss(y[3], dx_inside)
+
+    def _compute_category_loss(self, y, y_pred, n_frame_pairs, n_fp_mul):
+        cat_loss = 0.
+        for i in range(n_frame_pairs * n_fp_mul):
+            inside_mask = tf.math.greater(y[4][..., i:i + 1], 0)
+            cat_pred_inside = tf.where(inside_mask, y_pred[4][..., 3 * i:3 * i + 3], 1)
+            cat_loss = cat_loss + self.category_loss(y[4][..., i:i + 1], cat_pred_inside)
+        return cat_loss
 
     def set_inference(self, inference:bool=True):
         for layer in self.layers:
