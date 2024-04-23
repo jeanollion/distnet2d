@@ -134,7 +134,7 @@ def _objectwise_compute(data, channels, fun, labels, ids, sizes, label_channels=
 def _objectwise_compute_channel(data, fun, labels, ids, sizes): # tensor, fun, (Y, X), (N), ( N)
     def treat_ob(args):
         id, size = args
-        mask = tf.cond(tf.math.equal(id, 0), lambda:0., lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
+        mask = tf.cond(tf.math.equal(id, 0), lambda:tf.zeros_like(labels, dtype=tf.float32), lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
         return fun(data, mask, size)
     return tf.map_fn(treat_ob, (ids, sizes), fn_output_signature=data.dtype)
 
