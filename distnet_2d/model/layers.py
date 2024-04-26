@@ -293,7 +293,7 @@ class ResConv2D(tf.keras.layers.Layer):
             kernel_size=self.kernel_size,
             strides=1,
             padding='same',
-            name=f"{self.name}/1_{self.kernel_size}x{self.kernel_size}",
+            name=f"{self.name}/1_{ker_size_to_string(self.kernel_size)}",
             activation="linear",
             #kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
@@ -303,7 +303,7 @@ class ResConv2D(tf.keras.layers.Layer):
             dilation_rate = self.dilation,
             strides=1,
             padding='same',
-            name=f"{self.name}/2_{self.kernel_size}x{self.kernel_size}",
+            name=f"{self.name}/2_{ker_size_to_string(self.kernel_size)}",
             activation="linear",
             #kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
@@ -368,7 +368,7 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             dilation_rate = self.dilation,
             strides=self.strides,
             padding='same',
-            name=f"{self.name}/{self.kernel_size}",
+            name=f"{self.name}/Conv",
             activation="linear",
             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
@@ -421,7 +421,7 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             padding='same',
             activation="linear",
             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
-            name=f"{self.name}/tConv{self.kernel_size}x{self.kernel_size}",
+            name=f"{self.name}/tConv{ker_size_to_string(self.kernel_size)}",
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
@@ -482,7 +482,7 @@ class SplitConv2D(tf.keras.layers.Layer):
             activation="linear",
             kernel_regularizer=self.kernel_regularizer
         )
-        self.convs = [conv_fun(f"{self.name}/{self.kernel_size}_{i}") for i in range(3)]
+        self.convs = [conv_fun(f"{self.name}/Conv_{i}") for i in range(3)]
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
@@ -611,3 +611,8 @@ class WeightedSum(tf.keras.layers.Layer):
             weights = weights[tf.newaxis]
         mul = tf.math.multiply(tf.stack(inputs, axis = -1), weights)
         return tf.math.reduce_sum(mul, axis=-1, keepdims = False)
+
+def ker_size_to_string(ker_size, dims=2):
+    if not isinstance(ker_size, (list, tuple)):
+        ker_size = ensure_multiplicity(dims, ker_size)
+    return 'x'.join([str(k) for k in ker_size])

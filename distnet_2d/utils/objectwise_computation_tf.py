@@ -8,6 +8,7 @@ def get_metrics_fun(spatial_dims, center_scale:float, max_objects_number:int=0, 
     scale = tf.cast(center_scale, tf.float32)
     coord_distance_fun = _coord_distance_fun()
     spa_wmean_fun = _get_spatial_wmean_by_object_fun(*spatial_dims)
+    spa_max_fun = _get_soft_argmax_2d_by_object_fun(*spatial_dims)
     mean_fun = _get_mean_by_object_fun()
     mean_fun_lm = _get_mean_by_object_fun(nan=-1)
     def fun(args):
@@ -40,7 +41,7 @@ def get_metrics_fun(spatial_dims, center_scale:float, max_objects_number:int=0, 
 
         # CENTER  compute center coordinates per objects: spatial mean of predicted gaussian function of GDCM
         center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, scale)))
-        center_coord = _objectwise_compute(center_values, [0], spa_wmean_fun, labels, ids, sizes) # (N, 2)
+        center_coord = _objectwise_compute(center_values, [0], spa_max_fun, labels, ids, sizes) # (N, 2)
         #print(f"center: {tf.concat([true_center_ob[0], center_coord[0]], -1).numpy()}")
         center_l2 = coord_distance_fun(true_center_ob, center_coord)
         center_l2 = tf.cond(tf.math.is_nan(center_l2), lambda: tf.cast(0, center_l2.dtype), lambda: center_l2)
@@ -112,13 +113,32 @@ def _get_spatial_wmean_by_object_fun(Y, X):
         return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null)
     return apply
 
+def _get_soft_argmax_2d_by_object_fun(Y, X, beta=1e2):
+    Y, X = tf.meshgrid(tf.range(Y, dtype=tf.float32), tf.range(X, dtype=tf.float32), indexing='ij')
+    nan = tf.cast(float('NaN'), tf.float32)
+    def sam(data, mask, size): # (Y, X)
+        def non_null():
+            shape = tf.shape(data)
+            data_masked = tf.math.multiply_no_nan(data, mask)
+            data_masked = tf.reshape(data_masked, (-1,)) # (X * Y,)
+            data_masked = tf.nn.softmax(data_masked * beta, axis = 0)
+            data_masked = tf.reshape(data_masked, shape) # (X, Y)
+            argmax_y = tf.reduce_sum(data_masked * Y, axis=[0, 1], keepdims=False) # (1,)
+            argmax_x = tf.reduce_sum(data_masked * X, axis=[0, 1], keepdims=False) # (1,)
+            argmax = tf.stack([argmax_y, argmax_x], -1) # (2,)
+            sum = tf.reduce_sum(data_masked, keepdims=False)
+            # sum = tf.stop_gradient(sum)
+            return tf.math.divide(argmax, sum)  # when no values should return nan # (2)
+        return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null) # when no values should return nan
+    return sam
+
 def _get_mean_by_object_fun(nan=float('NaN')):
     nan = tf.cast(nan, tf.float32)
     def fun(data, mask, size): # (Y, X, C)
         mask = tf.expand_dims(mask, -1)
-        nan_tensor = tf.repeat(nan, repeats=tf.shape(data)[-1])
+        null = lambda: tf.repeat(nan, repeats=tf.shape(data)[-1])
         non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False), tf.cast(size, tf.float32))
-        return tf.cond(tf.math.equal(size, 0), lambda:nan_tensor, non_null)
+        return tf.cond(tf.math.equal(size, 0), null, non_null)
     return fun
 
 def _objectwise_compute(data, channels, fun, labels, ids, sizes, label_channels=None): # [(tensor, range, fun)], (T, Y, X), (T, N), (T, N)
@@ -181,7 +201,7 @@ def _IoU(true, pred, tolerance:bool=False):
     true_inter = _dilate_mask(true) if tolerance else true
     intersection = tf.math.count_nonzero(tf.math.logical_and(true_inter, pred))
     union = tf.math.count_nonzero(tf.math.logical_or(true, pred))
-    return tf.math.divide_no_nan(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32))
+    return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))
 
 def _dilate_mask(maskYX):
     maskYX = tf.cast(maskYX, tf.float16)
