@@ -61,15 +61,18 @@ class SafeModelCheckpoint(ModelCheckpoint):
         split = os.path.splitext(path)
         return split[0] + "_tmp" + split[1]
 
+
 class StopOnLR(Callback):
     def __init__( self, min_lr, **kwargs, ):
         super().__init__()
         self.min_lr = min_lr
 
-    def on_epoch_end(self, epoch, logs={}):
+    def on_epoch_end(self, epoch, logs=None):
         lr = backend.get_value(self.model.optimizer.lr)
-        if(lr <= self.min_lr):
+        if lr <= self.min_lr:
+            print(f"Learning rate {lr} <= {self.min_lr} : training will be stopped", flush=True)
             self.model.stop_training = True
+
 
 class EpsilonCosineDecayCallback(Callback):
     """Reduce optimizer epsilon parameter.
