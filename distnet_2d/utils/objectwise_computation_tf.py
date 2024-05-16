@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 
 def get_label_size(labels, max_objects_number:int=0): # C, Y, X
-    N = max_objects_number if max_objects_number>0 else tf.math.reduce_max(labels)
+    N = max_objects_number if max_objects_number>0 else tf.math.maximum(tf.cast(1, labels.dtype), tf.math.reduce_max(labels))
 
     def treat_image(im):
 
@@ -179,8 +179,8 @@ def _generate_kernel(sizeY, sizeX, C=1, O=0):
 
 def IoU(true, pred, tolerance:bool=False):
     true_inter = _dilate_mask(true) if tolerance else true
-    intersection = tf.math.count_nonzero(tf.math.logical_and(true_inter, pred))
-    union = tf.math.count_nonzero(tf.math.logical_or(true, pred))
+    intersection = tf.math.count_nonzero(tf.math.logical_and(true_inter, pred), keepdims=False)
+    union = tf.math.count_nonzero(tf.math.logical_or(true, pred), keepdims=False)
     return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))
 
 
