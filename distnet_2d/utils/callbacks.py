@@ -1,5 +1,5 @@
 from math import cos, pi
-from tensorflow.keras.callbacks import Callback, ModelCheckpoint
+from tensorflow.keras.callbacks import Callback, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras import backend
 import csv
 import os
@@ -106,6 +106,20 @@ class EpsilonCosineDecayCallback(Callback):
         cosine_decay = 0.5 * (1 + cos(pi * step / self.decay_steps))
         decayed = (1 - self.alpha) * cosine_decay + self.alpha
         return self.start_epsilon * decayed
+
+
+class ReduceLROnPlateau2(ReduceLROnPlateau):
+    """Small variation from Original: best value is reset each time LR is reduced.
+    """
+
+    def on_epoch_end(self, epoch, logs=None):
+        old_lr = backend.get_value(self.model.optimizer.lr)
+        super().on_epoch_end(epoch, logs)
+        lr = backend.get_value(self.model.optimizer.lr)
+        if lr < old_lr:
+            self._reset()
+            self.cooldown_counter = self.cooldown
+
 
 class LogsCallback(Callback):
     def __init__(self, filepath, start_epoch=0):
