@@ -3,9 +3,10 @@ from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2D
 import numpy as np
 from .spatial_attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
-from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber
+from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives
 from ..utils.agc import adaptive_clip_grad
 from .gradient_accumulator import GradientAccumulator
+
 import time
 
 class DiSTNetModel(tf.keras.Model):
@@ -14,8 +15,8 @@ class DiSTNetModel(tf.keras.Model):
                  center_loss_weight:float=1,
                  displacement_loss_weight:float=1,
                  category_loss_weight:float=1,
-                 edm_loss=PseudoHuber(1),
-                 gcdm_loss=PseudoHuber(1), gcdm_gradients:bool=False,
+                 edm_loss=PseudoHuber(1), edm_derivatives:bool=False,
+                 gcdm_loss=PseudoHuber(1), gcdm_derivatives:bool=False,
                  displacement_loss=PseudoHuber(1),
                  category_weights=None,  # array of weights: [normal, division, no previous cell] or None = auto
                  category_class_frequency_range=[1/50, 50],
@@ -36,8 +37,9 @@ class DiSTNetModel(tf.keras.Model):
         self.predict_next_displacement=predict_next_displacement
         self.frame_window = frame_window
         self.edm_loss = edm_loss
-        self.gdcm_loss=gcdm_loss
-        self.gcdm_gradients=gcdm_gradients
+        self.edm_derivatives = edm_derivatives
+        self.gdcm_loss = gcdm_loss
+        self.gcdm_derivatives = gcdm_derivatives
         self.displacement_loss = displacement_loss
 
         min_class_frequency=category_class_frequency_range[0]
@@ -87,22 +89,22 @@ class DiSTNetModel(tf.keras.Model):
             loss_weights = dict()
 
             cell_mask = tf.math.greater(y[0], 0)
+            cell_mask_interior = tf.math.greater(y[0], 1) if self.gcdm_derivatives else None
             # edm
             if edm_weight>0:
-                edm_loss = self.edm_loss(y[0], y_pred[0]) #, sample_weight = weight_map)
+                edm_loss = compute_loss_derivatives(y[0], y_pred[0], self.edm_loss, derivatives=self.edm_derivatives, laplacian=self.edm_derivatives)
                 losses["edm"] = edm_loss
                 loss_weights["edm"] = edm_weight
 
             # center
             if center_weight>0:
-                center_pred_inside=tf.where(cell_mask, y_pred[1], 0) # do not predict anything outside
-                center_loss = self.gdcm_loss(y[1], center_pred_inside)
+                center_loss = compute_loss_derivatives(y[1], y_pred[1], self.gdcm_loss, mask=cell_mask, mask_interior=cell_mask_interior, derivatives=self.gcdm_derivatives)
                 losses["center"] = center_loss
                 loss_weights["center"] = center_weight
 
             #regression displacement loss
             if displacement_weight>0:
-                loss_dY, loss_dX = self._compute_displacement_loss(y, y_pred, cell_mask, spatial_gradients=self.gcdm_gradients)
+                loss_dY, loss_dX = self._compute_displacement_loss(y, y_pred, cell_mask)
                 losses["dY"] = loss_dY
                 loss_weights["dY"] = displacement_weight
                 losses["dX"] = loss_dX
@@ -157,7 +159,13 @@ class DiSTNetModel(tf.keras.Model):
             self.gradient_accumulator.apply_gradients()
         return losses
 
-    def _compute_displacement_loss(self, y, y_pred, cell_mask, spatial_gradients:bool=False):
+    def _compute_displacement_loss(self, y, y_pred, cell_mask):
+        mask = self._to_pair_mask(cell_mask)
+        dy = tf.where(mask, y_pred[2], 0)  # do not predict anything outside
+        dx = tf.where(mask, y_pred[3], 0)  # do not predict anything outside
+        return self.displacement_loss(y[2], dy), self.displacement_loss(y[3], dx)
+
+    def _to_pair_mask(self, cell_mask):
         fw = self.frame_window
         mask = cell_mask[..., 1:]
         if self.predict_next_displacement:
@@ -166,7 +174,9 @@ class DiSTNetModel(tf.keras.Model):
             mask_center = tf.tile(mask[..., fw - 1:fw], [1, 1, 1, fw - 1])
             if self.predict_next_displacement:
                 if self.next:
-                    mask = tf.concat( [mask, mask_center, cell_mask[..., -fw + 1:], mask_next, cell_mask[..., :fw - 1], mask_center], -1)
+                    mask = tf.concat(
+                        [mask, mask_center, cell_mask[..., -fw + 1:], mask_next, cell_mask[..., :fw - 1], mask_center],
+                        -1)
                 else:
                     mask = tf.concat([mask, mask_center, mask_next, cell_mask[..., :fw - 1]], -1)
             else:
@@ -176,18 +186,7 @@ class DiSTNetModel(tf.keras.Model):
                     mask = tf.concat([mask, mask_center], -1)
         elif self.predict_next_displacement:
             mask = tf.concat([mask, mask_next], -1)
-
-        dy_inside = tf.where(mask, y_pred[2], 0)  # do not predict anything outside
-        dx_inside = tf.where(mask, y_pred[3], 0)  # do not predict anything outside
-        if spatial_gradients:
-            dy_dy, dx_dy = tf.image.image_gradients(y[2])
-            dy_dx, dx_dx = tf.image.image_gradients(y[3])
-            dy_dy_pred, dx_dy_pred = tf.image.image_gradients(y[2])
-            dy_dy_pred, dx_dy_pred = tf.where(mask, dy_dy_pred, 0), tf.where(mask, dx_dy_pred, 0)
-            dy_dx_pred, dx_dx_pred = tf.image.image_gradients(y[3])
-            dy_dx_pred, dx_dx_pred = tf.where(mask, dy_dx_pred, 0), tf.where(mask, dx_dx_pred, 0)
-            return 1./3 * (self.displacement_loss(y[2], dy_inside) + self.displacement_loss(dy_dy, dy_dy_pred) + self.displacement_loss(dx_dy, dx_dy_pred)), 1./3 * (self.displacement_loss(y[3], dx_inside) + self.displacement_loss(dy_dx, dy_dx_pred) + self.displacement_loss(dx_dx, dx_dx_pred))
-        return self.displacement_loss(y[2], dy_inside), self.displacement_loss(y[3], dx_inside)
+        return mask
 
     def _compute_category_loss(self, y, y_pred, n_frame_pairs, n_fp_mul):
         cat_loss = 0.
@@ -213,6 +212,7 @@ class DiSTNetModel(tf.keras.Model):
             self.trainable=True
             self.compile()
 
+
 def get_distnet_2d(input_shape,
             frame_window:int,
             next:bool,
@@ -220,7 +220,7 @@ def get_distnet_2d(input_shape,
             name: str="DiSTNet2D",
             **kwargs):
 
-    return get_distnet_2d_model(input_shape, upsampling_mode = config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=False, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
+    return get_distnet_2d_model(input_shape, upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=False, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_model(input_shape,  # Y, X
                          encoder_settings:list,
@@ -243,7 +243,6 @@ def get_distnet_2d_model(input_shape,  # Y, X
                          next:bool=True,
                          long_term:bool = True,
                          predict_next_displacement:bool = True,
-                         gcdm_gradients:bool=False,
                          l2_reg:float = 0,
                          name: str="DiSTNet2D",
                          **kwargs,
@@ -412,7 +411,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
                             output_name = k.replace("Next", "")
                             output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop(k)])
                 outputs.extend(output_per_dec.values())
-        return DiSTNetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, gcdm_gradients=gcdm_gradients, **kwargs)
+        return DiSTNetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"

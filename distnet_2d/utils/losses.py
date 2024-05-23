@@ -1,6 +1,7 @@
 import tensorflow as tf
-import tensorflow.keras.backend as K
 import numpy as np
+from ..utils import image_derivatives_tf as der
+
 
 def get_grad_weight_fun(weight):
     @tf.custom_gradient
@@ -25,6 +26,32 @@ class PseudoHuber(tf.keras.losses.Loss):
 
     def call(self, y_true, y_pred):
         return tf.multiply(self.delta_sq, tf.sqrt(1. + tf.square((y_true - y_pred)/self.delta)) - 1.)
+
+
+def compute_loss_derivatives(y, y_pred, loss_fun, mask=None, mask_interior=None, derivatives: bool = False, gradient: bool = False, laplacian: bool = False):
+    loss = loss_fun(y, tf.where(mask, y_pred, 0) if mask is not None else y_pred)
+    #print(f"compute loss with mask: {mask is not None} interior: {mask_interior is not None} der: {derivatives} grad: {gradient} lap: {laplacian}", flush=True)
+    if derivatives or gradient or laplacian:
+        if mask_interior is None:
+            mask_interior = mask
+        dy, dx = der.der_2d(y, 1), der.der_2d(y, 2)
+        dy_pred, dx_pred = der.der_2d(y_pred, 1), der.der_2d(y_pred, 2)
+        if laplacian:
+            lap = der.laplacian_2d(None, dy, dx)
+            lap_pred = der.laplacian_2d(None, dy_pred, dx_pred)
+            lap_pred = tf.where(mask_interior, lap_pred, 0) if mask_interior is not None else lap_pred
+            loss = loss + loss_fun(lap, lap_pred)
+        if gradient:
+            grad = dy * dy + dx * dx
+            grad_pred = dy_pred * dy_pred + dx_pred * dx_pred
+            grad_pred = tf.where(mask_interior, grad_pred, 0) if mask_interior is not None else grad_pred
+            loss = loss + loss_fun(grad, grad_pred)
+        if derivatives:
+            dy_pred = tf.where(mask_interior, dy_pred, 0) if mask_interior is not None else dy_pred
+            dx_pred = tf.where(mask_interior, dx_pred, 0) if mask_interior is not None else dx_pred
+            loss = loss + loss_fun(dy, dy_pred) + loss_fun(dx, dx_pred)
+    return loss
+
 
 def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=True, remove_background=False, dtype='float32'):
     weight_list = np.array(weight_list).astype("float32")
