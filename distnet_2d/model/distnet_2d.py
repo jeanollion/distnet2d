@@ -24,6 +24,7 @@ class DiSTNetModel(tf.keras.Model):
                  frame_window=3,
                  long_term:bool=True,
                  predict_next_displacement:bool=True,
+                 predict_gcdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  **kwargs):
@@ -38,10 +39,11 @@ class DiSTNetModel(tf.keras.Model):
         self.frame_window = frame_window
         self.edm_loss = edm_loss
         self.edm_derivatives = edm_derivatives
-        self.gdcm_loss = gcdm_loss
+        self.gcdm_loss = gcdm_loss
         self.gcdm_derivatives = gcdm_derivatives
         self.displacement_loss = displacement_loss
-
+        self.predict_gcdm_derivatives = predict_gcdm_derivatives
+        self.predict_edm_derivatives = predict_edm_derivatives
         min_class_frequency=category_class_frequency_range[0]
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
@@ -58,7 +60,7 @@ class DiSTNetModel(tf.keras.Model):
         self.use_agc = use_agc
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
-        self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenter0/", "DecoderSegEDM0"] if agc_exclude_output else None
+        self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenterGCDM0/", "DecoderCenterGCDMdY0/", "DecoderCenterGCDMdX0/", "DecoderSegEDM0/", "DecoderSegEDMdY0/", "DecoderSegEDMdX0/"] if agc_exclude_output else None
         self.print_gradients=print_gradients
 
     def train_step(self, data):
@@ -80,25 +82,35 @@ class DiSTNetModel(tf.keras.Model):
         if category_weight>0:
             assert len(y) == 5 , f"invalid number of output. Expected: >=4 actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = cat
         else:
-            assert len(y) >= 4, f"invalid number of output. Expected: >=4 actual {len(y)}"  # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = cat
+            assert len(y) >= 4, f"invalid number of output. Expected: >=4 actual {len(y)}"  # 0 = edm, 1 = center, 2 = dY, 3 = dX
 
         with tf.GradientTape(persistent=self.print_gradients) as tape:
             y_pred = self(x, training=True)  # Forward pass
+            if self.predict_edm_derivatives:
+                edm, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=3, axis=-1)
+            else:
+                edm, edm_dy, edm_dx = y_pred[0], None, None
+            if self.predict_gcdm_derivatives:
+                gcdm, gcdm_dy, gcdm_dx = tf.split(y_pred[1], num_or_size_splits=3, axis=-1)
+            else:
+                gcdm, gcdm_dy, gcdm_dx = y_pred[1], None, None
+
             # compute loss
             losses = dict()
             loss_weights = dict()
 
             cell_mask = tf.math.greater(y[0], 0)
-            cell_mask_interior = tf.math.greater(y[0], 1) if self.gcdm_derivatives else None
+            cell_mask_interior = tf.math.greater(y[0], 1) if self.gcdm_derivatives or self.predict_gcdm_derivatives else None
             # edm
             if edm_weight>0:
-                edm_loss = compute_loss_derivatives(y[0], y_pred[0], self.edm_loss, derivatives=self.edm_derivatives, laplacian=self.edm_derivatives)
+                #edm_loss = self.edm_loss(y[0], edm)
+                edm_loss = compute_loss_derivatives(y[0], edm, self.edm_loss, pred_dy=edm_dy, pred_dx=edm_dx, derivative_loss=self.edm_derivatives, laplacian_loss=self.edm_derivatives)
                 losses["edm"] = edm_loss
                 loss_weights["edm"] = edm_weight
 
             # center
             if center_weight>0:
-                center_loss = compute_loss_derivatives(y[1], y_pred[1], self.gdcm_loss, mask=cell_mask, mask_interior=cell_mask_interior, derivatives=self.gcdm_derivatives)
+                center_loss = compute_loss_derivatives(y[1], gcdm, self.gcdm_loss, pred_dy=gcdm_dy, pred_dx=gcdm_dx, mask=cell_mask, mask_interior=cell_mask_interior, derivative_loss=self.gcdm_derivatives)
                 losses["center"] = center_loss
                 loss_weights["center"] = center_weight
 
@@ -127,7 +139,7 @@ class DiSTNetModel(tf.keras.Model):
             losses["loss"] = loss
 
         if self.print_gradients:
-            trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenter0") or t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
+            trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenterGCDM") or t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
             for loss_name, loss_value in losses.items():
                 if loss_name != "loss" :
                     w = loss_weights[loss_name] # outside tape: cannot modify loss_value -> need to apply w to gradient itself
@@ -243,6 +255,8 @@ def get_distnet_2d_model(input_shape,  # Y, X
                          next:bool=True,
                          long_term:bool = True,
                          predict_next_displacement:bool = True,
+                         predict_edm_derivatives:bool = False,
+                         predict_gcdm_derivatives:bool = False,
                          l2_reg:float = 0,
                          name: str="DiSTNet2D",
                          **kwargs,
@@ -301,7 +315,13 @@ def get_distnet_2d_model(input_shape,  # Y, X
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
         decoder_feature_op={n: get_seq_and_filters(parse_param_list(feature_decoder_settings, f"Features{n}", l2_reg=l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
         decoder_out={"Seg":{}, "Center":{}, "Track":{}, "Cat":{}}
-        output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"], "Track": ["dY", "dX"] if not predict_next_displacement else ["dY", "dX", "dYNext", "dXNext"], "Cat": ["Cat"] if not predict_next_displacement else ["Cat", "CatNext"]}
+        output_per_decoder = {"Seg": ["EDM"], "Center": ["GCDM"], "Track": ["dY", "dX"] if not predict_next_displacement else ["dY", "dX", "dYNext", "dXNext"], "Cat": ["Cat"] if not predict_next_displacement else ["Cat", "CatNext"]}
+        if predict_edm_derivatives:
+            output_per_decoder["Seg"].append("EDMdY")
+            output_per_decoder["Seg"].append("EDMdX")
+        if predict_gcdm_derivatives:
+            output_per_decoder["Center"].append("GCDMdY")
+            output_per_decoder["Center"].append("GCDMdX")
         n_frame_pairs = n_chan -1
         if long_term:
             n_frame_pairs = n_frame_pairs + (frame_window-1) * (2 if next else 1)
@@ -311,8 +331,10 @@ def get_distnet_2d_model(input_shape,  # Y, X
 
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
-                decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderSegEDM")
-                decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderCenter")
+                for dSegName in output_per_decoder["Seg"]:
+                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}")
+                for dCenterName in output_per_decoder["Center"]:
+                    decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}")
                 for dTrackName in output_per_decoder["Track"]:
                     decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}")
                 for dCatName in output_per_decoder["Cat"]:
@@ -325,7 +347,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
         for n, o_ns in output_per_decoder.items():
             decoder_output_names[n] = dict()
             for o_n in o_ns:
-                decoder_output_names[n][o_n] = f"Output{oi}_{o_n}"
+                decoder_output_names[n][o_n] = f"Output{oi:02}_{o_n}"
                 oi += 1
         # Create GRAPH
         input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
@@ -400,7 +422,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
                     if output_name in decoder_out[decoder_name]:
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
-                        if not is_segmentation and predict_next_displacement:
+                        if not is_segmentation and predict_next_displacement or decoder_name=="Seg" and predict_edm_derivatives or decoder_name== "Center" and predict_gcdm_derivatives:
                             layer_output_name += "_" # will be concatenated -> output name is used @ concat
                         up_out = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
                         up_out = BatchToChannel(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up_out)
@@ -410,8 +432,15 @@ def get_distnet_2d_model(input_shape,  # Y, X
                         if k.endswith("Next"):
                             output_name = k.replace("Next", "")
                             output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop(k)])
+                if decoder_name=="Seg" and predict_edm_derivatives:
+                    output_name = "EDM"
+                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop("EDMdY"), output_per_dec.pop("EDMdX")])
+                if decoder_name=="Center" and predict_gcdm_derivatives:
+                    output_name = "GCDM"
+                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop("GCDMdY"), output_per_dec.pop("GCDMdX")])
                 outputs.extend(output_per_dec.values())
-        return DiSTNetModel([input], outputs, name=name, frame_window=frame_window, next = next, spatial_dims=spatial_dims if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, **kwargs)
+        return DiSTNetModel([input], outputs, name=name, frame_window=frame_window, next=next, spatial_dims=spatial_dims if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, predict_gcdm_derivatives=predict_gcdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, **kwargs)
+
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"

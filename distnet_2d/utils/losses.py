@@ -28,25 +28,40 @@ class PseudoHuber(tf.keras.losses.Loss):
         return tf.multiply(self.delta_sq, tf.sqrt(1. + tf.square((y_true - y_pred)/self.delta)) - 1.)
 
 
-def compute_loss_derivatives(y, y_pred, loss_fun, mask=None, mask_interior=None, derivatives: bool = False, gradient: bool = False, laplacian: bool = False):
-    loss = loss_fun(y, tf.where(mask, y_pred, 0) if mask is not None else y_pred)
-    #print(f"compute loss with mask: {mask is not None} interior: {mask_interior is not None} der: {derivatives} grad: {gradient} lap: {laplacian}", flush=True)
-    if derivatives or gradient or laplacian:
+def compute_loss_derivatives(true, pred, loss_fun, pred_dy=None, pred_dx=None, pred_grad=None, pred_lap=None, mask=None, mask_interior=None, derivative_loss: bool = False, gradient_loss: bool = False, laplacian_loss: bool = False):
+    loss = loss_fun(true, tf.where(mask, pred, 0) if mask is not None else pred)
+    #print(f"compute loss with mask: {mask is not None} interior: {mask_interior is not None} der: {derivative_loss} grad: {gradient_loss} lap: {laplacian_loss} pred lap: {y_pred_lap is not None} pred dy: {y_pred_dy is not None} pred dx: {y_pred_dx is not None}", flush=True)
+    if derivative_loss or gradient_loss or laplacian_loss or pred_dy is not None or pred_dx is not None or pred_grad is not None or pred_lap is not None:
         if mask_interior is None:
             mask_interior = mask
-        dy, dx = der.der_2d(y, 1), der.der_2d(y, 2)
-        dy_pred, dx_pred = der.der_2d(y_pred, 1), der.der_2d(y_pred, 2)
-        if laplacian:
+        dy, dx = der.der_2d(true, 1), der.der_2d(true, 2)
+        if derivative_loss or gradient_loss or laplacian_loss:
+            dy_pred, dx_pred = der.der_2d(pred, 1), der.der_2d(pred, 2)
+        if laplacian_loss or pred_lap is not None:
             lap = der.laplacian_2d(None, dy, dx)
+        if pred_lap is not None:
+            pred_lap = tf.where(mask_interior, pred_lap, 0) if mask_interior is not None else pred_lap
+            loss = loss + loss_fun(lap, pred_lap)
+        if laplacian_loss:
             lap_pred = der.laplacian_2d(None, dy_pred, dx_pred)
             lap_pred = tf.where(mask_interior, lap_pred, 0) if mask_interior is not None else lap_pred
             loss = loss + loss_fun(lap, lap_pred)
-        if gradient:
+        if gradient_loss or pred_grad is not None:
             grad = dy * dy + dx * dx
+        if pred_grad is not None:
+            pred_grad = tf.where(mask_interior, pred_grad, 0) if mask_interior is not None else pred_grad
+            loss = loss + loss_fun(grad, pred_grad)
+        if gradient_loss:
             grad_pred = dy_pred * dy_pred + dx_pred * dx_pred
             grad_pred = tf.where(mask_interior, grad_pred, 0) if mask_interior is not None else grad_pred
             loss = loss + loss_fun(grad, grad_pred)
-        if derivatives:
+        if pred_dy is not None:
+            pred_dy = tf.where(mask_interior, pred_dy, 0) if mask_interior is not None else pred_dy
+            loss = loss + loss_fun(dy, pred_dy)
+        if pred_dx is not None:
+            pred_dx = tf.where(mask_interior, pred_dx, 0) if mask_interior is not None else pred_dx
+            loss = loss + loss_fun(dx, pred_dx)
+        if derivative_loss:
             dy_pred = tf.where(mask_interior, dy_pred, 0) if mask_interior is not None else dy_pred
             dx_pred = tf.where(mask_interior, dx_pred, 0) if mask_interior is not None else dx_pred
             loss = loss + loss_fun(dy, dy_pred) + loss_fun(dx, dx_pred)
