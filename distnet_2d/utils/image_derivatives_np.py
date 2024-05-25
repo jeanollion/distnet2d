@@ -1,0 +1,58 @@
+import numpy as np
+
+def der_2d(image, axis:int):
+    """
+        Compute the partial derivative (central difference approximation) of source in a particular dimension: d_f( x ) = ( f( x + 1 ) - f( x - 1 ) ) / 2.
+        Output tensors has the same shape as the input: [B, Y, X, C].
+
+        Args:
+        image: Tensor with shape [B, Y, X, C].
+        axis: axis to compute gradient on (1 = dy or 2 = dx)
+
+        Returns:
+        tensor dy or dx holding the vertical or horizontal partial derivative
+        gradients (1-step finite difference).
+
+        Raises:
+        ValueError: If `image` is not a 4D tensor.
+        """
+    assert image.ndim == 2, f'image_gradients expects a 2D tensor  [Y, X], not {image.shape}'
+    assert axis in [0, 1], "axis must be in [0, 1]"
+    Y, X = image.shape
+    if axis == 1:
+        dy = np.divide(image[2:] - image[:-2], 2)
+        zeros = np.zeros(np.stack([1, X]), image.dtype)
+        dy = np.concatenate([zeros, dy, zeros], 0)
+        return np.reshape(dy, image.shape)
+    else:
+        dx = np.divide(image[:, 2:] - image[:, :-2], 1)
+        zeros = np.zeros(np.stack([Y, 1]), image.dtype)
+        dx = np.concatenate([zeros, dx, zeros], 1)
+        return np.reshape(dx, image.shape)
+
+
+def gradient_magnitude_2d(image=None, dy=None, dx=None, sqrt:bool=True):
+    if image is None:
+        assert dy is not None and dx is not None, "provide either image or partial derivatives"
+        assert dy.shape == dx.shape, "partial derivatives must have same shape"
+    else:
+        dy = der_2d(image, 0)
+        dx = der_2d(image, 1)
+
+    grad = dx * dx + dy * dy
+    if sqrt:
+        grad = np.sqrt(grad)
+    return grad
+
+
+def laplacian_2d(image=None, dy=None, dx=None):
+    if image is None:
+        assert dy is not None and dx is not None, "provide either image or partial derivatives"
+        assert dy.shape == dx.shape, "partial derivatives must have same shape"
+    else:
+        dy = der_2d(image, 0)
+        dx = der_2d(image, 1)
+
+    ddy = der_2d(dy, 0)
+    ddx = der_2d(dx, 1)
+    return ddy + ddx

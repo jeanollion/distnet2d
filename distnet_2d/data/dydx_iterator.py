@@ -2,7 +2,7 @@ from dataset_iterator import TrackingIterator
 from dataset_iterator.tile_utils import extract_tile_random_zoom_function
 import numpy as np
 import numpy.ma as ma
-from scipy.ndimage import center_of_mass, find_objects, maximum_filter, map_coordinates
+from scipy.ndimage import center_of_mass, find_objects, maximum_filter, map_coordinates, gaussian_filter, convolve
 from skimage.transform import rescale
 from skimage.feature import peak_local_max
 import skfmm
@@ -12,7 +12,9 @@ import itertools
 import edt
 from random import random
 from .medoid import get_medoid
+from ..utils import image_derivatives_np as der
 import time
+
 
 class DyDxIterator(TrackingIterator):
     def __init__(self,
@@ -223,8 +225,8 @@ class DyDxIterator(TrackingIterator):
             object_slices[(b, c)] = find_objects(labelIms[b,...,c])
         edm = np.zeros(shape=labelIms.shape, dtype=np.float32)
         for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
-            edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
-            #_compute_edm(edm[b,...,c], labelIms[b,...,c], object_slices[(b, c)])
+            edm[b,...,c] = edt_antialiased(labelIms[b,...,c], object_slices[(b, c)])
+            #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
         n_motion = 2 * frame_window if return_next else frame_window
         if long_term:
             n_motion = n_motion + (2 * ( frame_window - 1 ) if return_next else frame_window -1)
@@ -388,23 +390,9 @@ def _get_labels_and_centers(labelIm, edm, center_mode = "GEOMETRICAL"):
         assert edm is not None and edm.shape == labelIm.shape
         centers = center_of_mass(edm, labelIm, labels)
     elif center_mode == "SKELETON":
-        assert edm is not None and edm.shape == labelIm.shape
-        mass_centers = np.array(center_of_mass(labelIm, labelIm, labels))[np.newaxis] # 1, N_ob, 2
-        lm_coords = peak_local_max(edm, labels=labelIm) # N_lm, 2
-        lm_coords_l = labelIm[lm_coords[:,0], lm_coords[:,1]] # N_lm
-        # labels in labelIm are not necessarily continuous -> replace by rank
-        label_rank = np.zeros(shape=(max(labels)+1,), dtype=np.int32)
-        for l in labels:
-            label_rank[l] = labels.index(l)
-        lm_coords_l = label_rank[lm_coords_l]
-        lm_coords_l = np.eye(len(labels))[lm_coords_l] # N_lm, N_ob
-        lm_coords_ob = lm_coords[:,np.newaxis] * lm_coords_l[...,np.newaxis] # N_lm, N_ob, 1 # TODO medoid of local maxima, weighted by edm?
-        lm_coords_dist = np.sum(np.square(mass_centers - lm_coords_ob), 2, keepdims=True) # N_lm, N_ob, 1
-        lm_coords_dinv= 1./(lm_coords_dist + 0.1) # N_lm, N_ob, 1
-        lm_coords_dinv = lm_coords_dinv * lm_coords_ob # erase weights that are outside object
-        wsum=np.sum(lm_coords_ob * lm_coords_dinv, 0, keepdims=False) # N_ob, 2
-        sum=np.sum(lm_coords_dinv, 0, keepdims=False) # N_ob, 1
-        centers = wsum / sum # N_ob, 2
+        edm_lap = der.laplacian_2d(gaussian_filter(edm, sigma=1.5))
+        skeleton = edm_lap<0.25
+        centers = [get_medoid(*np.asarray( (labelIm == l) & skeleton).nonzero()) for l in labels]
     elif center_mode == "MEDOID":
         centers = [get_medoid(*np.asarray(labelIm == l).nonzero()) for l in labels]
     else:
@@ -589,9 +577,32 @@ def _compute_edm(edmIm, labelIm, object_slices):
             sl = tuple([slice(s.start - 1 if s.start>0 else 0, s.stop+1 if s.stop<ax-1 else s.stop, s.step) for s, ax in zip(sl, shape)])
             mask = labelIm == i+1
             sub_m = mask[sl]
-            sub_edm = np.copy(edmIm[sl])
-            sub_edm[np.logical_not(sub_m)] = 0  # remove neighbor cells
+            #skfmm implementation
             m = np.zeros_like(sub_m)
             m[sub_m] = 1
             edmIm[sl][sub_m] = skfmm.distance(m)[sub_m]
+            # ttcr implementation
+            #contours = np.logical_xor(maximum_filter(sub_m, size=3), sub_m)
+            #Y, X = sub_m.shape
+            #y, x = np.arange(Y, dtype=np.double), np.arange(X, dtype=np.double)
+            #grid = Grid2d(y, x, method='DSPM', cell_slowness=False, nsnx=10, nsnz=10, maxit=20, n_secondary=3, n_tertiary=3, radius_factor_tertiary=3.0)
+            #grid.set_slowness(np.ones(shape=(Y * X,), dtype=y.dtype))
+            #src = np.argwhere(contours).astype(y.dtype)
+            #rcv = np.argwhere(sub_m).astype(y.dtype)
+            #tt = grid.raytrace(src, rcv, aggregate_src=True)
+            #edmIm[sl][sub_m] = tt
 
+def edt_antialiased(labelIm, object_slices):
+    shape = labelIm.shape
+    upsampled = np.kron(labelIm, np.ones((2, 2)))
+    w=np.ones(shape=(3, 3), dtype=np.int8)
+    for (i, sl) in enumerate(object_slices):
+        if sl is not None:
+            sl = tuple([slice(max(s.start*2 - 1, 0), min(s.stop*2 + 1, ax*2 - 1), s.step) for s, ax in zip(sl, shape)])
+            sub_labelIm = upsampled[sl]
+            mask = sub_labelIm == i + 1
+            new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > 4
+            sub_labelIm[mask] = 0
+            sub_labelIm[new_mask] = i + 1
+    edm = np.divide(edt.edt(upsampled), 2)
+    return edm.reshape((shape[0], 2, shape[1], 2)).mean(-1).mean(1)

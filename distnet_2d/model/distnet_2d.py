@@ -99,8 +99,8 @@ class DiSTNetModel(tf.keras.Model):
             losses = dict()
             loss_weights = dict()
 
-            cell_mask = tf.math.greater(y[0], 0)
-            cell_mask_interior = tf.math.greater(y[0], 1) if self.gcdm_derivatives or self.predict_gcdm_derivatives else None
+            cell_mask = tf.math.greater(y[0], 0.5)
+            cell_mask_interior = tf.math.greater(y[0], 1.5) if self.gcdm_derivatives or self.predict_gcdm_derivatives else None
             # edm
             if edm_weight>0:
                 #edm_loss = self.edm_loss(y[0], edm)
