@@ -550,13 +550,12 @@ def _draw_centers(centerIm, labels_map_centers, labelIm, object_slices, geometri
                 center = labels_map_centers.get(i+1)
                 if not (isnan(center[0]) or isnan(center[1])):
                     sl = tuple( [slice(max(0, s.start - 2), min(s.stop + 2, ax - 1), s.step) for s, ax in zip(sl, shape)])
-                    mask = labelIm_dil == i + 1
-                    sub_m = mask[sl]
-                    m = np.ones_like(sub_m)
+                    mask = labelIm_dil[sl] == i + 1
+                    m = np.ones_like(mask)
                     #print(f"label: {i+1} slice: {sl}, center: {center}, sub_m {sub_m.shape}, coord: {(int(round(center[0]))-sl[0].start, int(round(center[1]))-sl[1].start)}", flush=True)
                     m[int(round(center[0]))-sl[0].start, int(round(center[1]))-sl[1].start] = 0
-                    m = ma.masked_array(m, ~sub_m)
-                    centerIm[sl][sub_m] = skfmm.distance(m)[sub_m]
+                    m = ma.masked_array(m, ~mask)
+                    centerIm[sl][mask] = skfmm.distance(m)[mask]
     else:
         Y, X = centerIm.shape
         Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
@@ -570,27 +569,6 @@ def _draw_centers(centerIm, labels_map_centers, labelIm, object_slices, geometri
                     d = np.sqrt(np.square(Y-center[0])+np.square(X-center[1]))
                     centerIm[mask] = d[mask]
 
-def _compute_edm(edmIm, labelIm, object_slices):
-    shape = edmIm.shape
-    for (i, sl) in enumerate(object_slices):
-        if sl is not None:
-            sl = tuple([slice(s.start - 1 if s.start>0 else 0, s.stop+1 if s.stop<ax-1 else s.stop, s.step) for s, ax in zip(sl, shape)])
-            mask = labelIm == i+1
-            sub_m = mask[sl]
-            #skfmm implementation
-            m = np.zeros_like(sub_m)
-            m[sub_m] = 1
-            edmIm[sl][sub_m] = skfmm.distance(m)[sub_m]
-            # ttcr implementation
-            #contours = np.logical_xor(maximum_filter(sub_m, size=3), sub_m)
-            #Y, X = sub_m.shape
-            #y, x = np.arange(Y, dtype=np.double), np.arange(X, dtype=np.double)
-            #grid = Grid2d(y, x, method='DSPM', cell_slowness=False, nsnx=10, nsnz=10, maxit=20, n_secondary=3, n_tertiary=3, radius_factor_tertiary=3.0)
-            #grid.set_slowness(np.ones(shape=(Y * X,), dtype=y.dtype))
-            #src = np.argwhere(contours).astype(y.dtype)
-            #rcv = np.argwhere(sub_m).astype(y.dtype)
-            #tt = grid.raytrace(src, rcv, aggregate_src=True)
-            #edmIm[sl][sub_m] = tt
 
 def edt_antialiased(labelIm, object_slices):
     shape = labelIm.shape
