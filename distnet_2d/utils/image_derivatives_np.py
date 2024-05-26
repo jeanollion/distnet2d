@@ -1,33 +1,37 @@
 import numpy as np
 
-def der_2d(image, axis:int):
+def der_2d(image, *axis:int):
     """
         Compute the partial derivative (central difference approximation) of source in a particular dimension: d_f( x ) = ( f( x + 1 ) - f( x - 1 ) ) / 2.
-        Output tensors has the same shape as the input: [B, Y, X, C].
+        Output tensors has the same shape as the input: [Y, X].
 
         Args:
-        image: Tensor with shape [B, Y, X, C].
-        axis: axis to compute gradient on (1 = dy or 2 = dx)
+        image: Tensor with shape [Y, X].
+        axis: axis to compute gradient on (0 = dy or 1 = dx)
 
         Returns:
         tensor dy or dx holding the vertical or horizontal partial derivative
         gradients (1-step finite difference).
 
         Raises:
-        ValueError: If `image` is not a 4D tensor.
+        ValueError: If `image` is not a 2D tensor.
         """
+    if len(axis) > 1:
+        return [der_2d(image, ax) for ax in axis]
+    else:
+        axis = axis[0]
     assert image.ndim == 2, f'image_gradients expects a 2D tensor  [Y, X], not {image.shape}'
     assert axis in [0, 1], "axis must be in [0, 1]"
     Y, X = image.shape
-    if axis == 1:
+    if axis == 0:
         dy = np.divide(image[2:] - image[:-2], 2)
         zeros = np.zeros(np.stack([1, X]), image.dtype)
-        dy = np.concatenate([zeros, dy, zeros], 0)
+        dy = np.concatenate([zeros, dy, zeros], axis)
         return np.reshape(dy, image.shape)
     else:
-        dx = np.divide(image[:, 2:] - image[:, :-2], 1)
+        dx = np.divide(image[:, 2:] - image[:, :-2], 2)
         zeros = np.zeros(np.stack([Y, 1]), image.dtype)
-        dx = np.concatenate([zeros, dx, zeros], 1)
+        dx = np.concatenate([zeros, dx, zeros], axis)
         return np.reshape(dx, image.shape)
 
 
@@ -36,9 +40,7 @@ def gradient_magnitude_2d(image=None, dy=None, dx=None, sqrt:bool=True):
         assert dy is not None and dx is not None, "provide either image or partial derivatives"
         assert dy.shape == dx.shape, "partial derivatives must have same shape"
     else:
-        dy = der_2d(image, 0)
-        dx = der_2d(image, 1)
-
+        dy, dx = der_2d(image, 0, 1)
     grad = dx * dx + dy * dy
     if sqrt:
         grad = np.sqrt(grad)
@@ -50,9 +52,7 @@ def laplacian_2d(image=None, dy=None, dx=None):
         assert dy is not None and dx is not None, "provide either image or partial derivatives"
         assert dy.shape == dx.shape, "partial derivatives must have same shape"
     else:
-        dy = der_2d(image, 0)
-        dx = der_2d(image, 1)
-
+        dy, dx = der_2d(image, 0, 1)
     ddy = der_2d(dy, 0)
     ddx = der_2d(dx, 1)
     return ddy + ddx

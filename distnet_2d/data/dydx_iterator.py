@@ -33,6 +33,7 @@ class DyDxIterator(TrackingIterator):
                  array_keywords:list=['/linksPrev'],
                  elasticdeform_parameters:dict = None,
                  downscale_displacement_and_link_multiplicity=1,
+                 return_edm_derivatives: bool = False,
                  return_center:bool = True,
                  center_mode:str = "MEDOID",  # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
                  return_label_rank = False,
@@ -49,6 +50,7 @@ class DyDxIterator(TrackingIterator):
         self.aug_frame_subsampling=aug_frame_subsampling
         self.allow_frame_subsampling_direct_neigh=allow_frame_subsampling_direct_neigh
         self.output_float16=output_float16
+        self.return_edm_derivatives=return_edm_derivatives
         self.return_center=return_center
         self.center_mode=center_mode.upper()
         self.return_label_rank=return_label_rank
@@ -309,6 +311,11 @@ class DyDxIterator(TrackingIterator):
                     nextLabelArr = nextLabelArr[:, 1:]
 
         edm[edm==0] = -1
+        if self.return_edm_derivatives:
+            der_y, der_x = np.zeros_like(edm)
+            for b, c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
+                derivatives_labelwise(edm[b,...,c], -1, der_y[b,...,c], der_x[b,...,c], labelIm[b,...,c], object_slices[(b, c)])
+            edm = np.concatenate([edm, der_y, der_x], -1)
         all_channels.insert(channel_inc, edm)
         if self.return_center:
             channel_inc+=1
@@ -575,15 +582,30 @@ def _draw_centers(centerIm, labels_map_centers, labelIm, object_slices, geometri
 
 def edt_antialiased(labelIm, object_slices):
     shape = labelIm.shape
-    upsampled = np.kron(labelIm, np.ones((2, 2)))
+    upsampled = np.kron(labelIm, np.ones((2, 2))) # upsample by factor 2
     w=np.ones(shape=(3, 3), dtype=np.int8)
     for (i, sl) in enumerate(object_slices):
         if sl is not None:
             sl = tuple([slice(max(s.start*2 - 1, 0), min(s.stop*2 + 1, ax*2 - 1), s.step) for s, ax in zip(sl, shape)])
             sub_labelIm = upsampled[sl]
             mask = sub_labelIm == i + 1
-            new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > 4
-            sub_labelIm[mask] = 0
+            new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > 4 # smooth borders
+            sub_labelIm[mask] = 0  # replace mask by smoothed
             sub_labelIm[new_mask] = i + 1
     edm = np.divide(edt.edt(upsampled), 2)
-    return edm.reshape((shape[0], 2, shape[1], 2)).mean(-1).mean(1)
+    return edm.reshape((shape[0], 2, shape[1], 2)).mean(-1).mean(1) # downsample (bin) by factor 2
+
+
+def derivatives_labelwise(image, bck_value, der_y, der_x, labelIm, object_slices):
+    shape = labelIm.shape
+    for (i, sl) in enumerate(object_slices):
+        if sl is not None:
+            sl = tuple([slice(max(s.start - 1, 0), min(s.stop, ax - 1), s.step) for s, ax in zip(sl, shape)])
+            sub_labelIm = labelIm[sl]
+            mask = sub_labelIm == i + 1
+            sub_im = np.copy(image[sl])
+            sub_im[np.logical_not(mask)] = bck_value # erase neighboring cells
+            sub_der_y, sub_der_x = der.der_2d(sub_im, 0, 1)
+            der_y[sl][mask] = sub_der_y[mask]
+            der_x[sl][mask] = sub_der_x[mask]
+    return der_y, der_x
