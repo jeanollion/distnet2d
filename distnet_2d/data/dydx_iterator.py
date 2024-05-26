@@ -15,6 +15,8 @@ from .medoid import get_medoid
 from ..utils import image_derivatives_np as der
 import time
 
+CENTER_MODE = ["GEOMETRICAL", "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"]
+
 
 class DyDxIterator(TrackingIterator):
     def __init__(self,
@@ -25,14 +27,14 @@ class DyDxIterator(TrackingIterator):
                  erase_edge_cell_size:int,
                  next:bool = True,
                  allow_frame_subsampling_direct_neigh:bool = False,
-                 aug_remove_prob: float = 0.01,
+                 aug_remove_prob: float = 0.005,
                  return_link_multiplicity:bool = True,
                  channel_keywords:list=['/raw', '/regionLabels'],  # channel @1 must be label
                  array_keywords:list=['/linksPrev'],
                  elasticdeform_parameters:dict = None,
                  downscale_displacement_and_link_multiplicity=1,
-                 return_center = True,
-                 center_mode = "MEDOID",  # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
+                 return_center:bool = True,
+                 center_mode:str = "MEDOID",  # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
                  return_label_rank = False,
                  long_term:bool = True,
                  return_next_displacement:bool = True,
@@ -40,6 +42,7 @@ class DyDxIterator(TrackingIterator):
                  **kwargs):
         assert len(channel_keywords)==2, 'keyword should contain 2 elements in this order: grayscale input images, object labels'
         assert len(array_keywords) == 1, 'array keyword should contain 1 element: links to previous objects'
+        assert center_mode.upper() in CENTER_MODE, f"invalid center mode: {center_mode} should be in {CENTER_MODE}"
         self.return_link_multiplicity=return_link_multiplicity
         self.downscale=downscale_displacement_and_link_multiplicity
         self.erase_edge_cell_size=erase_edge_cell_size
@@ -47,7 +50,7 @@ class DyDxIterator(TrackingIterator):
         self.allow_frame_subsampling_direct_neigh=allow_frame_subsampling_direct_neigh
         self.output_float16=output_float16
         self.return_center=return_center
-        self.center_mode=center_mode
+        self.center_mode=center_mode.upper()
         self.return_label_rank=return_label_rank
         assert frame_window>=1, "frame_window must be >=1"
         self.frame_window = frame_window
