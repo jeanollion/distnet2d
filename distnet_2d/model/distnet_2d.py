@@ -15,8 +15,8 @@ class DiSTNetModel(tf.keras.Model):
                  center_loss_weight:float=1,
                  displacement_loss_weight:float=1,
                  category_loss_weight:float=1,
-                 edm_loss=PseudoHuber(1), edm_derivatives:bool=False,
-                 gcdm_loss=PseudoHuber(1), gcdm_derivatives:bool=False,
+                 edm_loss=PseudoHuber(1), edm_derivative_loss:bool=False,
+                 gcdm_loss=PseudoHuber(1), gcdm_derivative_loss:bool=False,
                  displacement_loss=PseudoHuber(1),
                  category_weights=None,  # array of weights: [normal, division, no previous cell] or None = auto
                  category_class_frequency_range=[1/50, 50],
@@ -38,9 +38,9 @@ class DiSTNetModel(tf.keras.Model):
         self.predict_next_displacement=predict_next_displacement
         self.frame_window = frame_window
         self.edm_loss = edm_loss
-        self.edm_derivatives = edm_derivatives
+        self.edm_derivative_loss = edm_derivative_loss
         self.gcdm_loss = gcdm_loss
-        self.gcdm_derivatives = gcdm_derivatives
+        self.gcdm_derivative_loss = gcdm_derivative_loss
         self.displacement_loss = displacement_loss
         self.predict_gcdm_derivatives = predict_gcdm_derivatives
         self.predict_edm_derivatives = predict_edm_derivatives
@@ -94,23 +94,25 @@ class DiSTNetModel(tf.keras.Model):
                 gcdm, gcdm_dy, gcdm_dx = tf.split(y_pred[1], num_or_size_splits=3, axis=-1)
             else:
                 gcdm, gcdm_dy, gcdm_dx = y_pred[1], None, None
-
+            if self.predict_edm_derivatives or self.edm_derivative_loss:
+                true_edm, true_edm_dy, true_edm_dx = tf.split(y[0], num_or_size_splits=3, axis=-1)
+            else:
+                true_edm, true_edm_dy, true_edm_dx = y[0], None, None
             # compute loss
             losses = dict()
             loss_weights = dict()
 
-            cell_mask = tf.math.greater(y[0], 0.5)
-            cell_mask_interior = tf.math.greater(y[0], 1.5) if self.gcdm_derivatives or self.predict_gcdm_derivatives else None
+            cell_mask = tf.math.greater(true_edm, 0.5)
+            cell_mask_interior = tf.math.greater(true_edm, 1.5) if self.gcdm_derivative_loss or self.predict_gcdm_derivatives else None
             # edm
             if edm_weight>0:
-                #edm_loss = self.edm_loss(y[0], edm)
-                edm_loss = compute_loss_derivatives(y[0], edm, self.edm_loss, pred_dy=edm_dy, pred_dx=edm_dx, derivative_loss=self.edm_derivatives, laplacian_loss=self.edm_derivatives)
+                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dy=edm_dy, pred_dx=edm_dx, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss)
                 losses["edm"] = edm_loss
                 loss_weights["edm"] = edm_weight
 
             # center
             if center_weight>0:
-                center_loss = compute_loss_derivatives(y[1], gcdm, self.gcdm_loss, pred_dy=gcdm_dy, pred_dx=gcdm_dx, mask=cell_mask, mask_interior=cell_mask_interior, derivative_loss=self.gcdm_derivatives)
+                center_loss = compute_loss_derivatives(y[1], gcdm, self.gcdm_loss, pred_dy=gcdm_dy, pred_dx=gcdm_dx, mask=cell_mask, mask_interior=cell_mask_interior, derivative_loss=self.gcdm_derivative_loss)
                 losses["center"] = center_loss
                 loss_weights["center"] = center_weight
 
