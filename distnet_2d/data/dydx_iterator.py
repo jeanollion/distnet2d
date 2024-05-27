@@ -563,7 +563,7 @@ def _draw_centers(centerIm, labels_map_centers, labelIm, object_slices, geometri
             if sl is not None:
                 center = labels_map_centers.get(i+1)
                 if not (isnan(center[0]) or isnan(center[1])):
-                    sl = tuple( [slice(max(0, s.start - 2), min(s.stop + 2, ax - 1), s.step) for s, ax in zip(sl, shape)])
+                    sl = tuple( [slice(max(0, s.start - 2), min(s.stop + 2, ax), s.step) for s, ax in zip(sl, shape)])
                     mask = labelIm_dil[sl] == i + 1
                     m = np.ones_like(mask)
                     #print(f"label: {i+1} slice: {sl}, center: {center}, sub_m {sub_m.shape}, coord: {(int(round(center[0]))-sl[0].start, int(round(center[1]))-sl[1].start)}", flush=True)
@@ -590,7 +590,7 @@ def edt_smooth(labelIm, object_slices):
     w=np.ones(shape=(3, 3), dtype=np.int8)
     for (i, sl) in enumerate(object_slices):
         if sl is not None:
-            sl = tuple([slice(max(s.start*2 - 1, 0), min(s.stop*2 + 1, ax*2 - 1), s.step) for s, ax in zip(sl, shape)])
+            sl = tuple([slice(max(s.start*2 - 1, 0), min(s.stop*2 + 1, ax*2), s.step) for s, ax in zip(sl, shape)])
             sub_labelIm = upsampled[sl]
             mask = sub_labelIm == i + 1
             new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > 4 # smooth borders
@@ -602,11 +602,12 @@ def edt_smooth(labelIm, object_slices):
     edm[edm <= 0.5] = 0
     return edm
 
+
 def derivatives_labelwise(image, bck_value, der_y, der_x, labelIm, object_slices):
     shape = labelIm.shape
     for (i, sl) in enumerate(object_slices):
         if sl is not None:
-            sl = tuple([slice(max(s.start - 1, 0), min(s.stop + 1, ax - 1), s.step) for s, ax in zip(sl, shape)])
+            sl = tuple([slice(max(s.start - 1, 0), min(s.stop + 1, ax), s.step) for s, ax in zip(sl, shape)])
             mask = labelIm[sl] == i + 1
             sub_im = np.copy(image[sl])
             sub_im[np.logical_not(mask)] = bck_value # erase neighboring cells

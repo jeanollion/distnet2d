@@ -28,18 +28,12 @@ def der_2d(image, axis:int):
     else:
         tf.assert_equal(tf.rank(image), 4, message=f'image_gradients expects a 4D tensor  [B, Y, X, C], not {tf.shape(image)}.')
     assert axis in [1, 2], "axis must be in [1, 2]"
-    image_shape = tf.shape(image)
-    B, Y, X, C = tf.unstack(image_shape)
     if axis == 1:
-        dy = tf.math.divide(image[:, 2:, :, :] - image[:, :-2, :, :], tf.cast(2, image.dtype))
-        zeros = tf.zeros(tf.stack([B, 1, X, C]), image.dtype)
-        dy = tf.concat([zeros, dy, zeros], 1)
-        return tf.reshape(dy, image_shape)
+        image = tf.pad(image, tf.constant([[0, 0], [1, 1,], [0, 0], [0, 0]]), mode="SYMMETRIC")
+        return tf.math.divide(image[:, 2:, :, :] - image[:, :-2, :, :], tf.cast(2, image.dtype))
     else:
-        dx = tf.math.divide(image[:, :, 2:, :] - image[:, :, :-2, :], tf.cast(2, image.dtype))
-        zeros = tf.zeros(tf.stack([B, Y, 1, C]), image.dtype)
-        dx = tf.concat([zeros, dx, zeros], 2)
-        return tf.reshape(dx, image_shape)
+        image = tf.pad(image, tf.constant([[0, 0], [0, 0,], [1, 1], [0, 0]]), mode="SYMMETRIC")
+        return tf.math.divide(image[:, :, 2:, :] - image[:, :, :-2, :], tf.cast(2, image.dtype))
 
 
 def gradient_magnitude_2d(image=None, dy=None, dx=None, sqrt:bool=True):

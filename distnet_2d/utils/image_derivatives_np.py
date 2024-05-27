@@ -22,17 +22,12 @@ def der_2d(image, *axis:int):
         axis = axis[0]
     assert image.ndim == 2, f'image_gradients expects a 2D tensor  [Y, X], not {image.shape}'
     assert axis in [0, 1], "axis must be in [0, 1]"
-    Y, X = image.shape
     if axis == 0:
-        dy = np.divide(image[2:] - image[:-2], 2)
-        zeros = np.zeros(np.stack([1, X]), image.dtype)
-        dy = np.concatenate([zeros, dy, zeros], axis)
-        return np.reshape(dy, image.shape)
+        image = np.pad(image, ((1, 1), (0, 0)), mode="edge")
+        return np.divide(image[2:] - image[:-2], 2)
     else:
-        dx = np.divide(image[:, 2:] - image[:, :-2], 2)
-        zeros = np.zeros(np.stack([Y, 1]), image.dtype)
-        dx = np.concatenate([zeros, dx, zeros], axis)
-        return np.reshape(dx, image.shape)
+        image = np.pad(image, ((0, 0), (1, 1)), mode="edge")
+        return np.divide(image[:, 2:] - image[:, :-2], 2)
 
 
 def gradient_magnitude_2d(image=None, dy=None, dx=None, sqrt:bool=True):
