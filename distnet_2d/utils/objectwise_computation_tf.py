@@ -184,10 +184,10 @@ def IoU(true, pred, tolerance:bool=False):
     return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))
 
 
-def _dilate_mask(maskYX):
-    maskYX = tf.cast(maskYX, tf.float16)
+def _dilate_mask(maskBYX):
+    maskBYX = tf.cast(maskBYX, tf.float16)
     mean_kernel = [[1./9, 1./9, 1./9], [1./9, 1./9, 1./9], [1./9, 1./9, 1./9]]
-    conv = _convolve(maskYX, tf.cast(mean_kernel, tf.float16))
+    conv = _convolve(maskBYX, tf.cast(mean_kernel, tf.float16))
     return tf.math.greater(conv, tf.cast(0., tf.float16))
 
 
@@ -196,14 +196,14 @@ def _contour_IoU_fun(pred_contour, mask, size):
     return IoU(true_contours, pred_contour)
 
 
-def _compute_contours(maskYX):
+def _compute_contours(maskBYX):
     kernel = [[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]]
-    conv = _convolve(maskYX, kernel)
+    conv = _convolve(maskBYX, kernel)
     return tf.math.greater(conv, 0) # detect at least one zero in the neighborhood
 
 
-def _convolve(imageYX, kernel):
-    padded = tf.pad(imageYX, [[0, 0], [1, 1], [1, 1]], 'SYMMETRIC')
+def _convolve(imageBYX, kernel):
+    padded = tf.pad(imageBYX, [[0, 0], [1, 1], [1, 1]], 'SYMMETRIC')
     input = padded[..., tf.newaxis]
     conv = tf.nn.conv2d(input, kernel[:, :, tf.newaxis, tf.newaxis], strides=1, padding='VALID')
     return conv[..., 0]

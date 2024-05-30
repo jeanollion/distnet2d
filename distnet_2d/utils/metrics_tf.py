@@ -2,7 +2,7 @@ import tensorflow as tf
 from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun, get_argmax_2d_by_object_fun, get_mean_by_object_fun, get_label_size, IoU, objectwise_compute
 
 
-def get_metrics_fun(center_scale: float, max_objects_number: int = 0, reduce:bool=True):
+def get_metrics_fun(center_scale: float, max_objects_number: int = 0):
     """
     return metric function for disnet2D
     assumes iterator in return_central_only= True mode (thus framewindow = 1 and next = true)
@@ -23,6 +23,7 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0, reduce:boo
     mean_fun = get_mean_by_object_fun()
     max_fun = get_max_by_object_fun(nan=1., channel_axis=False)
     mean_fun_lm = get_mean_by_object_fun(nan=-1.)
+
 
     def fun(args):
         edm, gdcm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
@@ -87,12 +88,10 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0, reduce:boo
         # print(f"NEXT lm: {tf.stack([true_lm[1], lm[1]], -1).numpy()}")
         errors = tf.math.not_equal(lm, true_lm)
         lm_errors = tf.reduce_sum(tf.cast(errors, tf.float32))
-        return edm_IoU, -center_spa_l2, center_max_value, -dm_l2, -lm_errors
+        return tf.stack([edm_IoU, -center_spa_l2, center_max_value, -dm_l2, -lm_errors])
+
 
     def metrics_fun(edm, gcdm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
-        metrics = tf.map_fn(fun, (edm, gcdm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=(tf.float32, tf.float32, tf.float32, tf.float32, tf.float32))
-        if reduce:
-            metrics = [tf.reduce_max(m) for m in metrics]
-        return metrics
+        return tf.map_fn(fun, (edm, gcdm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
 
     return metrics_fun
