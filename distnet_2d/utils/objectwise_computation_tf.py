@@ -113,30 +113,42 @@ def get_max_by_object_fun(nan=float('NaN'), channel_axis:bool=True):
         return fun
 
 
-def objectwise_compute(data, channels, fun, labels, ids, sizes, label_channels=None): # [(tensor, range, fun)], (T, Y, X (,C) ), (T, N), (T, N)
-    if label_channels is None:
-        label_channels = channels
-    else:
-        assert len(label_channels) == len(channels), "label_channels and channels must have same length"
+def objectwise_compute(data, fun, labels, ids, sizes): # tensor (Y, X, ...) , fun, (Y, X), (N), ( N) -> (N, ...)
 
-    def treat_im(args):
-        dc, lc = args
-        return _objectwise_compute_channel(data[dc], fun, labels[lc], ids[lc], sizes[lc])
-    return tf.map_fn(treat_im, (tf.convert_to_tensor(channels), tf.convert_to_tensor(label_channels)), fn_output_signature=data.dtype, parallel_iterations=len(channels))
-
-
-def _objectwise_compute_channel(data, fun, labels, ids, sizes): # tensor, fun, (Y, X), (N), ( N)
     def non_null():
         ta = tf.TensorArray(dtype=data.dtype, size=tf.shape(ids)[0])
         for i in tf.range(tf.shape(ids)[0]):
             mask = tf.cast(tf.math.equal(labels, ids[i]), tf.float32)
-            ta.write(i, fun(data, mask, sizes[i]))
+            ta = ta.write(i, fun(data, mask, sizes[i]))
         return ta.stack()
 
     def null():
         return fun(data, tf.zeros_like(labels, dtype=tf.float32), 0)
     return tf.cond(tf.math.equal(tf.size(ids), 0), null, non_null)
 
+
+def objectwise_compute_channel(data, fun, labels, ids, sizes): # tensor (C, Y, X, ...) , fun, (Y, X), (N), ( N) -> (C, N, ...)
+
+    def non_null():
+        n_chan = tf.shape(data)[0]
+        n_obj = tf.shape(ids)[0]
+        ta = tf.TensorArray(dtype=data.dtype, size=n_obj * n_chan)
+        for i in tf.range(n_obj):
+            mask = tf.cast(tf.math.equal(labels, ids[i]), tf.float32)
+            for j in tf.range(n_chan):
+                ta = ta.write(j * n_obj + i, fun(data[j], mask, sizes[i]))
+        tensor = ta.stack()
+        return tf.reshape(tensor, shape=tf.concat([[n_chan, n_obj], tf.shape(tensor)[1:]], 0))
+
+    def null():
+        n_chan = tf.shape(data)[0]
+        ta = tf.TensorArray(dtype=data.dtype, size=n_chan)
+        mask = tf.zeros_like(labels, dtype=tf.float32)
+        for j in tf.range(n_chan):
+            ta = ta.write(j, fun(data[j], mask, 0))
+        tensor = ta.stack()
+        return tf.reshape(tensor, shape=tf.concat([[n_chan, 1], tf.shape(tensor)[1:]], 0))
+    return tf.cond(tf.math.equal(tf.size(ids), 0), null, non_null)
 
 
 def coord_distance_fun(max:bool=True, sqrt:bool=False):

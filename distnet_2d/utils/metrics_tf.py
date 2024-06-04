@@ -1,5 +1,5 @@
 import tensorflow as tf
-from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun, get_argmax_2d_by_object_fun, get_mean_by_object_fun, get_label_size, IoU, objectwise_compute
+from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun, get_argmax_2d_by_object_fun, get_mean_by_object_fun, get_label_size, IoU, objectwise_compute, objectwise_compute_channel
 
 
 def get_metrics_fun(center_scale: float, max_objects_number: int = 0):
@@ -22,8 +22,8 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0):
     spa_max_fun = get_argmax_2d_by_object_fun()
     mean_fun = get_mean_by_object_fun()
     max_fun = get_max_by_object_fun(nan=1., channel_axis=False)
-    mean_fun_lm = get_mean_by_object_fun(nan=-1.)
-
+    mean_fun_true_lm = get_mean_by_object_fun(nan=1., channel_axis=False)
+    mean_fun_lm = get_mean_by_object_fun(nan=0.)
 
     def fun(args):
         edm, gdcm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
@@ -36,6 +36,8 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0):
         lm = tf.transpose(lm, perm=[2, 0, 1, 3])  # T, Y, X, 3
         true_lm = tf.transpose(true_lm, perm=[2, 0, 1])
         ids, sizes, N = get_label_size(labels, max_objects_number)  # (1, N), (1, N)
+        ids = ids[0]
+        sizes = sizes[0]
         true_center_ob = true_center_ob[:, :N]
 
         center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, scale)))
@@ -55,25 +57,26 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0):
         #contour_IoU = IoU(true_contours, pred_contours, tolerance=True)
         #edm_IoU = 0.5 * (edm_IoU + contour_IoU)
 
+        labels = labels[0]
         # CENTER  compute center coordinates per objects: spatial softmax of predicted gaussian function of GDCM
-        center_coord = objectwise_compute(center_values, [0], spa_max_fun, labels, ids, sizes)  # (N, 2)
+        center_coord = objectwise_compute(center_values[0], spa_max_fun, labels, ids, sizes)  # (N, 2)
         center_spa_l2 = coord_distance_function(true_center_ob, center_coord)
         center_spa_l2 = tf.cond(tf.math.is_nan(center_spa_l2), lambda: zero, lambda: center_spa_l2)
 
         # CENTER 2 : absolute value of center. Target is 1, min value is 0.
-        center_max_value = objectwise_compute(center_values, [0], max_fun, labels, ids, sizes)
+        center_max_value = objectwise_compute(center_values[0], max_fun, labels, ids, sizes)
         center_max_value = tf.reduce_min(center_max_value)  # worst case among all cells = further away from 1 = min
         # center_max_value = tf.cond(tf.math.is_nan(center_max_value), lambda: zero, lambda: center_max_value)
 
         # DISPLACEMENT
-        dm = objectwise_compute(dYX, [0, 1], mean_fun, labels, ids, sizes, label_channels=[0, 0])
-        true_dm = objectwise_compute(true_dYX, [0, 1], mean_fun, labels, ids, sizes, label_channels=[0, 0])
+        dm = objectwise_compute_channel(dYX, mean_fun, labels, ids, sizes)
+        true_dm = objectwise_compute_channel(true_dYX, mean_fun, labels, ids, sizes)
         dm_l2 = coord_distance_function(true_dm, dm)
         dm_l2 = tf.cond(tf.math.is_nan(dm_l2), lambda: zero, lambda: dm_l2)
 
         # Link Multiplicity
-        true_lm = tf.cast(objectwise_compute(true_lm[..., tf.newaxis], [0, 1], mean_fun_lm, labels, ids, sizes, label_channels=[0, 0]), tf.int32)[..., 0] - tf.cast(1, tf.int32)
-        lm = objectwise_compute(lm, [0, 1], mean_fun_lm, labels, ids, sizes, label_channels=[0, 0])
+        true_lm = tf.cast(objectwise_compute_channel(true_lm, mean_fun_true_lm, labels, ids, sizes), tf.int32) - tf.cast(1, tf.int32)
+        lm = objectwise_compute_channel(lm, mean_fun_lm, labels, ids, sizes)
         lm = tf.math.argmax(lm, axis=-1, output_type=tf.int32)
         errors = tf.math.not_equal(lm, true_lm)
         lm_errors = tf.reduce_sum(tf.cast(errors, tf.float32))

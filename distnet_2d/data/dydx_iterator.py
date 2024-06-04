@@ -494,8 +494,6 @@ def _get_category(n_neigh):
 def _compute_displacement(labels_map_centers, labelIm, labels_map_prev, object_slices, dyIm, dxIm, dyImNext=None, dxImNext=None, gdcmIm=None, gdcmImPrev=None, linkMultiplicityIm=None, linkMultiplicityImNext=None, rankIm=None, rankImPrev=None, prevLabelArr=None, nextLabelArr=None, centerArr=None, centerArrPrev=None, center_mode:str= "MEDOID"):
     assert labelIm.shape[-1] == 2, f"invalid labelIm : {labelIm.shape[-1]} channels instead of 2"
     assert (dxImNext is None) == (dyImNext is None)
-    if len(labels_map_centers[-1])==0: # no cells
-        return
     curLabelIm = labelIm[...,-1]
     labels_prev = labels_map_centers[0].keys()
     labels_prev_rank = {l:r for r, l in enumerate(labels_prev)}
