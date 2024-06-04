@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 
+
 def get_label_size(labels, max_objects_number:int=0): # C, Y, X
     N = max_objects_number if max_objects_number>0 else tf.math.maximum(tf.cast(1, labels.dtype), tf.math.reduce_max(labels))
 
@@ -64,6 +65,7 @@ def get_soft_argmax_2d_by_object_fun(Y, X, beta=1e2):
         return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null) # when no values should return nan
     return sam
 
+
 def get_argmax_2d_by_object_fun(nan=float('NaN')):
     nan = tf.cast(nan, tf.float32)
     def fun(data, mask, size): # (Y, X)
@@ -75,6 +77,7 @@ def get_argmax_2d_by_object_fun(nan=float('NaN')):
             return tf.cast(tf.unravel_index(idx_max, dims=shape), tf.float32)
         return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null) # when no values should return nan
     return fun
+
 
 def get_mean_by_object_fun(nan=float('NaN'), channel_axis:bool=True):
     nan = tf.cast(nan, tf.float32)
@@ -119,15 +122,21 @@ def objectwise_compute(data, channels, fun, labels, ids, sizes, label_channels=N
     def treat_im(args):
         dc, lc = args
         return _objectwise_compute_channel(data[dc], fun, labels[lc], ids[lc], sizes[lc])
-    return tf.map_fn(treat_im, (tf.convert_to_tensor(channels), tf.convert_to_tensor(label_channels)), fn_output_signature=data.dtype)
+    return tf.map_fn(treat_im, (tf.convert_to_tensor(channels), tf.convert_to_tensor(label_channels)), fn_output_signature=data.dtype, parallel_iterations=len(channels))
 
 
 def _objectwise_compute_channel(data, fun, labels, ids, sizes): # tensor, fun, (Y, X), (N), ( N)
-    def treat_ob(args):
-        id, size = args
-        mask = tf.cond(tf.math.equal(id, 0), lambda:tf.zeros_like(labels, dtype=tf.float32), lambda:tf.cast(tf.math.equal(labels, id), tf.float32))
-        return fun(data, mask, size)
-    return tf.map_fn(treat_ob, (ids, sizes), fn_output_signature=data.dtype)
+    def non_null():
+        ta = tf.TensorArray(dtype=data.dtype, size=tf.shape(ids)[0])
+        for i in tf.range(tf.shape(ids)[0]):
+            mask = tf.cast(tf.math.equal(labels, ids[i]), tf.float32)
+            ta.write(i, fun(data, mask, sizes[i]))
+        return ta.stack()
+
+    def null():
+        return fun(data, tf.zeros_like(labels, dtype=tf.float32), 0)
+    return tf.cond(tf.math.equal(tf.size(ids), 0), null, non_null)
+
 
 
 def coord_distance_fun(max:bool=True, sqrt:bool=False):
@@ -181,7 +190,7 @@ def IoU(true, pred, tolerance:bool=False):
     true_inter = _dilate_mask(true) if tolerance else true
     intersection = tf.math.count_nonzero(tf.math.logical_and(true_inter, pred), keepdims=False)
     union = tf.math.count_nonzero(tf.math.logical_or(true, pred), keepdims=False)
-    return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))
+    return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))  # if union is null -> metric is 1
 
 
 def _dilate_mask(maskBYX):

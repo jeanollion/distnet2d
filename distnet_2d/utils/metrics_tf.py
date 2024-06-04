@@ -38,45 +38,36 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0):
         ids, sizes, N = get_label_size(labels, max_objects_number)  # (1, N), (1, N)
         true_center_ob = true_center_ob[:, :N]
 
-        # EDM : foreground/background IoU + contour IoU
+        center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, scale)))
+        dYX = tf.stack([dY, dX], -1)  # Y, X, T, 2
+        dYX = tf.transpose(dYX, perm=[2, 0, 1, 3])  # T, Y, X, 2
+        true_dYX = tf.stack([true_dY, true_dX], -1)  # Y, X, T, 2
+        true_dYX = tf.transpose(true_dYX, perm=[2, 0, 1, 3])  # T, Y, X, 2
         zero = tf.cast(0, edm.dtype)
-        one = tf.cast(1, edm.dtype)
-        pred_foreground = tf.math.greater(edm, zero)
-        true_foreground = tf.math.greater(labels, 0)
+
+        # EDM : foreground/background IoU #+ contour IoU
+        pred_foreground = tf.math.greater(edm, tf.cast(0.5, edm.dtype))
+        true_foreground = tf.math.greater(labels, tf.cast(0, labels.dtype))
         edm_IoU = IoU(true_foreground, pred_foreground, tolerance=True)
 
-        pred_contours = tf.math.logical_and(tf.math.greater(edm, zero), tf.math.less_equal(edm, tf.cast(1.5, edm.dtype)))
-        true_contours = tf.math.logical_and(tf.math.greater(true_edm, zero), tf.math.less_equal(true_edm, one))
-        contour_IoU = IoU(true_contours, pred_contours, tolerance=True)
-        edm_IoU = 0.5 * (edm_IoU + contour_IoU)
-
-        # mask = tf.where(labels > 0, one, zero)
-        # edm_L2 = tf.math.divide_no_nan(tf.math.reduce_sum(mask * (edm - true_edm) ** 2), tf.cast(tf.reduce_sum(sizes), edm.dtype))
+        #pred_contours = tf.math.logical_and(tf.math.greater(edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(edm, tf.cast(1.5, edm.dtype)))
+        #true_contours = tf.math.logical_and(tf.math.greater(true_edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(true_edm, tf.cast(1.5, edm.dtype)))
+        #contour_IoU = IoU(true_contours, pred_contours, tolerance=True)
+        #edm_IoU = 0.5 * (edm_IoU + contour_IoU)
 
         # CENTER  compute center coordinates per objects: spatial softmax of predicted gaussian function of GDCM
-        center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, scale)))
         center_coord = objectwise_compute(center_values, [0], spa_max_fun, labels, ids, sizes)  # (N, 2)
-        #print(f"center loc: {tf.concat([true_center_ob[0], center_coord[0]], -1).numpy()}")
         center_spa_l2 = coord_distance_function(true_center_ob, center_coord)
         center_spa_l2 = tf.cond(tf.math.is_nan(center_spa_l2), lambda: zero, lambda: center_spa_l2)
 
         # CENTER 2 : absolute value of center. Target is 1, min value is 0.
         center_max_value = objectwise_compute(center_values, [0], max_fun, labels, ids, sizes)
-        center_max_value = tf.reduce_min(center_max_value) # worst case among all cells
-        #center_max_value = tf.cond(tf.math.is_nan(center_max_value), lambda: zero, lambda: center_max_value)
-        #print(f"center val: {center_max_value.numpy()}")
+        center_max_value = tf.reduce_min(center_max_value)  # worst case among all cells = further away from 1 = min
+        # center_max_value = tf.cond(tf.math.is_nan(center_max_value), lambda: zero, lambda: center_max_value)
 
-        # motion: l2 of pred vs true center coordinates
-        dYX = tf.stack([dY, dX], -1)  # Y, X, T, 2
-        dYX = tf.transpose(dYX, perm=[2, 0, 1, 3])  # T, Y, X, 2
-        # print(f"dXY shape: {dYX.shape} dY: {dY.shape}")
+        # DISPLACEMENT
         dm = objectwise_compute(dYX, [0, 1], mean_fun, labels, ids, sizes, label_channels=[0, 0])
-
-        true_dYX = tf.stack([true_dY, true_dX], -1)  # Y, X, T, 2
-        true_dYX = tf.transpose(true_dYX, perm=[2, 0, 1, 3])  # T, Y, X, 2
         true_dm = objectwise_compute(true_dYX, [0, 1], mean_fun, labels, ids, sizes, label_channels=[0, 0])
-        #print(f"dM: {tf.concat([true_dm[0], dm[0]], -1).numpy()}")
-        # print(f"NEXT: dM: {tf.concat([true_dm[1], dm[1]], -1).numpy()}")
         dm_l2 = coord_distance_function(true_dm, dm)
         dm_l2 = tf.cond(tf.math.is_nan(dm_l2), lambda: zero, lambda: dm_l2)
 
@@ -84,8 +75,6 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0):
         true_lm = tf.cast(objectwise_compute(true_lm[..., tf.newaxis], [0, 1], mean_fun_lm, labels, ids, sizes, label_channels=[0, 0]), tf.int32)[..., 0] - tf.cast(1, tf.int32)
         lm = objectwise_compute(lm, [0, 1], mean_fun_lm, labels, ids, sizes, label_channels=[0, 0])
         lm = tf.math.argmax(lm, axis=-1, output_type=tf.int32)
-        #print(f"lm: {tf.stack([true_lm[0], lm[0]], -1).numpy()}")
-        # print(f"NEXT lm: {tf.stack([true_lm[1], lm[1]], -1).numpy()}")
         errors = tf.math.not_equal(lm, true_lm)
         lm_errors = tf.reduce_sum(tf.cast(errors, tf.float32))
         return tf.stack([edm_IoU, -center_spa_l2, center_max_value, -dm_l2, -lm_errors])
