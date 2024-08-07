@@ -234,7 +234,7 @@ def get_distnet_2d(input_shape,
             name: str="DiSTNet2D",
             **kwargs):
 
-    return get_distnet_2d_model(input_shape, upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=False, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
+    return get_distnet_2d_model(input_shape, upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=True, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_model(input_shape,  # Y, X
                          encoder_settings:list,
@@ -247,7 +247,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
                          combine_kernel_size:int = 1,
                          pair_combine_kernel_size:int = 1,
                          blending_filter_factor:float = 0.5,
-                         skip_stop_gradient:bool = False,
+                         skip_stop_gradient:bool = True,
                          skip_connections = [-1],  # bool or list. -1 = feature level
                          skip_combine_mode:str="conv",  #conv, wsconv
                          attention : int = 0,
@@ -402,8 +402,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
         feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_chan, inference_conv_idx=frame_window, filters = feature_filters, name = f"SegmentationFeatures")(combined_features) # (N_CHAN x B, Y, X, F)
         feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
 
-        # skip connections
-        if len(encoder_settings) in skip_connections:
+        if len(encoder_settings) in skip_connections: # skip connection at feature level
             feature_skip = SelectFeature(inference_conv_idx=frame_window, name = "SelectFeature")([feature, all_features])
             feature_pair_skip = SelectFeature(inference_conv_idx=frame_window-1, name = "SelectFeaturePair")([feature_pair, all_feature_pairs])
             feature_per_frame = feature_skip_op([feature_skip, feature_per_frame])

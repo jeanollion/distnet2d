@@ -143,7 +143,7 @@ class BlendD4:
         self.upsampling_mode ="tconv"
         ker2, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2 ** 2)
         ker3, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2 ** 3)
-        ker3, dil3 = get_kernels_and_dilation(5, 2, spatial_dimensions, 2 ** 3)
+        ker3_2, dil3_2 = get_kernels_and_dilation(5, 2, spatial_dimensions, 2 ** 3)
         ker4, dil4 = get_kernels_and_dilation(5, 2, spatial_dimensions, 2 ** 4)
         ker4_2, dil4_2 = get_kernels_and_dilation(5, 3, spatial_dimensions, 2 ** 4)
         ker4_3, dil4_3 = get_kernels_and_dilation(5, 4, spatial_dimensions, 2 ** 4)
@@ -162,7 +162,7 @@ class BlendD4:
             ],
             [
                 {"filters":64, "op":"res2d", "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
-                {"filters":64, "op":"res2d", "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
+                {"filters":64, "op":"res2d", "kernel_size":ker3_2, "dilation":dil3_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
                 {"filters":filters, "kernel_size":ker3, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
             ]
         ]
