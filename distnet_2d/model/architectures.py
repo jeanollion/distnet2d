@@ -2,15 +2,25 @@ import math
 import copy
 
 from ..utils.helpers import ensure_multiplicity
+
 def get_architecture(architecture_type:str, **kwargs):
     kwargs = copy.deepcopy(kwargs)
     if architecture_type.lower()=="blend":
-        arch = BlendD2 if kwargs.pop("n_downsampling", 2) == 2 else BlendD3
+        n_downsampling = kwargs.pop("n_downsampling", 2)
+        if n_downsampling == 2:
+            arch = BlendD2
+        elif n_downsampling == 3:
+            arch = BlendD3
+        elif n_downsampling == 4:
+            arch = BlendD4
+        else:
+            raise ValueError(f"Unsupported downsampling number: {n_downsampling}: must be in [2, 3, 4]")
         return arch(**kwargs)
     else:
         raise ValueError(f"Unknown architecture type: {architecture_type}")
 
-class BlendD2():
+
+class BlendD2:
     def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
         prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
         self.name = f"{prefix}blendD2-{filters}"
@@ -61,7 +71,8 @@ class BlendD2():
             {"filters":32, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
         ]
 
-class BlendD3():
+
+class BlendD3:
     def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
         prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
@@ -116,6 +127,71 @@ class BlendD3():
             {"filters":64, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
         ]
 
+
+class BlendD4:
+    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
+        prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
+        self.name = f"{prefix}blendD3-{filters}"
+        self.skip_connections=skip_connections
+        self.attention = attention
+        self.self_attention=self_attention
+        self.dropout=dropout
+        self.combine_kernel_size = combine_kernel_size
+        self.pair_combine_kernel_size = pair_combine_kernel_size
+        self.blending_filter_factor = blending_filter_factor
+        self.downsampling_mode="maxpool_and_stride"
+        self.upsampling_mode ="tconv"
+        ker2, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2 ** 2)
+        ker3, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2 ** 3)
+        ker3, dil3 = get_kernels_and_dilation(5, 2, spatial_dimensions, 2 ** 3)
+        ker4, dil4 = get_kernels_and_dilation(5, 2, spatial_dimensions, 2 ** 4)
+        ker4_2, dil4_2 = get_kernels_and_dilation(5, 3, spatial_dimensions, 2 ** 4)
+        ker4_3, dil4_3 = get_kernels_and_dilation(5, 4, spatial_dimensions, 2 ** 4)
+        self.encoder_settings = [
+            [
+                {"filters":16, "downscale":2, "dropout_rate":0}
+            ],
+            [
+                {"filters":16, "dropout_rate":0},
+                {"filters":32, "downscale":2, "dropout_rate":0}
+            ],
+            [
+                {"filters":32, "op":"res2d", "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
+                {"filters":32, "op":"res2d", "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
+                {"filters":64, "kernel_size":ker2, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
+            ],
+            [
+                {"filters":64, "op":"res2d", "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
+                {"filters":64, "op":"res2d", "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
+                {"filters":filters, "kernel_size":ker3, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
+            ]
+        ]
+        self.feature_settings = [
+            {"op":"res2d", "dilation":dil4, "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":dil4 if self_attention>0 else dil4_2, "kernel_size":ker4 if self_attention>0 else ker4_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":filters, "op":"selfattention" if self_attention>0 else "res2d", "kernel_size":ker4 if self_attention>0 else ker4_3, "dilation":dil4 if self_attention>0 else dil4_3, "dropout_rate":dropout },
+            {"op":"res2d", "dilation":dil4, "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":dil4 if self_attention>0 else dil4_2, "kernel_size":ker4 if self_attention>0 else ker4_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
+        ]
+        self.feature_blending_settings = [
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False}
+        ]
+        self.feature_decoder_settings = [
+            {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
+        ]
+        self.decoder_settings = [
+            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
+            {"filters":16, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0},
+            {"filters":32, "op": "res2d", "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4, "weight_scaled_up": False, "weight_scaled": False, "batch_norm": False, "dropout_rate": 0},
+            {"filters":64, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
+        ]
+
+
 def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, downsampling):
     if spa_dimensions is None:
         return target_kernel, target_dilation
@@ -134,6 +210,7 @@ def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, dow
     kernel = kernel[0] if kernel[0] == kernel[1] else kernel
     dilation = dilation[0] if dilation[0] == dilation[1] else dilation
     return kernel, dilation
+
 
 def test_ker_dil(ker, dil, dim):
     if ker == 1 and dil == 1 or dim is None or dim <= 0:
