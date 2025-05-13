@@ -1,5 +1,6 @@
 import tensorflow as tf
-from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature
+from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient
 import numpy as np
 from .spatial_attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
@@ -60,7 +61,7 @@ class DiSTNetModel(tf.keras.Model):
         self.use_agc = use_agc
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
-        self.agc_exclude_keywords=["DecoderTrackY0/, DecoderTrackX0/", "DecoderCat0/", "DecoderCenterGCDM0/", "DecoderCenterGCDMdY0/", "DecoderCenterGCDMdX0/", "DecoderSegEDM0/", "DecoderSegEDMdY0/", "DecoderSegEDMdX0/"] if agc_exclude_output else None
+        self.agc_exclude_keywords=["DecoderTrackY0_", "DecoderTrackX0_", "DecoderCat0_", "DecoderCenterGCDM0_", "DecoderCenterGCDMdY0_", "DecoderCenterGCDMdX0_", "DecoderSegEDM0_", "DecoderSegEDMdY0_", "DecoderSegEDMdX0_"] if agc_exclude_output else None
         self.print_gradients=print_gradients
 
     def train_step(self, data):
@@ -141,7 +142,7 @@ class DiSTNetModel(tf.keras.Model):
             losses["loss"] = loss
 
         if self.print_gradients:
-            trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenterGCDM") or t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence/Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
+            trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenterGCDM") or t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence_Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
             for loss_name, loss_value in losses.items():
                 if loss_name != "loss" :
                     w = loss_weights[loss_name] # outside tape: cannot modify loss_value -> need to apply w to gradient itself
@@ -236,7 +237,7 @@ def get_distnet_2d(input_shape,
 
     return get_distnet_2d_model(input_shape, upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=True, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
 
-def get_distnet_2d_model(input_shape,  # Y, X
+def get_distnet_2d_model(input_shape,  # (Y, X) or (Y, X, C) (multichannel mode)
                          encoder_settings:list,
                          feature_settings: list,
                          feature_blending_settings: list,
@@ -265,15 +266,20 @@ def get_distnet_2d_model(input_shape,  # Y, X
                          ):
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
+        if input_shape is None:
+            input_shape = [None, None]
+        else:
+            input_shape = list(input_shape)
+            assert 3>=len(input_shape)>=2, "input shape must be either (Y, X), either (Y, X, C)"
         if attention>0 or self_attention>0:
-            spatial_dims = ensure_multiplicity(2, input_shape)
-            if isinstance(spatial_dims, tuple):
-                spatial_dims = list(spatial_dims)
+            spatial_dims = input_shape[:2]
+            assert spatial_dims[0] is not None and spatial_dims[0] > 0, "for attention mecanisme, spatial dim must be provided"
+            assert spatial_dims[1] is not None and spatial_dims[1] > 0, "for attention mecanisme, spatial dim must be provided"
         else:
             spatial_dims = [None, None]
         if frame_window<=1:
             long_term = False
-        n_chan = frame_window * (2 if next else 1) + 1
+        n_frames = frame_window * (2 if next else 1) + 1
         if skip_connections == False:
             skip_connections = []
         elif skip_connections == True:
@@ -294,7 +300,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
             no_residual_layer.append(residual_filters==0)
         # define feature operations
         feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", l2_reg=l2_reg, last_input_filters=out_filters)
-        combine_filters = int(feature_filters * n_chan  * blending_filter_factor)
+        combine_filters = int(feature_filters * n_frames  * blending_filter_factor)
         print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
         combine_features_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="CombineFeatures")
         if attention>0:
@@ -324,7 +330,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
         if predict_gcdm_derivatives:
             output_per_decoder["Center"].append("GCDMdY")
             output_per_decoder["Center"].append("GCDMdX")
-        n_frame_pairs = n_chan -1
+        n_frame_pairs = n_frames -1
         if long_term:
             n_frame_pairs = n_frame_pairs + (frame_window-1) * (2 if next else 1)
         decoder_is_segmentation = {"Seg": True, "Center": True, "Track": False, "Cat": False}
@@ -352,9 +358,9 @@ def get_distnet_2d_model(input_shape,  # Y, X
                 decoder_output_names[n][o_n] = f"Output{oi:02}_{o_n}"
                 oi += 1
         # Create GRAPH
-        input = tf.keras.layers.Input(shape=spatial_dims+[n_chan], name="Input")
+        input = tf.keras.layers.Input(shape=input_shape+[n_frames], name="Input")
         print(f"input dims: {input.shape}")
-        input_merged = ChannelToBatch(compensate_gradient = False, name = "MergeInputs")(input)
+        input_merged = ChannelToBatch(compensate_gradient = False, add_channel_axis=len(input_shape)==2, name = "MergeInputs")(input)
         downsampled = [input_merged]
         residuals = []
         for l in encoder_layers:
@@ -368,13 +374,13 @@ def get_distnet_2d_model(input_shape,  # Y, X
             feature = op(feature)
 
         # combine individual features
-        all_features = SplitBatch(n_chan, compensate_gradient = False, name = "SplitFeatures")(feature)
+        all_features = SplitBatch(n_frames, compensate_gradient = False, name = "SplitFeatures")(feature)
         combined_features = combine_features_op(all_features)
 
         # frame pairs
         feature_prev = []
         feature_next = []
-        for i in range(1, n_chan):
+        for i in range(1, n_frames):
             feature_prev.append(all_features[i-1])
             feature_next.append(all_features[i])
         if long_term:
@@ -382,7 +388,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
                 feature_prev.append(all_features[c])
                 feature_next.append(all_features[frame_window])
             if next:
-                for c in range(frame_window+2, n_chan):
+                for c in range(frame_window+2, n_frames):
                     feature_prev.append(all_features[frame_window])
                     feature_next.append(all_features[c])
         feature_prev = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
@@ -399,7 +405,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
         for op in feature_blending_convs:
             combined_features = op(combined_features)
 
-        feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_chan, inference_conv_idx=frame_window, filters = feature_filters, name = f"SegmentationFeatures")(combined_features) # (N_CHAN x B, Y, X, F)
+        feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_frames, inference_conv_idx=frame_window, filters = feature_filters, name = f"SegmentationFeatures")(combined_features) # (N_CHAN x B, Y, X, F)
         feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
 
         if len(encoder_settings) in skip_connections: # skip connection at feature level
@@ -426,7 +432,7 @@ def get_distnet_2d_model(input_shape,  # Y, X
                         if not is_segmentation and predict_next_displacement or decoder_name=="Seg" and predict_edm_derivatives or decoder_name== "Center" and predict_gcdm_derivatives:
                             layer_output_name += "_" # will be concatenated -> output name is used @ concat
                         up_out = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
-                        up_out = BatchToChannel(n_splits = n_chan if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up_out)
+                        up_out = BatchToChannel(n_splits = n_frames if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up_out)
                         output_per_dec[output_name] = up_out
                 if predict_next_displacement: # merge outputs ending by Next
                     for k in list(output_per_dec.keys()):
@@ -452,8 +458,8 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
     if maxpool:
         down_sequence = []
     if maxpool or maxpool_and_stride:
-        down_sequence = down_sequence+[tf.keras.layers.MaxPool2D(pool_size=total_contraction, name=f"{name}/Maxpool{total_contraction}x{total_contraction}")]
-        down_concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}/DownConcat", dtype="float32")
+        down_sequence = down_sequence+[tf.keras.layers.MaxPool2D(pool_size=total_contraction, name=f"{name}_Maxpool{total_contraction}x{total_contraction}")]
+        down_concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}_DownConcat", dtype="float32")
     def op(input):
         x = input
         if sequence is not None:
@@ -517,14 +523,14 @@ def decoder_op(
         if op == "res1d" or op=="resconv1d":
             raise NotImplementedError("ResConv1D are not implemented")
         elif op == "res2d" or op=="resconv2d":
-            convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, name=f"{name}/ResConv2D_{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
+            convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
         else:
             if weight_scaled:
-                convs = [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, name=f"{name}/Conv_{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
+                convs = [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
             elif batch_norm or dropout_rate>0:
-                convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}/Conv_{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
+                convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
             else:
-                convs = [tf.keras.layers.Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, name=f"{name}/Conv_{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
+                convs = [tf.keras.layers.Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
         f = tf.cast(factor, tf.float32)
         def op(input):
             down, res = input
@@ -560,23 +566,23 @@ def upsampling_op(
         if kernel_size<size_factor:
             kernel_size = size_factor
         if parent_name is not None and len(parent_name)>0:
-            name = f"{parent_name}/{name}"
+            name = f"{parent_name}_{name}"
         if mode=="tconv":
             if weight_scaled:
                 raise NotImplementedError("Weight scaled transpose conv is not implemented")
             elif batch_norm or dropout_rate>0:
-                upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}/tConv{ker_size_to_string(kernel_size)}")
+                upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}_tConv{ker_size_to_string(kernel_size)}")
             else:
                 kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None
-                upsample = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, kernel_regularizer=kernel_regularizer, name=f"{name}/tConv{ker_size_to_string(kernel_size)}")
+                upsample = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, kernel_regularizer=kernel_regularizer, name=f"{name}_tConv{ker_size_to_string(kernel_size)}")
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
-            upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{name}/Upsample{size_factor}x{size_factor}_{interpolation}")
+            upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{name}_Upsample{size_factor}x{size_factor}_{interpolation}")
             if batch_norm:
-                conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}/Conv{ker_size_to_string(kernel_size)}", activation=activation )
+                conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}", activation=activation )
             else:
-                conv = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides=1, padding='same', name=f"{name}/Conv{ker_size_to_string(kernel_size)}", use_bias=use_bias, activation=activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None )
+                conv = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides=1, padding='same', name=f"{name}_Conv{ker_size_to_string(kernel_size)}", use_bias=use_bias, activation=activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None )
         def op(input):
             x = upsample(input)
             if conv is not None:
@@ -586,8 +592,9 @@ def upsampling_op(
 
 def stop_gradient(input, parent_name:str, name:str="StopGradient"):
     if parent_name is not None and len(parent_name)>0:
-        name = f"{parent_name}/{name}"
-    return tf.stop_gradient( input, name=name )
+        name = f"{parent_name}_{name}"
+    sg = StopGradient(name=name)
+    return sg(input)
 
 def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stride:bool = False, l2_reg:float=0):
     if param_list is None or len(param_list)==0:
@@ -611,7 +618,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                 residual_filters =  param_list[i]["filters"]
             if "l2_reg" not in param_list[i]:
                 param_list[i]["l2_reg"] = l2_reg
-            sequence.append(parse_params(**param_list[i], name = f"{name}/Op{i}"))
+            sequence.append(parse_params(**param_list[i], name = f"{name}_Op{i}"))
             i+=1
     else:
         sequence=None
@@ -627,7 +634,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                 if residual_filters>0:
                     last_input_filters=residual_filters # input of downscaler is the residual
                 filters -= last_input_filters
-            down = [parse_params(**params, filters=filters, name=f"{name}/DownOp")]
+            down = [parse_params(**params, filters=filters, name=f"{name}_DownOp")]
             total_contraction *= param_list[i].get("downscale", 1)
         else:
             raise ValueError("Only one downscale operation allowed")
@@ -641,19 +648,19 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
     if op =="res1d" or op=="resconv1d":
         raise NotImplementedError("ResConv1D is not implmeneted")
     elif op =="res2d" or op == "resconv2d":
-        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, split_conv=split_conv, name=f"{name}/ResConv2D{ker_size_to_string(kernel_size)}")
+        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, split_conv=split_conv, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
-        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, positional_encoding="2D", dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}/SelfAttention")
-        self_attention_skip_op = Combine(filters=filters, l2_reg=l2_reg, name=f"{name}/SelfAttentionSkip")
+        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, positional_encoding="2D", dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
+        self_attention_skip_op = Combine(filters=filters, l2_reg=l2_reg, name=f"{name}_SelfAttentionSkip")
         def op(x):
             sa = self_attention_op([x, x])
             return self_attention_skip_op([x, sa])
         return op
     if weight_scaled: # no l2_reg
-        return WSConv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, activation=activation, dropout_rate=dropout_rate, padding='same', name=f"{name}/Conv{ker_size_to_string(kernel_size)}")
+        return WSConv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, activation=activation, dropout_rate=dropout_rate, padding='same', name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
     elif batch_norm or dropout_rate>0:
-        return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, l2_reg=l2_reg, name=f"{name}/Conv{ker_size_to_string(kernel_size)}")
+        return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
     else:
         kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None
-        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, name=f"{name}/Conv{ker_size_to_string(kernel_size)}")
+        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")

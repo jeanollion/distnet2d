@@ -71,17 +71,22 @@ class SelectFeature(tf.keras.layers.Layer):
             return input_concat
 
 class ChannelToBatch(tf.keras.layers.Layer):
-    def __init__(self, compensate_gradient:bool = False, name: str="ChannelToBatch"):
+    def __init__(self, compensate_gradient:bool = False, add_channel_axis:bool = True, name: str="ChannelToBatch"):
         self.compensate_gradient=compensate_gradient
+        self.add_channel_axis=add_channel_axis
         super().__init__(name=name)
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({"compensate_gradient": self.compensate_gradient})
+        config.update({"compensate_gradient": self.compensate_gradient, "add_channel_axis":self.add_channel_axis})
         return config
 
-    def build(self, input_shape):
-        self.rank = len(input_shape.as_list())
+    def build(self, input_shape): # B, Y, X, C
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        self.rank = len(input_shape)
         self.perm = [self.rank-1, 0] + [i for i in range(1, self.rank-1)]
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(float(input_shape[-1]))
@@ -92,7 +97,8 @@ class ChannelToBatch(tf.keras.layers.Layer):
         target_shape  = tf.concat([[-1], [shape[i] for i in range(1, self.rank-1)]], 0) if self.rank>2 else [-1]
         input = tf.transpose(input, perm=self.perm) # (C, B, Y, X)
         input = tf.reshape(input, target_shape) # (C x B, Y, X)
-        input = tf.expand_dims(input, -1) # (C x B, Y, X, 1)
+        if self.add_channel_axis:
+            input = tf.expand_dims(input, -1) # (C x B, Y, X, 1)
         if self.compensate_gradient:
             input = self.grad_fun(input)
         return input
@@ -109,7 +115,11 @@ class SplitBatch(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
-        self.rank = len(input_shape.as_list())
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        self.rank = len(input_shape)
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./self.n_splits)
         super().build(input_shape)
@@ -136,7 +146,10 @@ class BatchToChannel(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
-        input_shape = input_shape.as_list()
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
         self.rank = len(input_shape)
         self.perm = [1] + [i+1 for i in range(1, self.rank-1)] + [0, self.rank] # (B, [DIMS], N, F)
         if self.compensate_gradient:
@@ -293,7 +306,7 @@ class ResConv2D(tf.keras.layers.Layer):
             kernel_size=self.kernel_size,
             strides=1,
             padding='same',
-            name=f"{self.name}/1_{ker_size_to_string(self.kernel_size)}",
+            name=f"Conv1_{ker_size_to_string(self.kernel_size)}",
             activation="linear",
             #kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
@@ -303,7 +316,7 @@ class ResConv2D(tf.keras.layers.Layer):
             dilation_rate = self.dilation,
             strides=1,
             padding='same',
-            name=f"{self.name}/2_{ker_size_to_string(self.kernel_size)}",
+            name=f"Conv2_{ker_size_to_string(self.kernel_size)}",
             activation="linear",
             #kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
@@ -368,7 +381,7 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             dilation_rate = self.dilation,
             strides=self.strides,
             padding='same',
-            name=f"{self.name}/Conv",
+            name=f"Conv",
             activation="linear",
             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
@@ -421,14 +434,14 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             padding='same',
             activation="linear",
             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
-            name=f"{self.name}/tConv{ker_size_to_string(self.kernel_size)}",
+            name=f"tConv{ker_size_to_string(self.kernel_size)}",
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"{self.name}/Dropout")
+            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"Dropout")
         if self.batch_norm:
-            #self.bn = MockBatchNormalization(name = f"{self.name}/MockBatchNormalization")
-            self.bn = tf.keras.layers.BatchNormalization(name = f"{self.name}/BatchNormalization")
+            #self.bn = MockBatchNormalization(name = f"/MockBatchNormalization")
+            self.bn = tf.keras.layers.BatchNormalization(name = f"BatchNormalization")
         super().build(input_shape)
 
     def call(self, input, training=None):
@@ -469,7 +482,11 @@ class SplitConv2D(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
-        input_filters = input_shape.as_list()[-1]
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        input_filters = input_shape[-1]
         assert input_filters % 3==0, f"number of filters must be divisible by 3"
         self.filters = input_filters // 3
         conv_fun = lambda name: tf.keras.layers.Conv2D(
@@ -482,7 +499,7 @@ class SplitConv2D(tf.keras.layers.Layer):
             activation="linear",
             kernel_regularizer=self.kernel_regularizer
         )
-        self.convs = [conv_fun(f"{self.name}/Conv_{i}") for i in range(3)]
+        self.convs = [conv_fun(f"Conv{i}") for i in range(3)]
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)

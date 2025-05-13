@@ -16,7 +16,7 @@ from ..utils import image_derivatives_np as der
 import time
 
 CENTER_MODE = ["GEOMETRICAL", "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"]
-
+CHANNEL_KEYWORDS = ['/raw', '/regionLabels']
 
 class DyDxIterator(TrackingIterator):
     def __init__(self,
@@ -29,7 +29,7 @@ class DyDxIterator(TrackingIterator):
                  allow_frame_subsampling_direct_neigh:bool = False,
                  aug_remove_prob: float = 0.005,
                  return_link_multiplicity:bool = True,
-                 channel_keywords:list=['/raw', '/regionLabels'],  # channel @1 must be label
+                 channel_keywords:list=CHANNEL_KEYWORDS,  # channel @1 must be label
                  array_keywords:list=['/linksPrev'],
                  elasticdeform_parameters:dict = None,
                  downscale_displacement_and_link_multiplicity=1,
@@ -41,7 +41,7 @@ class DyDxIterator(TrackingIterator):
                  return_next_displacement:bool = True,
                  output_float16=False,
                  **kwargs):
-        assert len(channel_keywords)==2, 'keyword should contain 2 elements in this order: grayscale input images, object labels'
+        assert len(channel_keywords)>=2, 'keyword should contain at least 2 elements in this order: grayscale input images, object labels, [other grayscale input images]'
         assert len(array_keywords) == 1, 'array keyword should contain 1 element: links to previous objects'
         assert center_mode.upper() in CENTER_MODE, f"invalid center mode: {center_mode} should be in {CENTER_MODE}"
         self.return_link_multiplicity=return_link_multiplicity
@@ -63,10 +63,10 @@ class DyDxIterator(TrackingIterator):
         super().__init__(dataset=dataset,
                     channel_keywords=channel_keywords,
                     array_keywords = array_keywords,
-                    input_channels=[0],
+                    input_channels=[0] + [i for i in range(2, len(channel_keywords))],
                     output_channels=[1],
-                    channels_prev=[True]*2,
-                    channels_next=[next]*2,
+                    channels_prev=[True]*len(channel_keywords),
+                    channels_next=[next]*len(channel_keywords),
                     mask_channels=[1],
                     n_frames = self.frame_window,
                     aug_remove_prob=aug_remove_prob,
@@ -124,7 +124,7 @@ class DyDxIterator(TrackingIterator):
                     self._set_identity_link(prevLinks, b, c)
         # get previous labels and store in batch_by_channel BEFORE applying tiling and elastic deform
         self._get_prev_label(batch_by_channel, n_frames)
-        batch_by_channel[-2] = batch_by_channel[0].shape[0] # batch size is recorded here: it will be used in case of tiling
+        batch_by_channel["batch_size"] = batch_by_channel[0].shape[0] # batch size is recorded here: it will be used in case of tiling
         if n_frames>1: # remove unused frames
             sel = self._get_end_points(n_frames, False)
             channels = [c for c in batch_by_channel if not isinstance(c, str) and c>=0]
@@ -252,7 +252,7 @@ class DyDxIterator(TrackingIterator):
         if self.return_link_multiplicity:
             linkMultiplicityIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
 
-        batch_size = batch_by_channel[-2]
+        batch_size = batch_by_channel["batch_size"]
         if labelIms.shape[0]>batch_size:
             #n_tiles = labelIms.shape[0]//batch_size
             #print("batch size: {}, n_tiles: {}".format(batch_size, n_tiles))
@@ -358,6 +358,12 @@ class DyDxIterator(TrackingIterator):
             all_channels.append(prevLabelArr)
             all_channels.append(centerArr)
         return all_channels
+
+    def _get_input_batch(self, batch_by_channel, ref_chan_idx, aug_param_array):
+        inputs = super()._get_input_batch(batch_by_channel, ref_chan_idx, aug_param_array)
+        if len(self.input_channels)>1:
+            inputs = np.stack([batch_by_channel[chan_idx] for chan_idx in self.input_channels], -2)
+        return inputs
 
     def _erase_small_objects_at_edges(self, labelImage, batch_idx, channel_idxs, channel_idxs_chan, batch_by_channel):
         objects_to_erase = _get_small_objects_at_edges_to_erase(labelImage, self.erase_edge_cell_size)

@@ -24,6 +24,17 @@ class SpatialAttention2D(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         input_shape_, input_shape = input_shape
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        try:
+            input_shape_ = input_shape_.as_list()
+        except:
+            pass
+        if isinstance(input_shape, tuple):
+            input_shape = list(input_shape)
+
         assert len(input_shape_)==len(input_shape) and all(i==j for i,j in zip(input_shape_, input_shape)), f"both tensors must have same input shape: {input_shape_} != {input_shape}"
         self.spatial_dims=input_shape[1:-1]
         self.spatial_dim = np.prod(self.spatial_dims)

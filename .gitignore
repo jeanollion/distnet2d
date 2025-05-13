@@ -1,5 +1,5 @@
 *.pyc
-test*.py
+test_distnet.py
 DiST_Net.egg-info/*
 dist/*
 build/*
