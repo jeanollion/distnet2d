@@ -51,9 +51,9 @@ class DiSTNetModel(tf.keras.Model):
         max_class_frequency=category_class_frequency_range[1]
         if category_weights is not None:
             assert len(category_weights)==3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
-            self.category_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(), category_weights, remove_background=True)
+            self.category_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_weights, remove_background=True)
         else:
-            self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(),3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=True)
+            self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE),3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=True)
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
         self.long_term = long_term
         self.use_grad_acc = accum_steps>1
@@ -65,6 +65,41 @@ class DiSTNetModel(tf.keras.Model):
         self.agc_eps = agc_eps
         self.agc_exclude_keywords=["DecoderTrackY0_", "DecoderTrackX0_", "DecoderCat0_", "DecoderCenterGCDM0_", "DecoderCenterGCDMdY0_", "DecoderCenterGCDMdX0_", "DecoderSegEDM0_", "DecoderSegEDMdY0_", "DecoderSegEDMdX0_"] if agc_exclude_output else None
         self.print_gradients=print_gradients
+
+        # override losses reduction to None for tf.distribute.MirroredStrategy and MultiWorkerStrategy
+
+        self.edm_loss.reduction = tf.keras.losses.Reduction.NONE
+        self.gcdm_loss.reduction = tf.keras.losses.Reduction.NONE
+        self.displacement_loss.reduction = tf.keras.losses.Reduction.NONE
+
+        # metrics associated to losses for to display accurate loss in a distributed setting
+        self.edm_loss_metric = tf.keras.metrics.Mean(name="EDM")
+        self.center_loss_metric = tf.keras.metrics.Mean(name="CENTER")
+        self.dx_loss_metric = tf.keras.metrics.Mean(name="DX")
+        self.dy_loss_metric = tf.keras.metrics.Mean(name="DY")
+        self.category_loss_metric = tf.keras.metrics.Mean(name="CATEGORY")
+        self.loss_metric = tf.keras.metrics.Mean(name="loss")
+
+    @property
+    def metrics(self):
+        metrics = [
+            self.edm_loss_metric,
+            self.center_loss_metric,
+            self.dx_loss_metric,
+            self.dy_loss_metric,
+            self.category_loss_metric,
+            self.loss_metric,
+        ]
+
+        if self._is_compiled:
+            if self.compiled_metrics is not None:
+                metrics += self.compiled_metrics.metrics
+
+        for l in self._flatten_layers():
+            metrics.extend(l._metrics)
+
+        return metrics
+
 
     def train_step(self, data):
         if self.use_grad_acc:
@@ -78,6 +113,7 @@ class DiSTNetModel(tf.keras.Model):
             n_frame_pairs += (fw - 1) * (2 if self.next else 1)
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
+        batch_dim = tf.shape(x)[0]
         displacement_weight = self.displacement_weight / (2. * n_fp_mul) # y & x
         category_weight = self.category_weight / (n_fp_mul * float(n_frame_pairs))
         edm_weight = self.edm_weight / float(n_frames) # divide by channel number ?
@@ -110,6 +146,7 @@ class DiSTNetModel(tf.keras.Model):
             # edm
             if edm_weight>0:
                 edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dy=edm_dy, pred_dx=edm_dx, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss)
+                edm_loss = tf.reduce_mean(edm_loss)
                 losses["edm"] = edm_loss
                 loss_weights["edm"] = edm_weight
 
@@ -122,20 +159,25 @@ class DiSTNetModel(tf.keras.Model):
                     cdm_mask = tf.math.less_equal(y[1], self.cdm_loss_radius)
                     cdm_mask_interior = cdm_mask
                 center_loss = compute_loss_derivatives(y[1], gcdm, self.gcdm_loss, pred_dy=gcdm_dy, pred_dx=gcdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.gcdm_derivative_loss)
+                center_loss = tf.reduce_mean(center_loss)
                 losses["center"] = center_loss
                 loss_weights["center"] = center_weight
 
             #regression displacement loss
             if displacement_weight>0:
                 loss_dY, loss_dX = self._compute_displacement_loss(y, y_pred, cell_mask)
+                loss_dY = tf.reduce_mean(loss_dY)
                 losses["dY"] = loss_dY
                 loss_weights["dY"] = displacement_weight
+                loss_dX = tf.reduce_mean(loss_dX)
                 losses["dX"] = loss_dX
                 loss_weights["dX"] = displacement_weight
 
             # category loss
             if category_weight>0:
-                losses["category"] = self._compute_category_loss(y, y_pred, n_frame_pairs, n_fp_mul)
+                category_loss = self._compute_category_loss(y, y_pred, n_frame_pairs, n_fp_mul)
+                category_loss = tf.reduce_mean(category_loss)
+                losses["category"] = category_loss
                 loss_weights["category"] = category_weight
 
             loss = 0.
@@ -148,6 +190,10 @@ class DiSTNetModel(tf.keras.Model):
             if len(self.losses)>0:
                 loss += tf.add_n(self.losses) # regularizers
             losses["loss"] = loss
+            # scale loss for distribution
+            num_replicas = tf.distribute.get_strategy().num_replicas_in_sync
+            if num_replicas > 1:
+                loss *= 1.0 / num_replicas
 
         if self.print_gradients:
             trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenterGCDM") or t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0") or t.name.startswith("DecoderCat0") or t.name.startswith("FeatureSequence_Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
@@ -180,7 +226,17 @@ class DiSTNetModel(tf.keras.Model):
         else:
             self.gradient_accumulator.accumulate_gradients(gradients)
             self.gradient_accumulator.apply_gradients()
-        return losses
+
+        # Update metrics state
+
+        self.edm_loss_metric.update_state(losses["edm"], sample_weight=batch_dim)
+        self.center_loss_metric.update_state(losses["center"], sample_weight=batch_dim)
+        self.dx_loss_metric.update_state(losses["dX"], sample_weight=batch_dim)
+        self.dy_loss_metric.update_state(losses["dY"], sample_weight=batch_dim)
+        self.category_loss_metric.update_state(losses["category"], sample_weight=batch_dim)
+        self.loss_metric.update_state(losses["loss"], sample_weight=batch_dim)
+
+        return self.compute_metrics(x, y, y_pred, None)
 
     def _compute_displacement_loss(self, y, y_pred, cell_mask):
         mask = self._to_pair_mask(cell_mask)

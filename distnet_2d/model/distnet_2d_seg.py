@@ -21,11 +21,22 @@ class DistnetModelSeg(keras.Model):
         if self.use_grad_acc:
             self.gradient_accumulator = GradientAccumulator(accum_steps, self)
 
+        # override losses reduction to None for tf.distribute.MirroredStrategy and MultiWorkerStrategy
+        self.edm_loss.reduction = tf.keras.losses.Reduction.NONE
+        self.gcdm_loss.reduction = tf.keras.losses.Reduction.NONE
+
+        # metrics associated to losses for to display accurate loss in a distributed setting
+        self.edm_loss_metric = tf.keras.metrics.Mean(name="EDM")
+        self.center_loss_metric = tf.keras.metrics.Mean(name="CENTER")
+        self.loss_metric = tf.keras.metrics.Mean(name="loss")
+
+
     def train_step(self, data):
         if self.use_grad_acc:
             self.gradient_accumulator.init_train_step()
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
+        batch_dim = tf.shape(x)[0]
 
         with tf.GradientTape(persistent=False) as tape:
             y_pred = self(x, training=True)  # Forward pass
@@ -33,6 +44,7 @@ class DistnetModelSeg(keras.Model):
             losses = dict()
             # edm
             edm_loss = self.edm_loss(y[0], y_pred[0])
+            edm_loss = tf.reduce_mean(edm_loss)
             losses["EDM"] = edm_loss
             # center
             if self.cdm_loss_radius <=0: # compute loss only inside cell
@@ -40,6 +52,7 @@ class DistnetModelSeg(keras.Model):
             else: # compute loss only where true CDM is lower than radius
                 center_pred_masked = tf.where(tf.math.less_equal(y[1], self.cdm_loss_radius), y_pred[1], 0)
             gcdm_loss = self.gcdm_loss(y[1], center_pred_masked)
+            gcdm_loss = tf.reduce_mean(gcdm_loss)
             losses["GCDM"] = gcdm_loss
 
             loss = 0.
@@ -53,6 +66,11 @@ class DistnetModelSeg(keras.Model):
                 loss += tf.add_n(self.losses) # regularizers
             losses["loss"] = loss
 
+            # scale loss for distribution
+            num_replicas = tf.distribute.get_strategy().num_replicas_in_sync
+            if num_replicas > 1:
+                loss *= 1.0 / num_replicas
+
         # Compute gradients
         gradients = tape.gradient(loss, self.trainable_variables)
         if mixed_precision:
@@ -62,7 +80,12 @@ class DistnetModelSeg(keras.Model):
         else:
             self.gradient_accumulator.accumulate_gradients(gradients)
             self.gradient_accumulator.apply_gradients()
-        return losses
+
+        self.edm_loss_metric.update_state(losses["EDM"], sample_weight=batch_dim)
+        self.center_loss_metric.update_state(losses["GCDM"], sample_weight=batch_dim)
+        self.loss_metric.update_state(losses["loss"], sample_weight=batch_dim)
+
+        return self.compute_metrics(x, y, y_pred, None)
 
 def get_distnet_2d_seg(input_channels:int,config, shared_encoder:bool=False, skip_connections=None, name: str="DiSTNet2DSeg",**kwargs):
     if skip_connections is None:
@@ -81,7 +104,8 @@ def get_distnet_2d_seg_model(encoder_settings: list,
                              input_channels: int,
                              upsampling_mode: str = "tconv",  # tconv, up_nn, up_bilinear
                              downsampling_mode: str = "maxpool_and_stride",  # maxpool, stride, maxpool_and_stride
-                             shared_encoder: bool = False, # in case input has multiple channels -> process channels independently in encoder
+                             shared_encoder: bool = False,
+                             # in case input has multiple channels -> process channels independently in encoder
                              combine_kernel_size: int = 1,
                              skip_stop_gradient: bool = False,
                              skip_connections=False,  # bool or list
@@ -127,7 +151,6 @@ def get_distnet_2d_seg_model(encoder_settings: list,
                                                                last_input_filters=out_filters)
     combine_features_op = Combine(filters=feature_filters, kernel_size=combine_kernel_size, compensate_gradient=True,
                                   l2_reg=l2_reg, name="CombineFeatures")
-
     # define decoder operations
     decoder_layers = {"Seg": [], "Center": []}
     get_seq_and_filters = lambda l: [l[i] for i in [0, 3]]
