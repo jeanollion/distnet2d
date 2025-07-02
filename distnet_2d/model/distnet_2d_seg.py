@@ -10,10 +10,12 @@ class DistnetModelSeg(keras.Model):
         edm_loss= PseudoHuber(1),
         gcdm_loss = PseudoHuber(1),
         accum_steps=1,
+        cdm_loss_radius:float = 0, # if <=0 : cdm is trained inside cells. otherwise cdm is trained only on true cdm values lower than this threhsold
         **kwargs):
         super().__init__(*args, **kwargs)
         self.edm_loss = edm_loss
         self.gcdm_loss=gcdm_loss
+        self.cdm_loss_radius=float(cdm_loss_radius)
         self.use_grad_acc = accum_steps>1
         self.accum_steps = float(accum_steps)
         if self.use_grad_acc:
@@ -33,8 +35,11 @@ class DistnetModelSeg(keras.Model):
             edm_loss = self.edm_loss(y[0], y_pred[0])
             losses["EDM"] = edm_loss
             # center
-            center_pred_inside = tf.where(tf.math.greater(y[0], 0), y_pred[1], 0) # do not compute loss outside cells
-            gcdm_loss = self.gcdm_loss(y[1], center_pred_inside)
+            if self.cdm_loss_radius <=0: # compute loss only inside cell
+                center_pred_masked = tf.where(tf.math.greater(y[0], 0), y_pred[1], 0) # do not compute loss outside cells
+            else: # compute loss only where true CDM is lower than radius
+                center_pred_masked = tf.where(tf.math.less_equal(y[1], self.cdm_loss_radius), y_pred[1], 0)
+            gcdm_loss = self.gcdm_loss(y[1], center_pred_masked)
             losses["GCDM"] = gcdm_loss
 
             loss = 0.
@@ -76,8 +81,7 @@ def get_distnet_2d_seg_model(encoder_settings: list,
                              input_channels: int,
                              upsampling_mode: str = "tconv",  # tconv, up_nn, up_bilinear
                              downsampling_mode: str = "maxpool_and_stride",  # maxpool, stride, maxpool_and_stride
-                             shared_encoder: bool = False,
-                             # in case input has multiple channels -> process channels independently in encoder
+                             shared_encoder: bool = False, # in case input has multiple channels -> process channels independently in encoder
                              combine_kernel_size: int = 1,
                              skip_stop_gradient: bool = False,
                              skip_connections=False,  # bool or list
@@ -124,10 +128,6 @@ def get_distnet_2d_seg_model(encoder_settings: list,
     combine_features_op = Combine(filters=feature_filters, kernel_size=combine_kernel_size, compensate_gradient=True,
                                   l2_reg=l2_reg, name="CombineFeatures")
 
-    if len(encoder_settings) in skip_connections:
-        feature_skip_op = Combine(filters=feature_filters, l2_reg=l2_reg, name="FeatureSkip")
-        feature_pair_skip_op = Combine(filters=feature_filters, l2_reg=l2_reg, name="FeaturePairSkip")
-
     # define decoder operations
     decoder_layers = {"Seg": [], "Center": []}
     get_seq_and_filters = lambda l: [l[i] for i in [0, 3]]
@@ -135,7 +135,7 @@ def get_distnet_2d_seg_model(encoder_settings: list,
         parse_param_list(feature_decoder_settings, f"Features{n}", l2_reg=l2_reg, last_input_filters=feature_filters))
         for n in decoder_layers.keys()}
     decoder_out = {"Seg": {}, "Center": {}}
-    output_per_decoder = {"Seg": ["EDM"], "Center": ["Center"]}
+    output_per_decoder = {"Seg": ["EDM"], "Center": ["CDM"]}
     skip_per_decoder = {"Seg": skip_connections, "Center": []}
 
     for l_idx, param_list in enumerate(decoder_settings):
@@ -144,7 +144,7 @@ def get_distnet_2d_seg_model(encoder_settings: list,
                                                    mode=upsampling_mode, skip_combine_mode=skip_combine_mode,
                                                    combine_kernel_size=combine_kernel_size, activation_out="linear",
                                                    filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"Output0_EDM")
-            decoder_out["Center"]["Center"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx],
+            decoder_out["Center"]["CDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx],
                                                          mode=upsampling_mode, skip_combine_mode=skip_combine_mode,
                                                          combine_kernel_size=combine_kernel_size,
                                                          activation_out="linear", filters_out=1, l2_reg=l2_reg,

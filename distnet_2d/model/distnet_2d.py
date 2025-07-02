@@ -18,6 +18,7 @@ class DiSTNetModel(tf.keras.Model):
                  category_loss_weight:float=1,
                  edm_loss=PseudoHuber(1), edm_derivative_loss:bool=False,
                  gcdm_loss=PseudoHuber(1), gcdm_derivative_loss:bool=False,
+                 cdm_loss_radius:float = 0,
                  displacement_loss=PseudoHuber(1),
                  category_weights=None,  # array of weights: [normal, division, no previous cell] or None = auto
                  category_class_frequency_range=[1/50, 50],
@@ -32,6 +33,7 @@ class DiSTNetModel(tf.keras.Model):
         super().__init__(*args, **kwargs)
         self.edm_weight = edm_loss_weight
         self.center_weight = center_loss_weight
+        self.cdm_loss_radius = float(cdm_loss_radius)
         self.displacement_weight = displacement_loss_weight
         self.category_weight = category_loss_weight
         self.spatial_dims = spatial_dims
@@ -113,7 +115,13 @@ class DiSTNetModel(tf.keras.Model):
 
             # center
             if center_weight>0:
-                center_loss = compute_loss_derivatives(y[1], gcdm, self.gcdm_loss, pred_dy=gcdm_dy, pred_dx=gcdm_dx, mask=cell_mask, mask_interior=cell_mask_interior, derivative_loss=self.gcdm_derivative_loss)
+                if self.cdm_loss_radius <= 0:
+                    cdm_mask = cell_mask
+                    cdm_mask_interior = cell_mask_interior
+                else:
+                    cdm_mask = tf.math.less_equal(y[1], self.cdm_loss_radius)
+                    cdm_mask_interior = cdm_mask
+                center_loss = compute_loss_derivatives(y[1], gcdm, self.gcdm_loss, pred_dy=gcdm_dy, pred_dx=gcdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.gcdm_derivative_loss)
                 losses["center"] = center_loss
                 loss_weights["center"] = center_weight
 
