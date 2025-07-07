@@ -21,13 +21,14 @@ from dataset_iterator import extract_tile_random_zoom_function
 #path = "/data/DL/DiSTNet2D/PhC_C2DH_PA14.h5"
 path = "/data/Images/TestFluo/test.h5"
 from distnet_2d.data import DyDxIterator
-from distnet_2d.data.dydx_iterator import CHANNEL_KEYWORDS
+from distnet_2d.data.dydx_iterator import CHANNEL_KEYWORDS, ARRAY_KEYWORDS
 from dataset_iterator.image_data_generator import IlluminationImageGenerator, ScalingImageGenerator, ImageGeneratorList, get_image_data_generator
 from dataset_iterator.datasetIO import get_datasetIO, MemoryIO
 from distnet_2d.model import get_distnet_2d, architectures
 
-dn = get_distnet_2d((None, None, 4), 5, True, config=architectures.BlendD3(filters=128, self_attention=0, attention=0), predict_edm_derivatives=False, predict_gcdm_derivatives=False)
-#tf.keras.utils.plot_model(dn, "/storage/model.png", show_shapes=True)
+dn = get_distnet_2d((None, None, 4), 5, True, category_number=2, config=architectures.BlendD3(filters=128, self_attention=0, attention=0), predict_edm_derivatives=False, predict_gcdm_derivatives=False)
+
+#tf.keras.utils.plot_model(dn, "/data/model.png", show_shapes=True)
 #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
 #print(dn.summary())
 
@@ -39,11 +40,12 @@ data_generator = get_image_data_generator(scaling_parameters={'mode': "RANDOM_CE
 affine_transform_parameters_mask = None if affine_transform_parameters is None else {**affine_transform_parameters, "interpolation_order": 0}
 mask_generator = get_image_data_generator(scaling_parameters=[], affine_transform_parameters=affine_transform_parameters_mask)
 
-tiling_parameters = {"tile_shape":(128, 32), "n_tiles":1, "interpolation_order":1,"perform_augmentation":True,"augmentation_rotate":"true","zoom_range":[0.8333333333333334,1.2],"aspect_ratio_range":[0.8333333333333334,1.2],"random_stride":True,"random_channel_jitter_shape":[10,10]}
+tiling_parameters = {"tile_shape":(128, 128), "n_tiles":1, "interpolation_order":1,"perform_augmentation":True,"augmentation_rotate":"true","zoom_range":[0.8333333333333334,1.2],"aspect_ratio_range":[0.8333333333333334,1.2],"random_stride":True,"random_channel_jitter_shape":[10,10]}
 it = DyDxIterator(dataset=path, group_keyword=None, frame_window=5, erase_edge_cell_size=50, center_mode="MEDOID",
                         center_distance_mode="EUCLIDEAN",
-                        channel_keywords=CHANNEL_KEYWORDS.copy() + ['/raw'],
-                        input_label_keywords=["/regionLabels"],
+                        channel_keywords=CHANNEL_KEYWORDS.copy() + ['/Fluo'],
+                        input_label_keywords=["/Bacteria"],
+                        array_keywords=ARRAY_KEYWORDS,
                         elasticdeform_parameters={},
                         return_edm_derivatives=False,
                         image_data_generators=[data_generator, mask_generator, data_generator],
@@ -54,7 +56,7 @@ it = DyDxIterator(dataset=path, group_keyword=None, frame_window=5, erase_edge_c
 it.disable_random_transforms(True, True)
 
 it.return_central_only = True
-it.return_label_rank = True
+#it.return_label_rank = True
 it.incomplete_last_batch_mode = 0
 print(f"{len(it)}")
 t0 = time.time()
@@ -75,7 +77,7 @@ y_pred = dn.predict(x)
 print(f"pred shape: {[yy.shape for yy in y_pred]}")
 
 import matplotlib.pyplot as plt
-fig, ax = plt.subplots(figsize=(10, 5), ncols=6, nrows=1)
+fig, ax = plt.subplots(figsize=(10, 5), ncols=7, nrows=1)
 ax[0].imshow(x[0,...,0,fw], interpolation="nearest", aspect='equal', origin="upper")
 ax[1].imshow(x[0,..., 1,fw], interpolation="nearest", aspect='equal', origin="upper")
 ax[2].imshow(x[0,..., 2,fw], interpolation="nearest", aspect='equal', origin="upper")
@@ -83,6 +85,7 @@ ax[3].imshow(x[0,..., 3,fw], interpolation="nearest", aspect='equal', origin="up
 ax[4].imshow(y[0][0,...,0], interpolation="nearest", aspect='equal', origin="upper")
 #ax[5].imshow(y_pred[0][0,...,fw], interpolation="nearest", aspect='equal', origin="upper")
 ax[5].imshow(y[1][0,...,0], interpolation="nearest", aspect='equal', origin="upper")
+ax[6].imshow(y[5][0,...,0], interpolation="nearest", aspect='equal', origin="upper")
 #ax[4].imshow(y_pred[1][0,...,fw], interpolation="nearest", aspect='equal', origin="upper")
 #ax[5].imshow(y[2][0,...,0], interpolation="nearest", aspect='equal', origin="upper")
 #ax[6].imshow(y_pred[2][0,...,d_indices[0]], interpolation="nearest", aspect='equal', origin="upper")
