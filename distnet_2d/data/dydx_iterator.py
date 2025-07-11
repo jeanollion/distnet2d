@@ -41,6 +41,7 @@ class DyDxIterator(TrackingIterator):
                  downscale_displacement_and_link_multiplicity=1,
                  return_edm_derivatives: bool = False,
                  return_center:bool = True,
+                 scale_edm:bool = False, # for each cell max edm value is 1
                  center_mode:str = "MEDOID",  # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
                  center_distance_mode = "GEODESIC", # GEODESIC, EUCLIDEAN
                  return_label_rank = False,
@@ -60,6 +61,7 @@ class DyDxIterator(TrackingIterator):
         self.allow_frame_subsampling_direct_neigh=allow_frame_subsampling_direct_neigh
         self.output_float16=output_float16
         self.return_edm_derivatives=return_edm_derivatives
+        self.scale_edm = scale_edm
         self.return_center=return_center
         self.center_mode=center_mode.upper()
         self.center_distance_mode = center_distance_mode.upper()
@@ -297,26 +299,26 @@ class DyDxIterator(TrackingIterator):
                 sel = [c, c+1]
                 l_c = [labels_and_centers[(i,s)] for s in sel]
                 o_s = [object_slices[(i, s)] for s in sel]
-                _compute_displacement(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c], o_s, dyIm[i,...,c], dxIm[i,...,c], dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, gdcmIm=centerIm[i,...,frame_window] if self.return_center and sel[1] == frame_window else None, gdcmImPrev=centerIm[i,...,c] if self.return_center else None, categoryIm=categoryIm[i,...,frame_window] if self.return_category and sel[1] == frame_window else None, categoryArray=cat_array[bidx, :, frame_window] if self.return_category and sel[1] == frame_window else None, categoryImPrev=categoryIm[i,...,c] if self.return_category else None, categoryArrayPrev=cat_array[bidx, :, c] if self.return_category else None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,...,frame_window] if self.return_label_rank and sel[1] == frame_window else None, rankImPrev=rankIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i,frame_window] if self.return_label_rank and sel[1] == frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
+                _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c], o_s, dyIm[i,...,c], dxIm[i,...,c], dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,...,frame_window] if self.return_center and sel[1] == frame_window else None, cdmImPrev=centerIm[i,...,c] if self.return_center else None, edmIm = edm[i,...,frame_window] if self.scale_edm else None, edmImPrev = edm[i,...,c] if self.scale_edm else None, categoryIm=categoryIm[i,...,frame_window] if self.return_category and sel[1] == frame_window else None, categoryArray=cat_array[bidx, :, frame_window] if self.return_category and sel[1] == frame_window else None, categoryImPrev=categoryIm[i,...,c] if self.return_category else None, categoryArrayPrev=cat_array[bidx, :, c] if self.return_category else None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,...,frame_window] if self.return_label_rank and sel[1] == frame_window else None, rankImPrev=rankIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i,frame_window] if self.return_label_rank and sel[1] == frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
             if return_next:
                 for c in range(frame_window, 2*frame_window):
                     sel = [c, c+1]
                     l_c = [labels_and_centers[(i, s)] for s in sel]
                     o_s = [object_slices[(i, s)] for s in sel]
-                    _compute_displacement(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c], o_s, dyIm[i,...,c], dxIm[i,...,c], dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, gdcmIm=centerIm[i,..., c + 1] if self.return_center else None, gdcmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,..., c + 1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i, c + 1] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
+                    _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c], o_s, dyIm[i,...,c], dxIm[i,...,c], dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,..., c + 1] if self.return_center else None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,..., c + 1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i, c + 1] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
             if long_term:
                 off = 2*frame_window if return_next else frame_window
                 for c in range(0, frame_window-1):
                     sel = [c, frame_window]
                     l_c = [labels_and_centers[(i, s)] for s in sel]
                     o_s = [object_slices[(i, s)] for s in sel]
-                    _compute_displacement(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c+off], o_s, dyIm[i,...,c+off], dxIm[i,...,c+off], dyImNext=dyImNext[i,...,c+off] if ndisp else None, dxImNext=dxImNext[i,...,c+off] if ndisp else None, gdcmIm=None, gdcmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode)
+                    _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dyIm[i,..., c + off], dxIm[i,..., c + off], dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode)
                 if return_next:
                     for c in range(frame_window-1, 2*(frame_window-1)):
                         sel = [frame_window, c+3]
                         l_c = [labels_and_centers[(i, s)] for s in sel]
                         o_s = [object_slices[(i, s)] for s in sel]
-                        _compute_displacement(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c+off], o_s, dyIm[i,...,c+off], dxIm[i,...,c+off], dyImNext=dyImNext[i,...,c+off] if ndisp else None, dxImNext=dxImNext[i,...,c+off] if ndisp else None, gdcmIm=None, gdcmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode)
+                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dyIm[i,..., c + off], dxIm[i,..., c + off], dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode)
 
         edm[edm == 0] = -1
         if self.return_edm_derivatives:
@@ -410,8 +412,6 @@ class DyDxIterator(TrackingIterator):
                     _draw_centers(gdcm[b,...,c], labels_and_centers, cur_labels, object_slices, "GEODESIC")
                 inputs.append(edm)
                 inputs.append(gdcm)
-        if len(self.input_channels)>1:
-            inputs = np.stack(inputs, -2)
         return inputs
 
     def _erase_small_objects_at_edges(self, labelImage, batch_idx, channel_idxs, channel_idxs_chan, batch_by_channel):
@@ -546,7 +546,7 @@ def _get_link_multiplicity(n_neigh):
     else:
         return 2
 
-def _compute_displacement(labels_map_centers, labelIm, labels_map_prev, object_slices, dyIm, dxIm, dyImNext=None, dxImNext=None, gdcmIm=None, gdcmImPrev=None, categoryIm=None, categoryArray=None, categoryImPrev=None, categoryArrayPrev=None, linkMultiplicityIm=None, linkMultiplicityImNext=None, rankIm=None, rankImPrev=None, prevLabelArr=None, nextLabelArr=None, centerArr=None, centerArrPrev=None, center_distance_mode:str= "GEODESIC"):
+def _compute_outputs(labels_map_centers, labelIm, labels_map_prev, object_slices, dyIm, dxIm, dyImNext=None, dxImNext=None, cdmIm=None, cdmImPrev=None, edmIm=None, edmImPrev=None, scale_edm:bool=False, categoryIm=None, categoryArray=None, categoryImPrev=None, categoryArrayPrev=None, linkMultiplicityIm=None, linkMultiplicityImNext=None, rankIm=None, rankImPrev=None, prevLabelArr=None, nextLabelArr=None, centerArr=None, centerArrPrev=None, center_distance_mode:str= "GEODESIC"):
     assert labelIm.shape[-1] == 2, f"invalid labelIm : {labelIm.shape[-1]} channels instead of 2"
     assert (dxImNext is None) == (dyImNext is None)
     curLabelIm = labelIm[...,-1]
@@ -569,6 +569,9 @@ def _compute_displacement(labels_map_centers, labelIm, labels_map_prev, object_s
             linkMultiplicityIm[mask] = _get_link_multiplicity(len(label_prevs))
         if categoryIm is not None:
             categoryIm[mask] = categoryArray[label - 1] + 1
+        if scale_edm and edmIm is not None:
+            edmIm_masked = edmIm[mask]
+            edmIm[mask] = edmIm_masked / np.max(edmIm_masked)
         if rankIm is not None:
             rankIm[mask] = rank + 1
     if dyImNext is not None:
@@ -590,14 +593,17 @@ def _compute_displacement(labels_map_centers, labelIm, labels_map_prev, object_s
                 linkMultiplicityImNext[mask] = _get_link_multiplicity(len(label_nexts))
             if categoryImPrev is not None:
                 categoryImPrev[mask] = categoryArrayPrev[label - 1] + 1
+            if scale_edm and edmImPrev is not None:
+                edmIm_masked = edmImPrev[mask]
+                edmImPrev[mask] = edmIm_masked / np.max(edmIm_masked)
             if rankImPrev is not None:
                 rankImPrev[mask] = rank + 1
-    if gdcmIm is not None:
-        assert gdcmIm.shape == dyIm.shape, "invalid shape for center image"
-        _draw_centers(gdcmIm, labels_map_centers[-1], labelIm[...,1], object_slices[1], center_distance_mode=center_distance_mode)
-    if gdcmImPrev is not None:
-        assert gdcmImPrev.shape == dyIm.shape, "invalid shape for center image prev"
-        _draw_centers(gdcmImPrev, labels_map_centers[0], labelIm[...,0], object_slices[0], center_distance_mode=center_distance_mode)
+    if cdmIm is not None:
+        assert cdmIm.shape == dyIm.shape, "invalid shape for center image"
+        _draw_centers(cdmIm, labels_map_centers[-1], labelIm[...,1], object_slices[1], center_distance_mode=center_distance_mode)
+    if cdmImPrev is not None:
+        assert cdmImPrev.shape == dyIm.shape, "invalid shape for center image prev"
+        _draw_centers(cdmImPrev, labels_map_centers[0], labelIm[...,0], object_slices[0], center_distance_mode=center_distance_mode)
     if centerArr is not None:
         for rank, (label, center) in enumerate(labels_map_centers[-1].items()):
             centerArr[rank,0] = center[0]

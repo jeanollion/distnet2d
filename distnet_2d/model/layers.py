@@ -195,6 +195,35 @@ def get_print_grad_fun(message):
         return x, grad
     return wgrad
 
+class Stack(tf.keras.layers.Layer):
+    def __init__(self, axis, **kwargs):
+        super(Stack, self).__init__(**kwargs)
+        self.axis = axis
+        self.supports_masking = True
+
+    def call(self, inputs):
+        return tf.stack(inputs, axis=self.axis)
+
+    def compute_output_shape(self, input_shape):
+        if not isinstance(input_shape, (list, tuple)):
+            raise ValueError("StackLayer expects a list of input tensors.")
+
+        # Check that all input shapes are compatible for stacking
+        first_shape = tf.TensorShape(input_shape[0]).as_list()
+        for shape in input_shape[1:]:
+            current_shape = tf.TensorShape(shape).as_list()
+            if first_shape != current_shape:
+                raise ValueError("All input shapes must be the same for stacking.")
+
+        # Compute the output shape
+        output_shape = first_shape[:self.axis+1] + [len(input_shape)] + first_shape[self.axis+1:]
+        return tf.TensorShape(output_shape)
+
+    def get_config(self):
+        config = super(Stack, self).get_config()
+        config.update({'axis': self.axis})
+        return config
+
 class Combine(tf.keras.layers.Layer):
     def __init__(
             self,
