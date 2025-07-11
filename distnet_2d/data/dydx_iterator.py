@@ -400,7 +400,6 @@ class DyDxIterator(TrackingIterator):
             lidx = len(inputs) - len(self.label_input_channels)
             labels = inputs[lidx:]
             inputs = inputs[:lidx]
-            print(f"input batch: inputs: {len(inputs)} labels: {len(labels)}")
             for labelIms in labels: # compute EDM and GDCM for each additional input label image
                 edm = np.zeros(shape=labelIms.shape, dtype=np.float32)
                 gdcm = np.zeros(shape=labelIms.shape, dtype=np.float32)
