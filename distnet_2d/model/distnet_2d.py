@@ -23,7 +23,7 @@ class DiSTNetModel(tf.keras.Model):
                  displacement_loss=PseudoHuber(1),
                  link_multiplicity_weights=None,  # array of weights: [normal, division, no previous cell] or None = auto
                  link_multiplicity_class_frequency_range=[1 / 50, 50],
-                 next=True,
+                 next:bool=True,
                  frame_window=3,
                  long_term:bool=True,
                  predict_next_displacement:bool=True,
@@ -39,6 +39,7 @@ class DiSTNetModel(tf.keras.Model):
         self.displacement_weight = displacement_loss_weight
         self.link_multiplicity_weight = link_multiplicity_loss_weight
         self.category_weight = category_loss_weight if category_number > 1 else 0
+        self.category_number=category_number
         self.spatial_dims = spatial_dims
         self.next = next
         self.predict_next_displacement=predict_next_displacement
@@ -133,9 +134,9 @@ class DiSTNetModel(tf.keras.Model):
         center_weight = self.center_weight / float(n_frames)# divide by channel number ?
         category_weight = self.category_weight / float(n_frames)
         if category_weight>0 and link_multiplicity_weight:
-            assert len(y) == 6 , f"invalid number of output. Expected: >=4 actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity, 5=category
+            assert len(y) == 6 , f"invalid number of output. Expected: 6 actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity, 5=category
         elif category_weight > 0 or link_multiplicity_weight > 0:
-            assert len(y) == 5 , f"invalid number of output. Expected: >=4 actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity / category
+            assert len(y) == 5 , f"invalid number of output. Expected: 5 actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity or category
         else:
             assert len(y) >= 4, f"invalid number of output. Expected: >=4 actual {len(y)}"  # 0 = edm, 1 = center, 2 = dY, 3 = dX
 
@@ -180,8 +181,8 @@ class DiSTNetModel(tf.keras.Model):
                 loss_weights["CDM"] = center_weight
 
             if category_weight > 0:
-                cat_pred_inside = tf.where(cell_mask, y_pred[5], 1)
-                cat_loss = self.category_loss(y[5], cat_pred_inside)
+                idx = 5 if link_multiplicity_weight>0 else 4
+                cat_loss = self._compute_category_loss(y[idx], y_pred[idx], cell_mask, n_frames)
                 cat_loss = tf.reduce_mean(cat_loss)
                 losses["category"] = cat_loss
                 loss_weights["category"] = category_weight
@@ -198,7 +199,7 @@ class DiSTNetModel(tf.keras.Model):
 
             # link_multiplicity loss
             if link_multiplicity_weight>0:
-                link_multiplicity_loss = self._compute_link_multiplicity_loss(y, y_pred, n_frame_pairs, n_fp_mul)
+                link_multiplicity_loss = self._compute_link_multiplicity_loss(y[4], y_pred[4], n_frame_pairs, n_fp_mul)
                 link_multiplicity_loss = tf.reduce_mean(link_multiplicity_loss)
                 losses["link_multiplicity"] = link_multiplicity_loss
                 loss_weights["link_multiplicity"] = link_multiplicity_weight
@@ -292,12 +293,20 @@ class DiSTNetModel(tf.keras.Model):
             mask = tf.concat([mask, mask_next], -1)
         return mask
 
-    def _compute_link_multiplicity_loss(self, y, y_pred, n_frame_pairs, n_fp_mul):
+    def _compute_category_loss(self, y, y_pred, cell_mask, n_frames): # TODO use split instead of loop
+        cn = self.category_number
+        lm_loss = 0.
+        for i in range(n_frames):
+            cat_pred_inside = tf.where(cell_mask[..., i:i + 1], y_pred[..., cn * i:cn * i + cn], 1)
+            lm_loss = lm_loss + self.category_loss(y[..., i:i + 1], cat_pred_inside)
+        return lm_loss
+
+    def _compute_link_multiplicity_loss(self, y, y_pred, n_frame_pairs, n_fp_mul): # TODO use split instead of loop
         lm_loss = 0.
         for i in range(n_frame_pairs * n_fp_mul):
-            inside_mask = tf.math.greater(y[4][..., i:i + 1], 0)
-            lm_pred_inside = tf.where(inside_mask, y_pred[4][..., 3 * i:3 * i + 3], 1)
-            lm_loss = lm_loss + self.link_multiplicity_loss(y[4][..., i:i + 1], lm_pred_inside)
+            inside_mask = tf.math.greater(y[..., i:i + 1], 0)
+            lm_pred_inside = tf.where(inside_mask, y_pred[..., 3 * i:3 * i + 3], 1)
+            lm_loss = lm_loss + self.link_multiplicity_loss(y[..., i:i + 1], lm_pred_inside)
         return lm_loss
 
     def set_inference(self, inference:bool=True):
@@ -552,7 +561,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                     output_name = "CDM"
                     output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
                 outputs.extend(output_per_dec.values())
-        return DiSTNetModel(inputs, outputs, name=name, frame_window=frame_window, next=next, spatial_dims=spatial_dimensions if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, **kwargs)
+        return DiSTNetModel(inputs, outputs, name=name, frame_window=frame_window, next=next, spatial_dims=spatial_dimensions if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=category_number, **kwargs)
 
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
