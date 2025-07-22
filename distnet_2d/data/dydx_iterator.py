@@ -570,7 +570,9 @@ def _compute_outputs(labels_map_centers, labelIm, labels_map_prev, object_slices
             categoryIm[mask] = categoryArray[label - 1] + 1
         if scale_edm and edmIm is not None:
             edmIm_masked = edmIm[mask]
-            edmIm[mask] = edmIm_masked / np.max(edmIm_masked)
+            norm = np.max(edmIm_masked)
+            if norm > 0:
+                edmIm[mask] = edmIm_masked / norm
         if rankIm is not None:
             rankIm[mask] = rank + 1
     if dyImNext is not None:
@@ -594,7 +596,9 @@ def _compute_outputs(labels_map_centers, labelIm, labels_map_prev, object_slices
                 categoryImPrev[mask] = categoryArrayPrev[label - 1] + 1
             if scale_edm and edmImPrev is not None:
                 edmIm_masked = edmImPrev[mask]
-                edmImPrev[mask] = edmIm_masked / np.max(edmIm_masked)
+                norm = np.max(edmIm_masked)
+                if norm > 0:
+                    edmImPrev[mask] = edmIm_masked / norm
             if rankImPrev is not None:
                 rankImPrev[mask] = rank + 1
     if cdmIm is not None:
