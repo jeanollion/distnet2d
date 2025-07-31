@@ -7,7 +7,6 @@ from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives
 from ..utils.agc import adaptive_clip_grad
 from .gradient_accumulator import GradientAccumulator
-
 import time
 
 class DiSTNetModel(tf.keras.Model):
@@ -356,6 +355,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          frame_window:int = 1,
                          next:bool=True,
                          long_term:bool = True,
+                         inference_gap_number:int = 0,
                          predict_next_displacement:bool = True,
                          predict_edm_derivatives:bool = False,
                          predict_cdm_derivatives:bool = False,
@@ -386,7 +386,22 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         else:
             assert isinstance(skip_connections, (list))
             skip_connections = [i if i>=0 else len(encoder_settings)+1+i for i in skip_connections]
-        # define enconder operations
+        inference_pair_idx = [frame_window - 1, frame_window]
+        inference_pair_sel_bw = [0]
+        inference_pair_sel_fw = [1]
+        if inference_gap_number > 1:
+            assert long_term, "long term must be enabled for gap prediction"
+            assert inference_gap_number < frame_window, f"gap number must be lower or equal to: {frame_window-1} got {inference_gap_number}"
+            n_gap_max = frame_window - 1
+            n_pairs_0 = n_frames - 1
+            for gap in range(inference_gap_number):
+                inference_pair_sel_bw.append(len(inference_pair_idx))
+                inference_pair_idx.append(n_pairs_0 + n_gap_max - gap - 1)
+                if next:
+                    inference_pair_sel_fw.append(len(inference_pair_idx))
+                    inference_pair_idx.append(n_pairs_0 + n_gap_max + gap )
+        #print(f"inference_pair_idx {inference_pair_idx} bw: {inference_pair_sel_bw}={[inference_pair_idx[i] for i in inference_pair_sel_bw]} fw: {inference_pair_sel_fw}=={[inference_pair_idx[i] for i in inference_pair_sel_fw]}")
+        # define encoder operations
         encoder_layers = []
         contraction_per_layer = []
         no_residual_layer = []
@@ -426,15 +441,15 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         decoder_out={"Seg":{}, "Center":{}, "Track":{}, "LinkMultiplicity":{}}
         if category_number > 1:
             decoder_out["Cat"] = {}
-        output_per_decoder = {"Seg": ["EDM"], "Center": ["CDM"], "Track": ["dY", "dX"] if not predict_next_displacement else ["dY", "dX", "dYNext", "dXNext"], "LinkMultiplicity": ["LinkMultiplicity"] if not predict_next_displacement else ["LinkMultiplicity", "LinkMultiplicityNext"]}
+        output_per_decoder = {"Seg": {"EDM":0}, "Center": {"CDM":1}, "Track": {"dYBW":2, "dXBW":3} if not predict_next_displacement else {"dYBW":2, "dXBW":3, "dYFW":2, "dXFW":3}, "LinkMultiplicity": {"LinkMultiplicityBW":4} if not predict_next_displacement else {"LinkMultiplicityBW":4, "LinkMultiplicityFW":4}}
         if predict_edm_derivatives:
-            output_per_decoder["Seg"].append("EDMdY")
-            output_per_decoder["Seg"].append("EDMdX")
+            output_per_decoder["Seg"]["EDMdY"]=0
+            output_per_decoder["Seg"]["EDMdX"]=0
         if predict_cdm_derivatives:
-            output_per_decoder["Center"].append("CDMdY")
-            output_per_decoder["Center"].append("CDMdX")
+            output_per_decoder["Center"]["CDMdY"]=1
+            output_per_decoder["Center"]["CDMdX"]=1
         if category_number > 1:
-            output_per_decoder["Cat"] = ["Category"]
+            output_per_decoder["Cat"] = {"Category":5}
         n_frame_pairs = n_frames -1
         if long_term:
             n_frame_pairs = n_frame_pairs + (frame_window-1) * (2 if next else 1)
@@ -445,27 +460,26 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
 
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
-                for dSegName in output_per_decoder["Seg"]:
+                for dSegName in output_per_decoder["Seg"].keys():
                     decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}")
-                for dCenterName in output_per_decoder["Center"]:
+                for dCenterName in output_per_decoder["Center"].keys():
                     decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}")
                 if category_number > 1:
-                    for dCatName in output_per_decoder["Cat"]:
+                    for dCatName in output_per_decoder["Cat"].keys():
                         decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=category_number, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}")
-                for dTrackName in output_per_decoder["Track"]:
+                for dTrackName in output_per_decoder["Track"].keys():
                     decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}")
-                for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"]:
+                for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
                     decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}")
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}") )
         decoder_output_names = dict()
-        oi = 0
         for n, o_ns in output_per_decoder.items():
             decoder_output_names[n] = dict()
-            for o_n in o_ns:
-                decoder_output_names[n][o_n] = f"Output{oi:02}_{o_n}"
-                oi += 1
+            for o_n, o_i in o_ns.items():
+                decoder_output_names[n][o_n] = f"Output{o_i:02}_{o_n}"
+
         # Create GRAPH
         if n_inputs == 1:
             inputs = [ tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name="Input") ]
@@ -520,12 +534,12 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         for op in feature_blending_convs:
             combined_features = op(combined_features)
 
-        feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_frames, inference_conv_idx=frame_window, filters = feature_filters, name = f"SegmentationFeatures")(combined_features) # (N_CHAN x B, Y, X, F)
-        feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_conv_idx=frame_window-1, filters = feature_filters, name = f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
+        feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_frames, inference_idx=frame_window, filters = feature_filters, name =f"SegmentationFeatures")(combined_features) # (N_CHAN x B, Y, X, F)
+        feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_idx=inference_pair_idx, filters = feature_filters, name =f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
 
         if len(encoder_settings) in skip_connections: # skip connection at feature level
-            feature_skip = SelectFeature(inference_conv_idx=frame_window, name = "SelectFeature")([feature, all_features])
-            feature_pair_skip = SelectFeature(inference_conv_idx=frame_window-1, name = "SelectFeaturePair")([feature_pair, all_feature_pairs])
+            feature_skip = SelectFeature(inference_idx=frame_window, name ="SelectFeature")([feature, all_features])
+            feature_pair_skip = SelectFeature(inference_idx=inference_pair_idx, name ="SelectFeaturePair")([feature_pair, all_feature_pairs])
             feature_per_frame = feature_skip_op([feature_skip, feature_per_frame])
             feature_per_frame_pair = feature_pair_skip_op([feature_pair_skip, feature_per_frame_pair])
 
@@ -540,20 +554,24 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                 for i, (l, res) in enumerate(zip(d_layers[::-1], residuals[:-1])):
                     up = l([up, res if len(d_layers)-1-i in skip else None])
                 output_per_dec = dict()
-                for output_name in output_per_decoder[decoder_name]:
+                for output_name in output_per_decoder[decoder_name].keys():
                     if output_name in decoder_out[decoder_name]:
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
                         if not is_segmentation and predict_next_displacement or decoder_name=="Seg" and predict_edm_derivatives or decoder_name== "Center" and predict_cdm_derivatives:
                             layer_output_name += "_" # will be concatenated -> output name is used @ concat
+                        fw = output_name.endswith("FW")
+                        b2c_inference_idx = None if is_segmentation else (inference_pair_sel_fw if fw else inference_pair_sel_bw)
                         up_out = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
-                        up_out = BatchToChannel(n_splits = n_frames if is_segmentation else n_frame_pairs, compensate_gradient = False, name = layer_output_name)(up_out)
+                        up_out = BatchToChannel(n_splits = n_frames if is_segmentation else n_frame_pairs, n_splits_inference= 1 if is_segmentation else len(inference_pair_idx), inference_idx=b2c_inference_idx, compensate_gradient = False, name = layer_output_name)(up_out)
                         output_per_dec[output_name] = up_out
-                if predict_next_displacement: # merge outputs ending by Next
+                if predict_next_displacement: # merge BW and FW outputs
                     for k in list(output_per_dec.keys()):
-                        if k.endswith("Next"):
-                            output_name = k.replace("Next", "")
-                            output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop(k)])
+                        if k.endswith("FW"):
+                            output_name_bw = k.replace("FW", "BW")
+                            output_name = k.replace("FW", "")
+                            layer_name = decoder_output_names[decoder_name][k].replace("FW", "")
+                            output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = layer_name)([output_per_dec.pop(output_name_bw), output_per_dec.pop(k)])
                 if decoder_name=="Seg" and predict_edm_derivatives:
                     output_name = "EDM"
                     output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop("EDMdY"), output_per_dec.pop("EDMdX")])
@@ -562,7 +580,6 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                     output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
                 outputs.extend(output_per_dec.values())
         return DiSTNetModel(inputs, outputs, name=name, frame_window=frame_window, next=next, spatial_dims=spatial_dimensions if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=category_number, **kwargs)
-
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"

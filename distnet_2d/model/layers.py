@@ -11,17 +11,17 @@ class StopGradient(tf.keras.layers.Layer):
         return tf.stop_gradient( input, name=self.name )
 
 class NConvToBatch2D(tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, inference_conv_idx:int, filters:int, compensate_gradient:bool = False, name: str="NConvToBatch2D"):
+    def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, name: str= "NConvToBatch2D"):
         super().__init__(name=name)
         self.n_conv = n_conv
         self.filters = filters
         self.inference_mode=False
-        self.inference_conv_idx=inference_conv_idx
+        self.inference_idx=inference_idx
         self.compensate_gradient=compensate_gradient
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient, "inference_conv_idx":self.inference_conv_idx})
+        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient, "inference_idx":self.inference_idx})
         return config
 
     def build(self, input_shape):
@@ -39,7 +39,11 @@ class NConvToBatch2D(tf.keras.layers.Layer):
 
     def call(self, input): # (B, Y, X, F)
         if self.inference_mode: # only produce one output
-            return self.convs[self.inference_conv_idx](input)
+            if isinstance(self.inference_idx, (tuple, list)):
+                items = [self.convs[idx](input) for idx in self.inference_idx]
+                return tf.concat(items, axis=0)
+            else:
+                return self.convs[self.inference_idx](input)
         # input = get_print_grad_fun(f"{self.name} before split")(input)
         if self.grad_fun_inv is not None:
             input = self.grad_fun_inv(input)
@@ -53,20 +57,24 @@ class NConvToBatch2D(tf.keras.layers.Layer):
         return output
 
 class SelectFeature(tf.keras.layers.Layer):
-    def __init__(self, inference_conv_idx:int, name: str="SelectFeature"):
+    def __init__(self, inference_idx, name: str= "SelectFeature"):
         super().__init__(name=name)
         self.inference_mode=False
-        self.inference_conv_idx=inference_conv_idx
+        self.inference_idx=inference_idx
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({"inference_conv_idx":self.inference_conv_idx})
+        config.update({"inference_idx":self.inference_idx})
         return config
 
     def call(self, input): # (N x B, Y, X, F), N x (B, Y, X, F)
         input_concat, input_split = input
         if self.inference_mode: # only produce one output
-            return input_split[self.inference_conv_idx]
+            if isinstance(self.inference_idx, (tuple, list)):
+                items = [input_split[idx] for idx in self.inference_idx]
+                return tf.concat(items, axis = 0)
+            else:
+                return input_split[self.inference_idx]
         else:
             return input_concat
 
@@ -134,15 +142,22 @@ class SplitBatch(tf.keras.layers.Layer):
         return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
 
 class BatchToChannel(tf.keras.layers.Layer):
-    def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="BatchToChannel"):
+    def __init__(self, n_splits:int, n_splits_inference:int=1, inference_idx=None, compensate_gradient:bool = False, name:str= "BatchToChannel"):
         self.n_splits=n_splits
         self.compensate_gradient = compensate_gradient
         self.inference_mode=False
+        self.n_splits_inference=n_splits_inference
+        if inference_idx is not None:
+            if isinstance(inference_idx, int):
+                inference_idx=[inference_idx]
+            assert isinstance(inference_idx, list), f"inference_idx must be a list of indices: {inference_idx}"
+            assert np.all(np.asarray(inference_idx)<n_splits_inference), f"all inference_idx must be lower than {n_splits_inference} got {inference_idx}"
+        self.inference_idx = inference_idx
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"n_splits": self.n_splits, "compensate_gradient":self.compensate_gradient})
+      config.update({"n_splits": self.n_splits, "compensate_gradient":self.compensate_gradient, "n_splits_inference":self.n_splits_inference, "inference_idx":self.inference_idx})
       return config
 
     def build(self, input_shape):
@@ -157,15 +172,19 @@ class BatchToChannel(tf.keras.layers.Layer):
         super().build(input_shape)
 
     def call(self, input): #(N x B, Y, X, C)
-        if self.inference_mode:
+        if self.inference_mode and self.n_splits_inference==1:
             return input
-        if self.compensate_gradient:
+        if self.compensate_gradient and not self.inference_mode:
             input = self.grad_fun(input)
+        n_splits = self.n_splits if not self.inference_mode else self.n_splits_inference
+        n_splits_out = self.n_splits if not self.inference_mode else (self.n_splits_inference if self.inference_idx is None else len(self.inference_idx))
         shape = tf.shape(input)
         dims = [shape[i] for i in range(1, self.rank-1)] if self.rank>2 else []
-        target_shape1 = tf.concat([[self.n_splits, -1], dims, shape[-1:]], 0) if self.rank>2 else tf.concat([[self.n_splits, -1], shape[-1:]], 0)
-        target_shape2 = tf.concat([[-1], dims, [self.n_splits * shape[-1]]], 0) if self.rank>2 else [-1, self.n_splits * shape[-1]]
+        target_shape1 = tf.concat([[n_splits, -1], dims, shape[-1:]], 0) if self.rank>2 else tf.concat([[n_splits, -1], shape[-1:]], 0)
+        target_shape2 = tf.concat([[-1], dims, [n_splits_out * shape[-1]]], 0) if self.rank>2 else [-1, n_splits_out * shape[-1]]
         input = tf.reshape(input, shape = target_shape1) # (N, B, Y, X, F)
+        if self.inference_mode and self.inference_idx is not None:
+            input = tf.gather(input, axis=0, indices=self.inference_idx) # (N, B, Y, X, F)
         input = tf.transpose(input, perm=self.perm) # (B, Y, X, N, F)
         return tf.reshape(input, target_shape2) # (B, Y, X, N x F)
 

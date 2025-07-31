@@ -12,10 +12,10 @@ import sys
 import itertools
 import edt
 from random import random
-
 from .center_edm import compute_edm
 from .medoid import get_medoid
 from ..utils import image_derivatives_np as der
+from collections import deque
 import time
 
 CENTER_MODE = ["GEOMETRICAL", "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"]
@@ -477,44 +477,66 @@ def _compute_prev_label_map(labelIm, prevlabelArray, end_points):
     min_frame=np.min(end_points)
     max_frame=np.max(end_points)
     assert min_frame<n_chan and max_frame<=n_chan, f"invalid end_points: min={min_frame}, max={max_frame}, nchan={n_chan}"
-    labels_map_prev_by_c = dict()
-    labels_by_c = {c : np.unique(labelIm[...,c]) for c in range(min_frame, max_frame+1)}
-    for c in range(min_frame, max_frame+1):
-        labels_map_prev_by_c[c] = dict()
+    labels_map_prev_by_f = dict() # for each frame: label map set of adjacent prev labels
+    labels_map_gap_prev_by_f = dict() # for each frame: label map tuple[prev label, prev frame]
+    labels_by_f = {f : np.unique(labelIm[...,f]) for f in range(min_frame, max_frame+1)}
+    for f in range(min_frame, max_frame+1):
+        labels_map_prev_by_f[f] = dict()
+        labels_map_gap_prev_by_f[f] = dict()
         for i in range(prevlabelArray.shape[0]):
-            if prevlabelArray[i,0,c]>0 and prevlabelArray[i,1,c]>0:
-                if prevlabelArray[i,0,c] not in labels_map_prev_by_c[c]:
-                    labels_map_prev_by_c[c][prevlabelArray[i,0,c]] = {prevlabelArray[i,1,c]}
-                else:
-                    labels_map_prev_by_c[c][prevlabelArray[i,0,c]].add(prevlabelArray[i,1,c])
+            if prevlabelArray[i,0,f]>0 and prevlabelArray[i,1,f]>0:
+                if prevlabelArray.shape[1]==2 or prevlabelArray[i,2,f]==0: # no gap
+                    if prevlabelArray[i,0,f] not in labels_map_prev_by_f[f]:
+                        labels_map_prev_by_f[f][prevlabelArray[i,0,f]] = {prevlabelArray[i,1,f]}
+                    else:
+                        labels_map_prev_by_f[f][prevlabelArray[i,0,f]].add(prevlabelArray[i,1,f])
+                else: # gap
+                    labels_map_gap_prev_by_f[f][prevlabelArray[i,0,f]] = (prevlabelArray[i,1,f], f-prevlabelArray[i,2,f]-1)
     labels_map_prev = []
     for (start, stop) in end_points:
         assert stop>=start, f"invalid endpoint [{start}, {stop}]"
         if start == stop: # same frame : prev labels = current label
-            labels_map_prev.append({label:{label} for label in labels_by_c[stop]})
-        elif start == stop-1: # successive frames: prev labels are simply those of prevlabeArray
-            labels_map_prev.append(labels_map_prev_by_c[stop])
-        else: # augmentation frame subsampling -> iterate through lineage to get the previous label @ last frame
-            labels_map_prev_cur = labels_map_prev_by_c[stop]
-            #print(f"endpoint lmp @ {stop} = {labels_map_prev_cur}")
-            for c in range(stop-1, start, -1):
-                #print(f"lmp @ {c} = {labels_map_prev_by_c[c]}")
-                labels_map_prev_temp = dict()
-                for label, prevs in labels_map_prev_cur.items():
-                    res = None
-                    for p in prevs:
-                        if p in labels_map_prev_by_c[c]:
-                            if res is None or len(res)==0: # for some reason cannot call update on empty set
-                                res = set(labels_map_prev_by_c[c][p])
-                            else:
-                                res.update(labels_map_prev_by_c[c][p])
-                    if res is not None and len(res)>0:
-                        labels_map_prev_temp[label] = res
-                labels_map_prev_cur = labels_map_prev_temp
-                #print("lmp @ {} = {}".format(c, labels_map_prev_cur))
-            #print("startoint lmp @ {} = {}".format(c, labels_map_prev_cur))
+            labels_map_prev.append({label:{label} for label in labels_by_f[stop]})
+        elif start == stop-1: # successive frames: prev labels are simply those of prevlabelArray with zero gap
+            labels_map_prev.append(labels_map_prev_by_f[stop])
+        else: # non-successive frames iterate through lineage to get the previous label @ start frame
+            labels_map_prev_cur = {l : _get_labels_at_frame(l, stop, start, labels_map_prev_by_f, labels_map_gap_prev_by_f) for l in labels_by_f[stop]}
             labels_map_prev.append(labels_map_prev_cur)
     return labels_map_prev
+
+def _get_labels_at_frame(label, frame, target_previous_frame, labels_map_prev_by_f, labels_map_gap_prev_by_f):
+    if frame < target_previous_frame:
+        return []
+    if frame == target_previous_frame:
+        return [label]
+
+    visited = set()
+    queue = deque()
+    queue.append((label, frame))
+    visited.add((label, frame))
+    result = set()
+
+    while queue:
+        current_label, current_frame = queue.popleft()
+        if current_frame == target_previous_frame:
+            result.add(current_label)
+            continue
+        if current_frame < target_previous_frame:
+            continue  # Skip if we've gone past the target frame
+        # Check gap links first (mutually exclusive with prev frame links)
+        if current_frame in labels_map_gap_prev_by_f and current_label in labels_map_gap_prev_by_f[current_frame]:
+            lf = labels_map_gap_prev_by_f[current_frame][current_label]
+            if lf[1] >= target_previous_frame and lf not in visited:
+                visited.add(lf)
+                queue.append(lf)
+        else: # Check immediate previous frame links
+            if current_frame in labels_map_prev_by_f and current_label in labels_map_prev_by_f[current_frame]:
+                for prev_label in labels_map_prev_by_f[current_frame][current_label]:
+                    lf = (prev_label, current_frame - 1)
+                    if lf not in visited:
+                        visited.add(lf)
+                        queue.append(lf)
+    return set(result)
 
 def _labels_map_prev_to_next(labels_map_prev):
     res = dict()

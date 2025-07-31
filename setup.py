@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="DiSTNet2D",
-    version="0.1.9",
+    version="0.2.0",
     author="Jean Ollion",
     author_email="jean.ollion@polytechnique.org",
     description="tensorflow/keras implementation of DiSTNet 2D",
