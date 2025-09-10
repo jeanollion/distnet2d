@@ -359,11 +359,13 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          predict_next_displacement:bool = True,
                          predict_edm_derivatives:bool = False,
                          predict_cdm_derivatives:bool = False,
+                         scale_edm:bool = False,
                          category_number:int = 0,  # category for each cell instance (segmentation level), <=1 means do not predict category
                          l2_reg:float = 0,
                          name: str="DiSTNet2D",
                          **kwargs,
                          ):
+        print(f"edm activation: {'tanh' if scale_edm else 'linear'}")
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
         if spatial_dimensions is None:
@@ -461,7 +463,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         for l_idx, param_list in enumerate(decoder_settings):
             if l_idx==0:
                 for dSegName in output_per_decoder["Seg"].keys():
-                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}")
+                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="tanh" if scale_edm else "linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}")
                 for dCenterName in output_per_decoder["Center"].keys():
                     decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}")
                 if category_number > 1:

@@ -134,6 +134,7 @@ def get_distnet_2d_seg_model(n_inputs: int,
                              skip_stop_gradient: bool = False,
                              skip_connections=False,  # bool or list
                              skip_combine_mode: str = "conv",  # conv, wsconv
+                             scale_edm:bool = False,
                              category_number:int = 0,
                              l2_reg: float = 0,
                              name: str = "DiSTNet2DSeg",
@@ -195,7 +196,7 @@ def get_distnet_2d_seg_model(n_inputs: int,
         if l_idx == 0:
             decoder_out["Seg"]["EDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx],
                                                    mode=upsampling_mode, skip_combine_mode=skip_combine_mode,
-                                                   combine_kernel_size=combine_kernel_size, activation_out="linear",
+                                                   combine_kernel_size=combine_kernel_size, activation_out="tanh" if scale_edm else "linear",
                                                    filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"Output0_EDM")
             decoder_out["Center"]["CDM"] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx],
                                                          mode=upsampling_mode, skip_combine_mode=skip_combine_mode,
