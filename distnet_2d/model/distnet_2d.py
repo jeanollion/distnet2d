@@ -27,7 +27,7 @@ class DiSTNetModel(tf.keras.Model):
                  long_term:bool=True,
                  predict_next_displacement:bool=True,
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
-                 category_number:int=0, category_weights = None,
+                 category_number:int=0, category_weights = None, category_class_frequency_range=[1 / 10, 10],
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  **kwargs):
@@ -50,14 +50,17 @@ class DiSTNetModel(tf.keras.Model):
         self.displacement_loss = displacement_loss
         self.predict_cdm_derivatives = predict_cdm_derivatives
         self.predict_edm_derivatives = predict_edm_derivatives
-        min_class_frequency=link_multiplicity_class_frequency_range[0]
-        max_class_frequency=link_multiplicity_class_frequency_range[1]
+
         if link_multiplicity_weights is not None:
             assert len(link_multiplicity_weights) == 3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
             self.link_multiplicity_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), link_multiplicity_weights, remove_background=True)
         else:
+            min_class_frequency = link_multiplicity_class_frequency_range[0]
+            max_class_frequency = link_multiplicity_class_frequency_range[1]
             self.link_multiplicity_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE),3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=True)
         if category_number > 1:
+            min_class_frequency = category_class_frequency_range[0]
+            max_class_frequency = category_class_frequency_range[1]
             if category_weights is not None:
                 assert len( category_weights) == category_number, f"{category_number} category weights should be provided"
                 self.category_loss = weighted_loss_by_category( tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_weights, remove_background=True)
