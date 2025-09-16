@@ -10,7 +10,7 @@ class DistnetModelSeg(keras.Model):
     def __init__(self, *args,
                  edm_loss= PseudoHuber(1),
                  cdm_loss = PseudoHuber(1),
-                 category_number: int = 0, category_weights=None, category_class_frequency_range=[1 / 50, 50],
+                 category_number: int = 0, category_class_weights=None, category_max_class_weight=10,
                  accum_steps=1,
                  cdm_loss_radius:float = 0,  # if <=0 : cdm is trained inside cells. otherwise cdm is trained only on true cdm values lower than this threhsold
                  **kwargs):
@@ -19,13 +19,11 @@ class DistnetModelSeg(keras.Model):
         self.cdm_loss=cdm_loss
         self.cdm_loss_radius=float(cdm_loss_radius)
         if category_number > 1:
-            min_class_frequency = category_class_frequency_range[0]
-            max_class_frequency = category_class_frequency_range[1]
-            if category_weights is not None:
-                assert len( category_weights) == category_number, f"{category_number} category weights should be provided"
-                self.category_loss = weighted_loss_by_category( tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_weights, remove_background=True)
+            if category_class_weights is not None:
+                assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided"
+                self.category_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_class_weights, remove_background=True)
             else:
-                self.category_loss = balanced_category_loss( tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_number, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=True)
+                self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
         else:
             self.category_loss = None
         self.use_grad_acc = accum_steps>1

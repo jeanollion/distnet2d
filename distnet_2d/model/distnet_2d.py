@@ -20,14 +20,14 @@ class DiSTNetModel(tf.keras.Model):
                  cdm_loss=PseudoHuber(1), cdm_derivative_loss:bool=False,
                  cdm_loss_radius:float = 0,
                  displacement_loss=PseudoHuber(1),
-                 link_multiplicity_weights=None,  # array of weights: [normal, division, no previous cell] or None = auto
-                 link_multiplicity_class_frequency_range=[1 / 50, 50],
+                 link_multiplicity_class_weights=None,  # array of weights: [single, multiple, null] or None = auto
+                 link_multiplicity_max_class_weight=50,
                  next:bool=True,
                  frame_window=3,
                  long_term:bool=True,
                  predict_next_displacement:bool=True,
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
-                 category_number:int=0, category_weights = None, category_class_frequency_range=[1 / 10, 10],
+                 category_number:int=0, category_class_weights = None, category_max_class_weight=10,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  **kwargs):
@@ -51,21 +51,17 @@ class DiSTNetModel(tf.keras.Model):
         self.predict_cdm_derivatives = predict_cdm_derivatives
         self.predict_edm_derivatives = predict_edm_derivatives
 
-        if link_multiplicity_weights is not None:
-            assert len(link_multiplicity_weights) == 3, "3 category weights should be provided: normal cell, dividing cell, cell with no previous cell"
-            self.link_multiplicity_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), link_multiplicity_weights, remove_background=True)
+        if link_multiplicity_class_weights is not None:
+            assert len(link_multiplicity_class_weights) == 3, "3 link multiplicity class weights should be provided: normal cell, dividing/merging cells, cell with no previous cell"
+            self.link_multiplicity_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), link_multiplicity_class_weights, remove_background=True)
         else:
-            min_class_frequency = link_multiplicity_class_frequency_range[0]
-            max_class_frequency = link_multiplicity_class_frequency_range[1]
-            self.link_multiplicity_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE),3, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=True)
+            self.link_multiplicity_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
         if category_number > 1:
-            min_class_frequency = category_class_frequency_range[0]
-            max_class_frequency = category_class_frequency_range[1]
-            if category_weights is not None:
-                assert len( category_weights) == category_number, f"{category_number} category weights should be provided"
-                self.category_loss = weighted_loss_by_category( tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_weights, remove_background=True)
+            if category_class_weights is not None:
+                assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
+                self.category_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_class_weights, remove_background=True)
             else:
-                self.category_loss = balanced_category_loss( tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_number, min_class_frequency=min_class_frequency, max_class_frequency=max_class_frequency, remove_background=True)
+                self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
         else:
             self.category_loss = None
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
