@@ -102,3 +102,103 @@ def get_background_foreground_counts(dataset, channel_keyword:str, group_keyword
         i += f
     counts[0] -= counts[1] # foreground
     return counts
+
+def count_links(previous_links, detailed:bool=False):
+    """
+    Count link multiplicities in forward and backward directions.
+
+    Args:
+        previous_links: Array of shape (F, N_links, 3) where:
+            - F: number of frames
+            - N_links: number of links per frame
+            - 3: [current_label, previous_label, gap_number]
+        detailed: bool return detailed counts or not
+
+    Returns:
+        dict: Counts for each multiplicity type and direction if details, else a tuple with single, multiple and null counts.
+    """
+    if previous_links.ndim == 2:
+        previous_links = np.expand_dims(previous_links, axis=0)
+    if previous_links.shape[-1] == 2:  # add gap columns
+        gap_column = np.zeros(previous_links.shape[:2] + (1,), dtype=previous_links.dtype)
+        previous_links = np.concatenate([previous_links, gap_column], axis=-1)
+
+    # Initialize counters for different multiplicity types and directions
+    counts = {
+        'single_forward': 0,  # current_label connects to exactly one previous_label
+        'single_backward': 0,  # previous_label connects to exactly one current_label
+        'multiple_forward': 0,  # current_label connects to multiple previous_labels
+        'multiple_backward': 0,  # previous_label connects to multiple current_labels
+        'null_forward': 0,  # current_label > 0, previous_label = 0
+        'null_backward': 0,  # previous_label > 0, current_label = 0
+        'gap': 0  # gap links (always single by definition)
+    }
+
+    for frame in previous_links:
+        current_labels = frame[:, 0]
+        previous_labels = frame[:, 1]
+        gap_numbers = frame[:, 2]
+
+        # Separate gap links from regular links
+        gap_mask = gap_numbers > 0
+        regular_mask = gap_numbers == 0
+
+        # Handle gap links (these are always single by definition and must have valid labels)
+        if np.any(gap_mask):
+            gap_current = current_labels[gap_mask]
+            gap_previous = previous_labels[gap_mask]
+
+            # Gap links must have both labels > 0 (cannot be null by definition)
+            valid_gap_mask = (gap_current > 0) & (gap_previous > 0)
+
+            # Each valid gap link is counted once (single by definition)
+            counts['gap'] += np.sum(valid_gap_mask)
+
+        # Handle regular (non-gap) links
+        if np.any(regular_mask):
+            regular_current = current_labels[regular_mask]
+            regular_previous = previous_labels[regular_mask]
+
+            # Identify null links with direction
+            null_forward_mask = (regular_current > 0) & (regular_previous == 0)  # forward direction
+            null_backward_mask = (regular_previous > 0) & (regular_current == 0)  # backward direction
+
+            counts['null_forward'] += np.sum(null_forward_mask)
+            counts['null_backward'] += np.sum(null_backward_mask)
+
+            # Valid links (both labels > 0)
+            valid_mask = (regular_current > 0) & (regular_previous > 0)
+
+            if np.any(valid_mask):
+                valid_current = regular_current[valid_mask]
+                valid_previous = regular_previous[valid_mask]
+
+                # Count how many times each current/previous label appears
+                unique_current, current_counts = np.unique(valid_current, return_counts=True)
+                unique_previous, previous_counts = np.unique(valid_previous, return_counts=True)
+
+                # Create count arrays for current and previous labels
+                max_current_label = np.max(valid_current) if len(valid_current) > 0 else 0
+                max_previous_label = np.max(valid_previous) if len(valid_previous) > 0 else 0
+                current_count_array = np.zeros(max_current_label + 1, dtype=int)
+                previous_count_array = np.zeros(max_previous_label + 1, dtype=int)
+                current_count_array[unique_current] = current_counts
+                previous_count_array[unique_previous] = previous_counts
+
+                # Forward direction: count from current label perspective: each unique current label contributes once
+                unique_current_in_links = np.unique(valid_current)
+                current_multiplicities = current_count_array[unique_current_in_links]
+                counts['single_forward'] += np.sum(current_multiplicities == 1)
+                counts['multiple_forward'] += np.sum(current_multiplicities > 1)
+
+                # Backward direction: count from previous label perspective: each unique previous label contributes once
+                unique_previous_in_links = np.unique(valid_previous)
+                previous_multiplicities = previous_count_array[unique_previous_in_links]
+                counts['single_backward'] += np.sum(previous_multiplicities == 1)
+                counts['multiple_backward'] += np.sum(previous_multiplicities > 1)
+
+    if detailed:
+        return counts
+    else:
+        return counts['gap'] * 2 + counts['single_forward'] + counts['single_backward'], counts['multiple_forward'] + counts['multiple_backward'], counts['null_forward'] + counts['null_backward']
+
