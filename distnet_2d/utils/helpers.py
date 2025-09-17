@@ -5,6 +5,8 @@ import numpy as np
 import shutil
 import edt
 from dataset_iterator import MultiChannelIterator
+from dataset_iterator.helpers import get_decimation_factor
+
 
 def ensure_multiplicity(n, object):
     if object is None:
@@ -84,3 +86,19 @@ AUG_FUN_2D = [
     lambda img : np.flip(img, axis=2),
     lambda img : np.transpose(img, axes=(0, 2, 1, 3))
 ]
+
+def get_background_foreground_counts(dataset, channel_keyword:str, group_keyword:str=None, max_decimation_factor: float = None, dtype="float128"):
+    iterator = MultiChannelIterator(dataset=dataset, channel_keywords=[channel_keyword], group_keyword=group_keyword, input_channels=[0], output_channels=[], batch_size=1, incomplete_last_batch_mode=0)
+    f = 1
+    i = 0
+    counts = np.array([0, 0], dtype = dtype)
+    while i < len(iterator):
+        batch, = iterator[int(i)]
+        if i == 0:
+            f = get_decimation_factor(batch.shape, len(iterator), max_decimation_factor=max_decimation_factor)
+        local_n_fore = np.sum(batch > 0)
+        counts[1] += local_n_fore
+        counts[0] += np.prod(batch.shape)
+        i += f
+    counts[0] -= counts[1] # foreground
+    return counts

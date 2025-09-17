@@ -12,6 +12,7 @@ import time
 class DiSTNetModel(tf.keras.Model):
     def __init__(self, *args, spatial_dims,
                  edm_loss_weight:float=1,
+                 edm_frequency_weights:list = None, # weights to balance foreground/background classes
                  center_loss_weight:float=1,
                  displacement_loss_weight:float=1,
                  link_multiplicity_loss_weight:float=1,
@@ -33,6 +34,9 @@ class DiSTNetModel(tf.keras.Model):
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.edm_weight = edm_loss_weight
+        if edm_frequency_weights is not None:
+            assert len(edm_frequency_weights) == 2 , "edm_frequency_weights must be a list of len 2"
+        self.edm_frequency_weights = np.asarray(edm_frequency_weights, dtype="float32") if edm_frequency_weights is not None else None
         self.center_weight = center_loss_weight
         self.cdm_loss_radius = float(cdm_loss_radius)
         self.displacement_weight = displacement_loss_weight
@@ -156,11 +160,12 @@ class DiSTNetModel(tf.keras.Model):
             losses = dict()
             loss_weights = dict()
 
-            cell_mask = tf.math.greater(true_edm, 0.5)
-            cell_mask_interior = tf.math.greater(true_edm, 1.5) if self.cdm_derivative_loss or self.predict_cdm_derivatives else None
+            cell_mask = tf.math.greater(true_edm, 0)
+            cell_mask_interior = tf.math.greater(true_edm, 1.5) if self.cdm_derivative_loss or self.predict_cdm_derivatives or self.edm_derivative_loss else None
             # edm
             if edm_weight>0:
-                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dy=edm_dy, pred_dx=edm_dx, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss)
+                weight_map = tf.where(cell_mask, self.edm_frequency_weights[1], self.edm_frequency_weights[0]) if self.edm_frequency_weights is not None else None
+                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dy=edm_dy, pred_dx=edm_dx, mask_interior=cell_mask_interior, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
                 edm_loss = tf.reduce_mean(edm_loss)
                 losses["EDM"] = edm_loss
                 loss_weights["EDM"] = edm_weight
