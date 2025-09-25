@@ -21,12 +21,13 @@ def get_architecture(architecture_type:str, **kwargs):
 
 
 class BlendD2:
-    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
+    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
         prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
         self.name = f"{prefix}blendD2-{filters}"
         self.skip_connections=skip_connections
         self.attention = attention
         self.self_attention=self_attention
+        self.attention_positional_encoding=attention_positional_encoding
         self.dropout=dropout
         self.combine_kernel_size = combine_kernel_size
         self.pair_combine_kernel_size = pair_combine_kernel_size
@@ -73,12 +74,13 @@ class BlendD2:
 
 
 class BlendD3:
-    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
+    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
         prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
         self.skip_connections=skip_connections
         self.attention = attention
         self.self_attention=self_attention
+        self.attention_positional_encoding=attention_positional_encoding
         self.dropout=dropout
         self.combine_kernel_size = combine_kernel_size
         self.pair_combine_kernel_size = pair_combine_kernel_size
@@ -129,12 +131,13 @@ class BlendD3:
 
 
 class BlendD4:
-    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
+    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
         prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
         self.skip_connections=skip_connections
         self.attention = attention
         self.self_attention=self_attention
+        self.attention_positional_encoding=attention_positional_encoding
         self.dropout=dropout
         self.combine_kernel_size = combine_kernel_size
         self.pair_combine_kernel_size = pair_combine_kernel_size

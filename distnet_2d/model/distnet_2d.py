@@ -336,7 +336,7 @@ def get_distnet_2d(spatial_dimensions, n_inputs:int,
             name: str="DiSTNet2D",
             **kwargs):
 
-    return get_distnet_2d_model(spatial_dimensions, n_inputs, upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=True, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
+    return get_distnet_2d_model(spatial_dimensions, n_inputs, upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_stop_gradient=True, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, attention_positional_encoding=config.attention_positional_encoding, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
 
 def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          n_inputs:int,
@@ -355,6 +355,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          skip_combine_mode:str="conv",  #conv, wsconv
                          attention : int = 0,
                          attention_dropout:float = 0.1,
+                         attention_positional_encoding="2d",
                          self_attention: int = 0,
                          frame_window:int = 1,
                          next:bool=True,
@@ -378,8 +379,9 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
             spatial_dimensions = list(spatial_dimensions)
             assert len(spatial_dimensions) == 2, "2D input required"
         if attention>0 or self_attention>0:
-            assert spatial_dimensions[0] is not None and spatial_dimensions[0] > 0, "for attention mecanisme, spatial dim must be provided"
-            assert spatial_dimensions[1] is not None and spatial_dimensions[1] > 0, "for attention mecanisme, spatial dim must be provided"
+            assert spatial_dimensions[0] is not None and spatial_dimensions[0] > 0, "for attention mechanism, spatial dim must be provided"
+            assert spatial_dimensions[1] is not None and spatial_dimensions[1] > 0, "for attention mechanism, spatial dim must be provided"
+            print(f"attention positional encoding mode: {attention_positional_encoding}")
         else:
             spatial_dimensions = [None, None] # no attention : no need to enforce fixed size
         if frame_window<=1:
@@ -413,18 +415,18 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         no_residual_layer = []
         last_input_filters = 1
         for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, residual_filters, out_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, l2_reg=l2_reg, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
             last_input_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
             no_residual_layer.append(residual_filters==0)
         # define feature operations
-        feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", l2_reg=l2_reg, last_input_filters=out_filters)
+        feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, last_input_filters=out_filters)
         combine_filters = int(feature_filters * n_frames  * blending_filter_factor)
         print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
         combine_features_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="CombineFeatures")
         if attention>0:
-            attention_op = SpatialAttention2D(num_heads=attention, positional_encoding="2D", dropout=attention_dropout, l2_reg=l2_reg, name="Attention")
+            attention_op = SpatialAttention2D(num_heads=attention, positional_encoding=attention_positional_encoding, dropout=attention_dropout, l2_reg=l2_reg, name="Attention")
         pair_combine_op = Combine(filters=feature_filters, kernel_size = pair_combine_kernel_size, l2_reg=l2_reg, name="FeaturePairCombine")
         all_pair_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="AllFeaturePairCombine")
         feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, l2_reg=l2_reg, name="FeaturePairFeatureCombine") # change here was feature_filters
@@ -432,7 +434,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         for f in feature_blending_settings:
             if "filters" not in f or f["filters"]<0:
                 f["filters"] = combine_filters
-        feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(feature_blending_settings, "FeatureBlendingSequence", l2_reg=l2_reg, last_input_filters=combine_filters)
+        feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(feature_blending_settings, "FeatureBlendingSequence", attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, last_input_filters=combine_filters)
 
         if len(encoder_settings) in skip_connections:
             feature_skip_op = Combine(filters=feature_filters, l2_reg=l2_reg, name="FeatureSkip")
@@ -443,7 +445,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         if category_number > 1:
             decoder_layers["Cat"] = []
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
-        decoder_feature_op={n: get_seq_and_filters(parse_param_list(feature_decoder_settings, f"Features{n}", l2_reg=l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
+        decoder_feature_op={n: get_seq_and_filters(parse_param_list(feature_decoder_settings, f"Features{n}", attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
         decoder_out={"Seg":{}, "Center":{}, "Track":{}, "LinkMultiplicity":{}}
         if category_number > 1:
             decoder_out["Cat"] = {}
@@ -587,11 +589,11 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                 outputs.extend(output_per_dec.values())
         return DiSTNetModel(inputs, outputs, name=name, frame_window=frame_window, next=next, spatial_dims=spatial_dimensions if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=category_number, **kwargs)
 
-def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, name: str="EncoderLayer", layer_idx:int=1):
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
-    sequence, down_sequence, total_contraction, residual_filters, out_filters = parse_param_list(param_list, name, ignore_stride=maxpool, l2_reg=l2_reg, last_input_filters = last_input_filters if maxpool_and_stride else 0)
+    sequence, down_sequence, total_contraction, residual_filters, out_filters = parse_param_list(param_list, name, attention_positional_encoding=attention_positional_encoding, ignore_stride=maxpool, l2_reg=l2_reg, last_input_filters = last_input_filters if maxpool_and_stride else 0)
     assert total_contraction>1, "invalid parameters: no contraction specified"
     if maxpool:
         down_sequence = []
@@ -734,7 +736,7 @@ def stop_gradient(input, parent_name:str, name:str="StopGradient"):
     sg = StopGradient(name=name)
     return sg(input)
 
-def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stride:bool = False, l2_reg:float=0):
+def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stride:bool = False, attention_positional_encoding="2D", l2_reg:float=0):
     if param_list is None or len(param_list)==0:
         return [], None, 1, 0, 0
     total_contraction = 1
@@ -756,7 +758,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                 residual_filters =  param_list[i]["filters"]
             if "l2_reg" not in param_list[i]:
                 param_list[i]["l2_reg"] = l2_reg
-            sequence.append(parse_params(**param_list[i], name = f"{name}_Op{i}"))
+            sequence.append(parse_params(**param_list[i], attention_positional_encoding=attention_positional_encoding, name = f"{name}_Op{i}"))
             i+=1
     else:
         sequence=None
@@ -772,7 +774,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                 if residual_filters>0:
                     last_input_filters=residual_filters # input of downscaler is the residual
                 filters -= last_input_filters
-            down = [parse_params(**params, filters=filters, name=f"{name}_DownOp")]
+            down = [parse_params(**params, filters=filters, attention_positional_encoding=attention_positional_encoding, name=f"{name}_DownOp")]
             total_contraction *= param_list[i].get("downscale", 1)
         else:
             raise ValueError("Only one downscale operation allowed")
@@ -781,7 +783,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, num_attention_heads:int=1, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="2D", dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, num_attention_heads:int=1, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
         raise NotImplementedError("ResConv1D is not implmeneted")
@@ -789,7 +791,7 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
         return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, split_conv=split_conv, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
-        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, positional_encoding="2D", dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
+        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
         self_attention_skip_op = Combine(filters=filters, l2_reg=l2_reg, name=f"{name}_SelfAttentionSkip")
         def op(x):
             sa = self_attention_op([x, x])
