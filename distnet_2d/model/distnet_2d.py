@@ -380,6 +380,9 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          ):
         if not tracking:
             inference_gap_number = 0
+            kwargs["displacement_loss_weight"] = 0
+            kwargs["link_multiplicity_loss_weight"] = 0
+
         print(f"edm activation: {'tanh' if scale_edm else 'linear'}")
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
