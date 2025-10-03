@@ -89,7 +89,7 @@ class DiSTNetModel(tf.keras.Model):
         # metrics associated to losses for to display accurate loss in a distributed setting
         self.edm_loss_metric = tf.keras.metrics.Mean(name="EDM")
         self.center_loss_metric = tf.keras.metrics.Mean(name="CDM")
-        self.category_loss_metric = tf.keras.metrics.Mean(name="category") if category_number > 1 else None
+        self.category_loss_metric = tf.keras.metrics.Mean(name="category") if self.category_weight > 0 else None
         self.dx_loss_metric = tf.keras.metrics.Mean(name="dX")
         self.dy_loss_metric = tf.keras.metrics.Mean(name="dY")
         self.link_multiplicity_loss_metric = tf.keras.metrics.Mean(name="link_multiplicity")
@@ -97,16 +97,19 @@ class DiSTNetModel(tf.keras.Model):
 
     @property
     def metrics(self):
-        metrics = [
-            self.edm_loss_metric,
-            self.center_loss_metric,
-            self.dx_loss_metric,
-            self.dy_loss_metric,
-            self.link_multiplicity_loss_metric,
-            self.loss_metric,
-        ]
-        if self.category_loss_metric is not None:
-            metrics.insert(5, self.category_loss_metric)
+        metrics = []
+        if self.edm_weight > 0:
+            metrics.append(self.edm_loss_metric)
+        if self.center_weight > 0:
+            metrics.append(self.center_loss_metric)
+        if self.displacement_weight > 0:
+            metrics.append(self.dy_loss_metric)
+            metrics.append(self.dx_loss_metric)
+        if self.link_multiplicity_weight > 0:
+            metrics.append(self.link_multiplicity_loss_metric)
+        if self.category_weight > 0:
+            metrics.append(self.category_loss_metric)
+        metrics.append(self.loss_metric)
         if self._is_compiled:
             if self.compiled_metrics is not None:
                 metrics += self.compiled_metrics.metrics
@@ -135,12 +138,11 @@ class DiSTNetModel(tf.keras.Model):
         edm_weight = self.edm_weight / float(n_frames) # divide by channel number ?
         center_weight = self.center_weight / float(n_frames)# divide by channel number ?
         category_weight = self.category_weight / float(n_frames)
-        if category_weight>0 and link_multiplicity_weight:
-            assert len(y) == 6 , f"invalid number of output. Expected: 6 actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity, 5=category
-        elif category_weight > 0 or link_multiplicity_weight > 0:
-            assert len(y) == 5 , f"invalid number of output. Expected: 5 actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity or category
-        else:
-            assert len(y) >= 4, f"invalid number of output. Expected: >=4 actual {len(y)}"  # 0 = edm, 1 = center, 2 = dY, 3 = dX
+        expected_outputs = 1 + int(center_weight>0)+ 2*int(displacement_weight>0) + int(link_multiplicity_weight>0) + int(category_weight>0)
+        assert len(y) == expected_outputs , f"invalid number of output. Expected: {expected_outputs} actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity, 5=category
+
+        lm_idx = int(center_weight > 0) + 2 * int(displacement_weight > 0) + int(link_multiplicity_weight > 0)
+        cat_idx = lm_idx + 1
 
         with tf.GradientTape(persistent=self.print_gradients) as tape:
             y_pred = self(x, training=True)  # Forward pass
@@ -148,14 +150,16 @@ class DiSTNetModel(tf.keras.Model):
                 edm, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=3, axis=-1)
             else:
                 edm, edm_dy, edm_dx = y_pred[0], None, None
-            if self.predict_cdm_derivatives:
-                cdm, cdm_dy, cdm_dx = tf.split(y_pred[1], num_or_size_splits=3, axis=-1)
-            else:
-                cdm, cdm_dy, cdm_dx = y_pred[1], None, None
             if self.predict_edm_derivatives or self.edm_derivative_loss:
                 true_edm, true_edm_dy, true_edm_dx = tf.split(y[0], num_or_size_splits=3, axis=-1)
             else:
                 true_edm, true_edm_dy, true_edm_dx = y[0], None, None
+            if center_weight > 0:
+                if self.predict_cdm_derivatives:
+                    cdm, cdm_dy, cdm_dx = tf.split(y_pred[1], num_or_size_splits=3, axis=-1)
+                else:
+                    cdm, cdm_dy, cdm_dx = y_pred[1], None, None
+
             # compute loss
             losses = dict()
             loss_weights = dict()
@@ -184,8 +188,7 @@ class DiSTNetModel(tf.keras.Model):
                 loss_weights["CDM"] = center_weight
 
             if category_weight > 0:
-                idx = 5 if link_multiplicity_weight>0 else 4
-                cat_loss = self._compute_category_loss(y[idx], y_pred[idx], cell_mask, n_frames)
+                cat_loss = self._compute_category_loss(y[cat_idx], y_pred[cat_idx], cell_mask, n_frames)
                 cat_loss = tf.reduce_mean(cat_loss)
                 losses["category"] = cat_loss
                 loss_weights["category"] = category_weight
@@ -202,7 +205,7 @@ class DiSTNetModel(tf.keras.Model):
 
             # link_multiplicity loss
             if link_multiplicity_weight>0:
-                link_multiplicity_loss = self._compute_link_multiplicity_loss(y[4], y_pred[4], n_frame_pairs, n_fp_mul)
+                link_multiplicity_loss = self._compute_link_multiplicity_loss(y[lm_idx], y_pred[lm_idx], n_frame_pairs, n_fp_mul)
                 link_multiplicity_loss = tf.reduce_mean(link_multiplicity_loss)
                 losses["link_multiplicity"] = link_multiplicity_loss
                 loss_weights["link_multiplicity"] = link_multiplicity_weight
@@ -255,12 +258,15 @@ class DiSTNetModel(tf.keras.Model):
             self.gradient_accumulator.apply_gradients()
 
         # Update metrics state
-
-        self.edm_loss_metric.update_state(losses["EDM"], sample_weight=batch_dim)
-        self.center_loss_metric.update_state(losses["CDM"], sample_weight=batch_dim)
-        self.dx_loss_metric.update_state(losses["dX"], sample_weight=batch_dim)
-        self.dy_loss_metric.update_state(losses["dY"], sample_weight=batch_dim)
-        self.link_multiplicity_loss_metric.update_state(losses["link_multiplicity"], sample_weight=batch_dim)
+        if edm_weight > 0:
+            self.edm_loss_metric.update_state(losses["EDM"], sample_weight=batch_dim)
+        if center_weight > 0:
+            self.center_loss_metric.update_state(losses["CDM"], sample_weight=batch_dim)
+        if displacement_weight>0:
+            self.dx_loss_metric.update_state(losses["dX"], sample_weight=batch_dim)
+            self.dy_loss_metric.update_state(losses["dY"], sample_weight=batch_dim)
+        if link_multiplicity_weight >0:
+            self.link_multiplicity_loss_metric.update_state(losses["link_multiplicity"], sample_weight=batch_dim)
         if self.category_loss_metric is not None:
             self.category_loss_metric.update_state(losses["category"], sample_weight=batch_dim)
         self.loss_metric.update_state(losses["loss"], sample_weight=batch_dim)
@@ -268,10 +274,11 @@ class DiSTNetModel(tf.keras.Model):
         return self.compute_metrics(x, y, y_pred, None)
 
     def _compute_displacement_loss(self, y, y_pred, cell_mask):
+        idx = int(self.center_weight > 0) + 1
         mask = self._to_pair_mask(cell_mask)
-        dy = tf.where(mask, y_pred[2], 0)  # do not predict anything outside
-        dx = tf.where(mask, y_pred[3], 0)  # do not predict anything outside
-        return self.displacement_loss(y[2], dy), self.displacement_loss(y[3], dx)
+        dy = tf.where(mask, y_pred[idx], 0)  # do not predict anything outside
+        dx = tf.where(mask, y_pred[idx+1], 0)  # do not predict anything outside
+        return self.displacement_loss(y[idx], dy), self.displacement_loss(y[idx+1], dx)
 
     def _to_pair_mask(self, cell_mask):
         fw = self.frame_window
@@ -351,7 +358,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          pair_combine_kernel_size:int = 1,
                          blending_filter_factor:float = 0.5,
                          skip_stop_gradient:bool = True,
-                         skip_connections = [-1],  # bool or list. -1 = feature level
+                         skip_connections = True,  # bool or list. -1 = feature level
                          skip_combine_mode:str="conv",  #conv, wsconv
                          attention : int = 0,
                          attention_dropout:float = 0.1,
@@ -360,6 +367,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          frame_window:int = 1,
                          next:bool=True,
                          long_term:bool = True,
+                         tracking:bool = True, # if false: outputs are only EDM and CDM
                          inference_gap_number:int = 0,
                          predict_next_displacement:bool = True,
                          predict_edm_derivatives:bool = False,
@@ -370,6 +378,8 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          name: str="DiSTNet2D",
                          **kwargs,
                          ):
+        if not tracking:
+            inference_gap_number = 0
         print(f"edm activation: {'tanh' if scale_edm else 'linear'}")
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
         assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
@@ -441,14 +451,12 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
             feature_pair_skip_op = Combine(filters=feature_filters, l2_reg=l2_reg, name="FeaturePairSkip")
 
         # define decoder operations
-        decoder_layers={"Seg":[], "Center":[], "Track":[], "LinkMultiplicity":[]}
+        decoder_layers={"Seg":[], "Center":[], "Track":[], "LinkMultiplicity":[]} if tracking else {"Seg":[], "Center":[]}
         if category_number > 1:
             decoder_layers["Cat"] = []
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
         decoder_feature_op={n: get_seq_and_filters(parse_param_list(feature_decoder_settings, f"Features{n}", attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
-        decoder_out={"Seg":{}, "Center":{}, "Track":{}, "LinkMultiplicity":{}}
-        if category_number > 1:
-            decoder_out["Cat"] = {}
+        decoder_out={name:{} for name in decoder_layers.keys()}
         output_per_decoder = {"Seg": {"EDM":0}, "Center": {"CDM":1}, "Track": {"dYBW":2, "dXBW":3} if not predict_next_displacement else {"dYBW":2, "dXBW":3, "dYFW":2, "dXFW":3}, "LinkMultiplicity": {"LinkMultiplicityBW":4} if not predict_next_displacement else {"LinkMultiplicityBW":4, "LinkMultiplicityFW":4}}
         if predict_edm_derivatives:
             output_per_decoder["Seg"]["EDMdY"]=0
@@ -461,7 +469,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         n_frame_pairs = n_frames -1
         if long_term:
             n_frame_pairs = n_frame_pairs + (frame_window-1) * (2 if next else 1)
-        decoder_is_segmentation = {"Seg": True, "Center": True, "Track": False, "LinkMultiplicity": False}
+        decoder_is_segmentation = {"Seg": True, "Center": True, "Track": False, "LinkMultiplicity": False} if tracking else {"Seg":True, "Center":True}
         if category_number > 1:
             decoder_is_segmentation["Cat"] = True
         skip_per_decoder = {"Seg": skip_connections, "Center": [], "Track": [], "LinkMultiplicity": [], "Cat":[]}
@@ -475,10 +483,11 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                 if category_number > 1:
                     for dCatName in output_per_decoder["Cat"].keys():
                         decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=category_number, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}")
-                for dTrackName in output_per_decoder["Track"].keys():
-                    decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}")
-                for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                    decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}")
+                if tracking:
+                    for dTrackName in output_per_decoder["Track"].keys():
+                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}")
+                    for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}")
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}") )

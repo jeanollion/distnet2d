@@ -109,17 +109,15 @@ class DistnetModelSeg(keras.Model):
 
         return self.compute_metrics(x, y, y_pred, None)
 
-def get_distnet_2d_seg(n_inputs:int ,config, shared_encoder:bool=False, skip_connections=None, name: str="DiSTNet2DSeg",**kwargs):
-    if skip_connections is None:
-        skip_connections = config.skip_connections
+def get_distnet_2d_seg(n_inputs:int ,config, shared_encoder:bool=False, name: str="DiSTNet2DSeg",**kwargs):
     return get_distnet_2d_seg_model(n_inputs=n_inputs, shared_encoder=shared_encoder,
                                     upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode,
-                                    skip_stop_gradient=False, skip_connections=skip_connections,
+                                    skip_stop_gradient=False, skip_connections=config.skip_connections,
                                     encoder_settings=config.encoder_settings, feature_settings=config.feature_settings,
                                     decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings,
                                     combine_kernel_size=config.combine_kernel_size, name=name, **kwargs)
 
-def get_distnet_2d_seg_model(n_inputs: int,
+def get_distnet_2d_seg_model(n_inputs: int, # inputs are concatenated in the channel axis
                              encoder_settings: list,
                              feature_settings: list,
                              feature_decoder_settings: list,
@@ -127,10 +125,9 @@ def get_distnet_2d_seg_model(n_inputs: int,
                              spatial_dimensions:list = [None, None],
                              upsampling_mode: str = "tconv",  # tconv, up_nn, up_bilinear
                              downsampling_mode: str = "maxpool_and_stride",  # maxpool, stride, maxpool_and_stride
-                             shared_encoder: bool = False, # in case input has multiple channels -> process channels independently in encoder
                              combine_kernel_size: int = 1,
                              skip_stop_gradient: bool = False,
-                             skip_connections=False,  # bool or list
+                             skip_connections=True,  # bool or list
                              skip_combine_mode: str = "conv",  # conv, wsconv
                              scale_edm:bool = False,
                              category_number:int = 0,
@@ -154,7 +151,7 @@ def get_distnet_2d_seg_model(n_inputs: int,
     contraction_per_layer = []
     no_residual_layer = []
     combine_residuals = {}
-    last_input_filters = 1 if shared_encoder else n_inputs
+    last_input_filters = n_inputs
     for l_idx, param_list in enumerate(encoder_settings):
         op, contraction, residual_filters, out_filters = encoder_op(param_list, downsampling_mode=downsampling_mode,
                                                                     l2_reg=l2_reg,
@@ -165,11 +162,7 @@ def get_distnet_2d_seg_model(n_inputs: int,
         encoder_layers.append(op)
         contraction_per_layer.append(contraction)
         no_residual_layer.append(residual_filters == 0)
-        if shared_encoder and l_idx in skip_connections:
-            combine_residuals_op = Combine(filters=residual_filters, kernel_size=combine_kernel_size,
-                                           compensate_gradient=True,
-                                           l2_reg=l2_reg, name=f"CombineResiduals_{l_idx}")
-            combine_residuals[l_idx] = combine_residuals_op
+
     # define feature operations
     feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", l2_reg=l2_reg,
                                                                last_input_filters=out_filters)
@@ -220,10 +213,7 @@ def get_distnet_2d_seg_model(n_inputs: int,
     if n_inputs > 1:
         inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(n_inputs)]
         input = tf.keras.layers.Concatenate(axis=-1, name="InputConcat")(inputs)
-        if shared_encoder:
-            downsampled = [ ChannelToBatch(compensate_gradient=False, name="MergeInputs")(input) ]
-        else:
-            downsampled = [input]
+        downsampled = [input]
     else:
         inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name="Input")]
         downsampled = [ inputs[0] ]
@@ -232,9 +222,6 @@ def get_distnet_2d_seg_model(n_inputs: int,
     for i, l in enumerate(encoder_layers):
         down, res = l(downsampled[-1])
         downsampled.append(down)
-        if shared_encoder and i in skip_connections and res is not None:  # combine residuals
-            res = SplitBatch(n_inputs, compensate_gradient=False, name=f"SplitResiduals_{i}")(res)
-            res = combine_residuals[i](res)
         residuals.append(res)
     residuals = residuals[::-1]
 
@@ -243,11 +230,7 @@ def get_distnet_2d_seg_model(n_inputs: int,
         feature = op(feature)
 
     # combine individual features
-    if shared_encoder:
-        all_features = SplitBatch(n_inputs, compensate_gradient=False, name="SplitFeatures")(feature)
-        combined_features = combine_features_op(all_features)
-    else:
-        combined_features = feature
+    combined_features = feature
 
     outputs = []
     for decoder_name in output_per_decoder.keys():
