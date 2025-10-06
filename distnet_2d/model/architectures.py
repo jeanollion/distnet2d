@@ -21,9 +21,11 @@ def get_architecture(architecture_type:str, **kwargs):
 
 
 class BlendD2:
-    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
+    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, early_downsampling:bool = True, downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
         prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
         self.name = f"{prefix}blendD2-{filters}"
+        if attention>0 or self_attention>0:
+            print(f"spatial dimension at attention layer: {spatial_dimensions[0] / 2**2} x {spatial_dimensions[1] / 2**2}")
         self.skip_connections=skip_connections
         self.attention = attention
         self.self_attention=self_attention
@@ -32,8 +34,10 @@ class BlendD2:
         self.combine_kernel_size = combine_kernel_size
         self.pair_combine_kernel_size = pair_combine_kernel_size
         self.blending_filter_factor=blending_filter_factor
-        self.downsampling_mode="maxpool_and_stride"
-        self.upsampling_mode ="tconv"
+        self.downsampling_mode=downsampling_mode
+        self.upsampling_mode = upsampling_mode
+        self.early_downsampling=early_downsampling
+        ker0, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 2 )
         ker1_2, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2)
         ker2, dil2 = get_kernels_and_dilation(5, 2, spatial_dimensions, 2 * 2)
@@ -41,7 +45,8 @@ class BlendD2:
         ker2_3, dil2_3 = get_kernels_and_dilation(5, 4, spatial_dimensions, 2 * 2)
         self.encoder_settings = [
             [
-                {"filters":32, "downscale":2, "weight_scaled":False, "dropout_rate":0}
+                {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0, "batch_norm": False},
+                {"filters":32, "kernel_size": ker0, "downscale":2, "weight_scaled":False, "dropout_rate":0}
             ],
             [
                 {"filters":32, "op":"conv", "kernel_size":ker1, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":False},
@@ -49,6 +54,8 @@ class BlendD2:
                 {"filters":filters, "kernel_size":ker1, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
             ]
         ]
+        if early_downsampling:
+            self.encoder_settings[0].pop(0)
         self.feature_settings = [
             {"op":"res2d", "dilation":dil2, "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
             {"op":"res2d", "dilation":dil2 if self_attention>0 else dil2_2, "kernel_size":ker2 if self_attention>0 else ker2_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
@@ -68,15 +75,17 @@ class BlendD2:
             {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
         ]
         self.decoder_settings = [
-            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
+            {"filters":16, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
             {"filters":32, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
         ]
 
 
 class BlendD3:
-    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
+    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, early_downsampling:bool=True, downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
         prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
+        if attention>0 or self_attention>0:
+            print(f"spatial dimension at attention layer: {spatial_dimensions[0] / 2**3} x {spatial_dimensions[1] / 2**3}")
         self.skip_connections=skip_connections
         self.attention = attention
         self.self_attention=self_attention
@@ -85,19 +94,23 @@ class BlendD3:
         self.combine_kernel_size = combine_kernel_size
         self.pair_combine_kernel_size = pair_combine_kernel_size
         self.blending_filter_factor = blending_filter_factor
-        self.downsampling_mode="maxpool_and_stride"
-        self.upsampling_mode ="tconv"
+        self.downsampling_mode = downsampling_mode
+        self.upsampling_mode = upsampling_mode
+        self.early_downsampling = early_downsampling
+        ker0, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 1)
+        ker1, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 2)
         ker2, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 2 * 2)
         ker3, dil3 = get_kernels_and_dilation(5, 2, spatial_dimensions, 2 * 2 * 2)
         ker3_2, dil3_2 = get_kernels_and_dilation(5, 3, spatial_dimensions, 2 * 2 * 2)
         ker3_3, dil3_3 = get_kernels_and_dilation(5, 4, spatial_dimensions, 2 * 2 * 2)
         self.encoder_settings = [
             [
-                {"filters":32, "downscale":2, "dropout_rate":0}
+                {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0, "batch_norm": False},
+                {"filters":32, "kernel_size": ker0, "downscale":2, "dropout_rate":0}
             ],
             [
-                {"filters":32, "dropout_rate":0},
-                {"filters":64, "downscale":2, "dropout_rate":0}
+                {"filters":32, "kernel_size": ker1, "dropout_rate":0},
+                {"filters":64, "kernel_size": ker1, "downscale":2, "dropout_rate":0}
             ],
             [
                 {"filters":64, "op":"res2d", "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
@@ -105,6 +118,9 @@ class BlendD3:
                 {"filters":filters, "kernel_size":ker2, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
             ]
         ]
+        if early_downsampling:
+            self.encoder_settings[0].pop(0)
+
         self.feature_settings = [
             {"op":"res2d", "dilation":dil3, "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
             {"op":"res2d", "dilation":dil3 if self_attention>0 else dil3_2, "kernel_size":ker3 if self_attention>0 else ker3_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
@@ -124,16 +140,18 @@ class BlendD3:
             {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
         ]
         self.decoder_settings = [
-            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
+            {"filters":16, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
             {"filters":32, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0},
             {"filters":64, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}
         ]
 
 
 class BlendD4:
-    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
+    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, early_downsampling:bool = True, downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
         prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
+        if attention>0 or self_attention>0:
+            print(f"spatial dimension at attention layer: {spatial_dimensions[0] / 2**4} x {spatial_dimensions[1] / 2**4}")
         self.skip_connections=skip_connections
         self.attention = attention
         self.self_attention=self_attention
@@ -142,8 +160,11 @@ class BlendD4:
         self.combine_kernel_size = combine_kernel_size
         self.pair_combine_kernel_size = pair_combine_kernel_size
         self.blending_filter_factor = blending_filter_factor
-        self.downsampling_mode="maxpool_and_stride"
-        self.upsampling_mode ="tconv"
+        self.downsampling_mode = downsampling_mode
+        self.upsampling_mode = upsampling_mode
+        self.early_downsampling = early_downsampling
+        ker0, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 1)
+        ker1, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 2)
         ker2, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2 ** 2)
         ker3, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2 ** 3)
         ker3_2, dil3_2 = get_kernels_and_dilation(5, 2, spatial_dimensions, 2 ** 3)
@@ -152,11 +173,12 @@ class BlendD4:
         ker4_3, dil4_3 = get_kernels_and_dilation(5, 4, spatial_dimensions, 2 ** 4)
         self.encoder_settings = [
             [
-                {"filters":16, "downscale":2, "dropout_rate":0}
+                {"filters": 16, "op": "conv", "kernel_size": ker0, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0, "batch_norm": False},
+                {"filters":16, "kernel_size":ker0, "downscale":2, "dropout_rate":0}
             ],
             [
-                {"filters":16, "dropout_rate":0},
-                {"filters":32, "downscale":2, "dropout_rate":0}
+                {"filters":16, "kernel_size":ker1, "dropout_rate":0},
+                {"filters":32, "kernel_size":ker1, "downscale":2, "dropout_rate":0}
             ],
             [
                 {"filters":32, "op":"res2d", "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0},
@@ -169,6 +191,9 @@ class BlendD4:
                 {"filters":filters, "kernel_size":ker3, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
             ]
         ]
+        if early_downsampling:
+            self.encoder_settings[0].pop(0)
+
         self.feature_settings = [
             {"op":"res2d", "dilation":dil4, "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
             {"op":"res2d", "dilation":dil4 if self_attention>0 else dil4_2, "kernel_size":ker4 if self_attention>0 else ker4_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
@@ -188,7 +213,7 @@ class BlendD4:
             {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
         ]
         self.decoder_settings = [
-            {"filters":1, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
+            {"filters":16, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
             {"filters":16, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0},
             {"filters":32, "op": "res2d", "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4, "weight_scaled_up": False, "weight_scaled": False, "batch_norm": False, "dropout_rate": 0},
             {"filters":64, "op":"res2d", "weighted_sum":False, "n_conv":2, "up_kernel_size":4, "weight_scaled_up":False, "weight_scaled":False, "batch_norm":False, "dropout_rate":0}

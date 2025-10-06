@@ -109,8 +109,8 @@ class DistnetModelSeg(keras.Model):
 
         return self.compute_metrics(x, y, y_pred, None)
 
-def get_distnet_2d_seg(n_inputs:int ,config, shared_encoder:bool=False, name: str="DiSTNet2DSeg",**kwargs):
-    return get_distnet_2d_seg_model(n_inputs=n_inputs, shared_encoder=shared_encoder,
+def get_distnet_2d_seg(n_inputs:int ,config, name: str="DiSTNet2DSeg",**kwargs):
+    return get_distnet_2d_seg_model(n_inputs=n_inputs,
                                     upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode,
                                     skip_stop_gradient=False, skip_connections=config.skip_connections,
                                     encoder_settings=config.encoder_settings, feature_settings=config.feature_settings,
