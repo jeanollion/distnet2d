@@ -38,7 +38,7 @@ class SpatialAttention2D(tf.keras.layers.Layer):
         assert len(input_shape_)==len(input_shape) and all(i==j for i,j in zip(input_shape_, input_shape)), f"both tensors must have same input shape: {input_shape_} != {input_shape}"
         self.spatial_dims=input_shape[1:-1]
         self.spatial_dim = np.prod(self.spatial_dims)
-        print(f"attention spatial dims: {self.spatial_dims}")
+        #print(f"attention spatial dims: {self.spatial_dims}")
         if self.filters is None or self.filters<=0:
             self.filters = input_shape[-1]
         self.attention_layer=tf.keras.layers.MultiHeadAttention(self.num_heads, key_dim=self.filters, value_dim=self.filters, attention_axes=[1, 2], dropout=self.dropout, name="MultiHeadAttention")
