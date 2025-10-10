@@ -357,7 +357,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          pair_combine_kernel_size:int = 1,
                          blending_filter_factor:float = 0.5,
                          skip_stop_gradient:bool = False, # was True
-                         skip_connections = True,  # bool or list. -1 = feature level
+                         skip_connections = True,  # bool or list
                          skip_combine_mode:str="conv",  #conv, wsconv
                          attention : int = 0,
                          attention_dropout:float = 0.1,
@@ -404,7 +404,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
             long_term = False
         n_frames = frame_window * (2 if next else 1) + 1
         if skip_connections == False:
-            skip_connections = []
+            skip_connections = [len(encoder_settings)] # only at feature level
         elif skip_connections == True:
             skip_connections = [i for i in range(len(encoder_settings)+1)]
         else:
@@ -429,7 +429,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         encoder_layers = []
         contraction_per_layer = []
         no_residual_layer = []
-        last_input_filters = n_inputs
+        last_input_filters = n_inputs # was 1 -> which means for multichannel models retro-compatibility is no ensured
         for l_idx, param_list in enumerate(encoder_settings):
             op, contraction, residual_filters, out_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
             last_input_filters = out_filters
@@ -471,7 +471,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
             output_per_decoder["Center"]["CDMdY"]=1
             output_per_decoder["Center"]["CDMdX"]=1
         if category_number > 1:
-            output_per_decoder["Cat"] = {"Category":5}
+            output_per_decoder["Cat"] = {"Category":5 if tracking else 2}
         decoder_output_names = dict()
         for n, o_ns in output_per_decoder.items():
             decoder_output_names[n] = dict()

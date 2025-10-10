@@ -6,7 +6,6 @@ def get_label_size(labels, max_objects_number:int=0): # C, Y, X
     N = max_objects_number if max_objects_number>0 else tf.math.maximum(tf.cast(1, labels.dtype), tf.math.reduce_max(labels))
 
     def treat_image(im):
-
         def non_null(ids, counts):
             non_null_ids = tf.math.not_equal(ids, 0)
             ids = tf.boolean_mask(ids, non_null_ids)
@@ -82,14 +81,14 @@ def get_argmax_2d_by_object_fun(nan=float('NaN')):
 def get_mean_by_object_fun(nan=float('NaN'), channel_axis:bool=True):
     nan = tf.cast(nan, tf.float32)
     if channel_axis:
-        def fun(data, mask, size): # (Y, X, C), (Y, X), (1,)
+        def fun(data, mask, size): # (Y, X, C), (Y, X), (1,) -> (C,)
             mask = tf.expand_dims(mask, -1)
             null = lambda: tf.repeat(nan, repeats=tf.shape(data)[-1])
             non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False), tf.cast(size, tf.float32))
             return tf.cond(tf.math.equal(size, 0), null, non_null)
         return fun
     else:
-        def fun(data, mask, size): # (Y, X), (Y, X), (1,)
+        def fun(data, mask, size): # (Y, X), (Y, X), (1,) -> (1,)
             null = lambda: nan
             non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False), tf.cast(size, tf.float32))
             return tf.cond(tf.math.equal(size, 0), null, non_null)
@@ -99,7 +98,7 @@ def get_mean_by_object_fun(nan=float('NaN'), channel_axis:bool=True):
 def get_max_by_object_fun(nan=float('NaN'), channel_axis:bool=True):
     nan = tf.cast(nan, tf.float32)
     if channel_axis:
-        def fun(data, mask, size):  # (Y, X, C), (Y, X), (1,)
+        def fun(data, mask, size):  # (Y, X, C), (Y, X), (1,) -> (1,)
             mask = tf.expand_dims(mask, -1)
             null = lambda: tf.repeat(nan, repeats=tf.shape(data)[-1])
             non_null = lambda: tf.reduce_max(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False)
@@ -113,7 +112,7 @@ def get_max_by_object_fun(nan=float('NaN'), channel_axis:bool=True):
         return fun
 
 
-def objectwise_compute(data, fun, labels, ids, sizes): # tensor (Y, X, ...) , fun, (Y, X), (N), ( N) -> (N, ...)
+def objectwise_compute(data, fun, labels, ids, sizes): # tensor (Y, X, ...) , fun, (Y, X), (N,), (N,) -> (N, ...)
 
     def non_null():
         ta = tf.TensorArray(dtype=data.dtype, size=tf.shape(ids)[0])
@@ -151,27 +150,41 @@ def objectwise_compute_channel(data, fun, labels, ids, sizes): # tensor (C, Y, X
     return tf.cond(tf.math.equal(tf.size(ids), 0), null, non_null)
 
 
-def coord_distance_fun(max:bool=True, sqrt:bool=False):
+def coord_distance_fun(max:bool=True, sqrt:bool=False, pop_fraction=0.25):
     def loss(true, pred): # (C, N, 2)
         no_na_mask = tf.stop_gradient(tf.cast(tf.math.logical_not(tf.math.logical_or(tf.math.is_nan(true[...,:1]), tf.math.is_nan(pred[...,:1]))), tf.float32)) # non-empty objects # (C, N, 1)
-        n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False) # (C)
+        n_obj = tf.reduce_sum(no_na_mask[...,0], axis=-1, keepdims=False) # (C, )
         true = tf.math.multiply_no_nan(true, no_na_mask)  # (C, N, 2)
         pred = tf.math.multiply_no_nan(pred, no_na_mask)  # (C, N, 2)
-        d = tf.math.square(true - pred)  # (C, N, 2) # TODO for a loss function use Huber loss
+        d = tf.math.square(true - pred)  # (C, N, 2) # to use this function as a loss function use Huber loss instead of L2
         d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C, N)
         if sqrt:
             d = tf.math.sqrt(d)
-        #print(f"n_obj: {n_obj} \ndistances: \n{d} \nsize: \n{size}")
-        #d = tf.math.divide_no_nan(d, size)
-        #return tf.math.reduce_sum(d, keepdims=False)
         if max:
-            return tf.math.reduce_max(d)
-        else:
+            if pop_fraction <= 0:
+                return tf.math.reduce_max(d)
+            else:
+                d = tf.map_fn(lambda args: reduce_pop_size(tensor=args[0], N=args[1], pop_fraction=pop_fraction), (d, n_obj), fn_output_signature=tf.float32)
+                return tf.math.reduce_max(d)  # max over channel
+        else: # mean
             d = tf.math.reduce_sum(d, axis=-1, keepdims=False) #(C, )
             d = tf.math.divide_no_nan(d, n_obj) # mean over objects
             return tf.math.reduce_mean(d) # mean over channel
     return loss
 
+# for small population: returns max, for large population returns mean of top_k
+def reduce_pop_size(tensor, N, pop_fraction:float=0.25):
+    N = tf.cast(N, tf.int32)
+    pop_fraction = tf.cast(pop_fraction, tf.float32)
+    pop_size_limit = tf.cast(tf.math.ceil(2 / pop_fraction), tf.int32)
+
+    small_pop = lambda: tf.reduce_max(tensor)
+
+    def large_pop():
+        top_k, _ = tf.math.top_k(tensor, k=tf.cast(tf.cast(N, tf.float32) * pop_fraction, tf.int32))
+        return tf.reduce_mean(top_k)
+
+    return tf.cond(tf.math.greater_equal(N, pop_size_limit), large_pop, small_pop)
 
 def _get_spatial_kernels(Y, X, two_channel_axes=True, batch_axis=True):
     Y, X = tf.meshgrid(tf.range(Y, dtype = tf.float32), tf.range(X, dtype = np.float32), indexing = 'ij')
