@@ -429,9 +429,9 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         encoder_layers = []
         contraction_per_layer = []
         no_residual_layer = []
-        last_input_filters = n_inputs # was 1 -> which means for multichannel models retro-compatibility is no ensured
+        last_input_filters = 1# n_inputs # was 1 -> which means for multichannel models retro-compatibility is no ensured
         if n_inputs > 1:
-            print(f"legacy arch: False")
+            print(f"legacy arch: {last_input_filters==1}")
         for l_idx, param_list in enumerate(encoder_settings):
             op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, frame_window), downsampling_mode=downsampling_mode, attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
             last_input_filters = out_filters
