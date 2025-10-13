@@ -375,6 +375,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          category_number:int = 0,  # category for each cell instance (segmentation level), <=1 means do not predict category
                          l2_reg:float = 0,
                          name: str="DiSTNet2D",
+                         legacy_multi_input_arch:bool=False,
                          **kwargs,
                          ):
         if frame_window == 0:
@@ -429,9 +430,10 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         encoder_layers = []
         contraction_per_layer = []
         no_residual_layer = []
-        last_input_filters = 1# n_inputs # was 1 -> which means for multichannel models retro-compatibility is no ensured
-        if n_inputs > 1:
-            print(f"legacy arch: {last_input_filters==1}")
+        last_input_filters = n_inputs
+        if n_inputs > 1 and legacy_multi_input_arch:
+            last_input_filters = 1
+            print(f"legacy multi-input arch")
         for l_idx, param_list in enumerate(encoder_settings):
             op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, frame_window), downsampling_mode=downsampling_mode, attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
             last_input_filters = out_filters
