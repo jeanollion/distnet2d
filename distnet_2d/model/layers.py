@@ -268,7 +268,7 @@ class Combine(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
-        self.concat = tf.keras.layers.Concatenate(axis=-1, name = "Concat")
+        self.concat = tf.keras.layers.Concatenate(axis=-1, name = self.name+"_concat")
         if self.weight_scaled:
             self.combine_conv = WSConv2D(
                 filters=self.filters,
@@ -276,7 +276,7 @@ class Combine(tf.keras.layers.Layer):
                 padding='same',
                 activation=self.activation,
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
-                name="Conv1x1")
+                name=self.name+"_conv1x1")
         else:
             self.combine_conv = tf.keras.layers.Conv2D(
                 filters=self.filters,
@@ -284,7 +284,7 @@ class Combine(tf.keras.layers.Layer):
                 padding='same',
                 activation=self.activation,
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
-                name="Conv1x1")
+                name=self.name+"_conv1x1")
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./len(input_shape))
         super().build(input_shape)

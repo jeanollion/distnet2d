@@ -433,7 +433,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         if n_inputs > 1:
             print(f"legacy arch: False")
         for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, residual_filters, out_filters = encoder_op(param_list, downsampling_mode=downsampling_mode, attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, frame_window), downsampling_mode=downsampling_mode, attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
             last_input_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
@@ -586,7 +586,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                 for op in decoder_feature_op[decoder_name][0]:
                     up = op(up)
                 for i, (l, res) in enumerate(zip(d_layers[::-1], residuals[:-1])):
-                    up = l([up, res if len(d_layers)-i in skip else None])
+                    up = l([up, res if len(d_layers) - i in skip else None])
                 output_per_dec = dict()
                 for output_name in output_per_decoder[decoder_name].keys():
                     if output_name in decoder_out[decoder_name]:
@@ -614,7 +614,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                 outputs.extend(output_per_dec.values())
         return DiSTNetModel(inputs, outputs, name=name, frame_window=frame_window, next=next, spatial_dims=spatial_dimensions if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=category_number, **kwargs)
 
-def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", name: str="EncoderLayer", layer_idx:int=1):
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
@@ -635,10 +635,15 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
             down = down_concat(down)
         else:
             down = down[0]
-        if sequence is not None or layer_idx>0:
+        if (sequence is not None or layer_idx>0) and skip_parameters is not None:
             res = x
             if skip_stop_gradient:
                 res = stop_gradient(res, parent_name = name)
+            n_splits, inference_idx = skip_parameters
+            assert inference_idx<n_splits, f"invalid inference idx: {inference_idx} must be lower than n_splits: {n_splits}"
+            feature_skip = SelectFeature(inference_idx=inference_idx,  name=f"{name}_SelectFeature")
+            feature_split = SplitBatch(n_splits, compensate_gradient=False, name=f"{name}_SplitFeature")
+            res = feature_skip([res, feature_split(res)])
         else:
             res = None
         return down, res
@@ -681,7 +686,7 @@ def decoder_op(
         up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg)
         up_op_out = upsampling_op(filters=filters_out, parent_name=None if output_name is not None else name, name = output_name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg)
         if skip_combine_mode.lower()=="conv" or skip_combine_mode.lower()=="wsconv":
-            combine = Combine(name = output_name if output_name is not None and n_conv==0 else name, filters=filters if filters_out is None or n_conv>0 else filters_out, kernel_size = combine_kernel_size, l2_reg=l2_reg, weight_scaled=skip_combine_mode.lower()=="wsconv")
+            combine = Combine(name = output_name if output_name is not None and n_conv==0 else name+"_combine", filters=filters if filters_out is None or n_conv>0 else filters_out, kernel_size = combine_kernel_size, l2_reg=l2_reg, weight_scaled=skip_combine_mode.lower()=="wsconv")
         else:
             combine = None
         op = op.lower().replace("_", "")
