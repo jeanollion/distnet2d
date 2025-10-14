@@ -27,13 +27,18 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0, category:b
     mean_fun_lm = get_mean_by_object_fun(nan=0.)
 
     def fun(args):
-        if tracking:
-            edm, gdcm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+        if category:
+            if tracking:
+                edm, gdcm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+            else:
+                edm, gdcm, cat, true_edm, true_cat, labels, true_center_ob = args
         else:
-            edm, gdcm, cat, true_edm, true_cat, labels, true_center_ob = args
+            if tracking:
+                edm, gdcm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+            else:
+                edm, gdcm, true_edm, labels, true_center_ob = args
         labels = tf.transpose(labels, perm=[2, 0, 1])  # (1, Y, X)
         edm = tf.transpose(edm, perm=[2, 0, 1]) # (1, Y, X)
-        true_edm = tf.transpose(true_edm, perm=[2, 0, 1]) # (1, Y, X)
         gdcm = tf.transpose(gdcm, perm=[2, 0, 1])  # (1, Y, X)
         center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, scale)))
         ids, sizes, N = get_label_size(labels, max_objects_number)  # (1, N), (1, N)
@@ -106,12 +111,18 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0, category:b
             metrics.append(-lm_errors)
 
         return tf.stack(metrics)
-
-    if tracking:
-        def metrics_fun(edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
-            return tf.map_fn(fun, (edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
+    if category:
+        if tracking:
+            def metrics_fun(edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
+                return tf.map_fn(fun, (edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
+        else:
+            def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
+                return tf.map_fn(fun, (edm, gcdm, cat, true_edm, true_cat, labels, true_center_array), fn_output_signature=tf.float32)
     else:
-        def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
-            return tf.map_fn(fun, (edm, gcdm, cat, true_edm, true_cat, labels, true_center_array), fn_output_signature=tf.float32)
-
+        if tracking:
+            def metrics_fun(edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
+                return tf.map_fn(fun, (edm, gcdm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
+        else:
+            def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
+                return tf.map_fn(fun, (edm, gcdm, true_edm, labels, true_center_array), fn_output_signature=tf.float32)
     return metrics_fun
