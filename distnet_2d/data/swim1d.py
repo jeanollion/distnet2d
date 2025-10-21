@@ -3,14 +3,16 @@ import numpy as np
 from random import getrandbits, uniform, choice
 import scipy.ndimage as ndi
 import tensorflow as tf
-def get_swim1d_function(mask_channels:list, distance:int=50, min_gap:int=3, closed_end:bool = True):
+def get_swim1d_function(mask_channels:list, ref_mask_idx:int=0, distance:int=50, min_gap:int=3, closed_end:bool = True):
     if not isinstance(mask_channels, (list, tuple)):
         mask_channels = [mask_channels]
     assert len(mask_channels)>=1, "at least one mask channel must be provided"
+    if ref_mask_idx > 0:
+        print(f"swim1D: mask channels {mask_channels} reference channel {ref_mask_idx}->{mask_channels[ref_mask_idx]}", flush=True)
     def fun(batch_by_channel):
         if distance > 1:
             channels = [c for c in batch_by_channel.keys() if not isinstance(c, str) and c>=0]
-            mask_batch = batch_by_channel[mask_channels[0]]
+            mask_batch = batch_by_channel[mask_channels[ref_mask_idx]]
             for b, c in itertools.product(range(mask_batch.shape[0]), range(mask_batch.shape[-1])):
                 mask_img = mask_batch[b,...,c]
                 # get y space between bacteria
