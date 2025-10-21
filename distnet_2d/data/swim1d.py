@@ -7,8 +7,6 @@ def get_swim1d_function(mask_channels:list, ref_mask_idx:int=0, distance:int=50,
     if not isinstance(mask_channels, (list, tuple)):
         mask_channels = [mask_channels]
     assert len(mask_channels)>=1, "at least one mask channel must be provided"
-    if ref_mask_idx > 0:
-        print(f"swim1D: mask channels {mask_channels} reference channel {ref_mask_idx}->{mask_channels[ref_mask_idx]}", flush=True)
     def fun(batch_by_channel):
         if distance > 1:
             channels = [c for c in batch_by_channel.keys() if not isinstance(c, str) and c>=0]
