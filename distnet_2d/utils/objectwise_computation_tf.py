@@ -211,18 +211,32 @@ def _generate_kernel(sizeY, sizeX, C=1, O=0):
     return kernel
 
 
-def IoU(true, pred, tolerance:bool=False):
-    true_inter = _dilate_mask(true) if tolerance else true
-    intersection = tf.math.count_nonzero(tf.math.logical_and(true_inter, pred), keepdims=False)
-    union = tf.math.count_nonzero(tf.math.logical_or(true, pred), keepdims=False)
+def IoU(true_foreground, pred_foreground, tolerance:bool=False):
+    true_inter = _dilate_mask(true_foreground) if tolerance else true_foreground
+    intersection = tf.math.count_nonzero(tf.math.logical_and(true_inter, pred_foreground), keepdims=False)
+    union = tf.math.count_nonzero(tf.math.logical_or(true_foreground, pred_foreground), keepdims=False)
     return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))  # if union is null -> metric is 1
 
 
+def FPR(true_foreground, pred_foreground, tolerance:bool=False):
+    true_background = tf.math.logical_not(true_foreground)
+    false_positives = tf.logical_and(pred_foreground, true_background)
+    false_positives = _erode_mask(false_positives) if tolerance else false_positives
+    num_fp = tf.reduce_sum(tf.cast(false_positives, tf.float32))
+    num_tn = tf.reduce_sum(tf.cast(true_background, tf.float32))
+    return tf.math.divide_no_nan(num_fp, num_tn)
+
+
 def _dilate_mask(maskBYX):
-    maskBYX = tf.cast(maskBYX, tf.float16)
-    mean_kernel = [[1./9, 1./9, 1./9], [1./9, 1./9, 1./9], [1./9, 1./9, 1./9]]
-    conv = _convolve(maskBYX, tf.cast(mean_kernel, tf.float16))
-    return tf.math.greater(conv, tf.cast(0., tf.float16))
+    maskBYX = tf.cast(maskBYX, tf.int32)
+    conv = _convolve(maskBYX, tf.ones(shape=[3, 3], dtype=tf.int32))
+    return tf.math.greater(conv, tf.cast(2, tf.int32))
+
+
+def _erode_mask(maskBYX):
+    maskBYX = tf.cast(maskBYX, tf.int32)
+    conv = _convolve(maskBYX, tf.ones(shape=[3, 3], dtype=tf.int32))
+    return tf.math.greater_equal(conv, tf.cast(7, tf.int32))
 
 
 def _contour_IoU_fun(pred_contour, mask, size):

@@ -1,6 +1,7 @@
 import tensorflow as tf
 from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun, get_argmax_2d_by_object_fun, \
-    get_mean_by_object_fun, get_label_size, IoU, objectwise_compute, objectwise_compute_channel, reduce_pop_size
+    get_mean_by_object_fun, get_label_size, IoU, objectwise_compute, objectwise_compute_channel, reduce_pop_size, \
+    FPR
 
 
 def get_metrics_fun(center_scale: float, max_objects_number: int = 0, category:bool = False, tracking:bool=True):
@@ -59,12 +60,17 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0, category:b
 
         metrics = []
 
-        # EDM : foreground/background IoU #+ contour IoU
+        # EDM : foreground/background IoU
         pred_foreground = tf.math.greater(edm, tf.cast(0.5, edm.dtype))
         true_foreground = tf.math.greater(labels, tf.cast(0, labels.dtype))
-        edm_IoU = IoU(true_foreground, pred_foreground, tolerance=True)
+        edm_IoU = IoU(true_foreground, pred_foreground, tolerance=False)
         metrics.append(edm_IoU)
 
+        # Surface-based False Positive Rate (FPR) based on EDM
+        #fpr = FPR(true_foreground, pred_foreground, tolerance=True)
+        #metrics.append(-fpr)
+
+        # contour IoU : problem: true positive contours are usually not precise enough.
         #pred_contours = tf.math.logical_and(tf.math.greater(edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(edm, tf.cast(1.5, edm.dtype)))
         #true_contours = tf.math.logical_and(tf.math.greater(true_edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(true_edm, tf.cast(1.5, edm.dtype)))
         #contour_IoU = IoU(true_contours, pred_contours, tolerance=True)
