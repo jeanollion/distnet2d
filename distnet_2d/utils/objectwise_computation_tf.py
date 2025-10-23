@@ -230,39 +230,47 @@ def FPR(true_foreground, pred_foreground, tolerance_radius:float=0):
 def _dilate_mask(maskBYX, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=True):
     assert 0<=tolerance<0.5
     maskBYX = tf.cast(maskBYX, tf.int32)
-    ker = circular_kernel(radius)
-    thld = np.floor(np.sum(ker) * tolerance)
-    conv = _convolve(maskBYX, ker, symmetric_padding=symmetric_padding)
+    ker, rad = circular_kernel(radius)
+    thld = tf.math.floor(tf.cast(tf.math.reduce_sum(ker), tf.float32) * tf.cast(tolerance, tf.float32))
+    conv = _convolve(maskBYX, ker, rad, symmetric_padding=symmetric_padding)
     return tf.math.greater(conv, tf.cast(thld, tf.int32))
 
 
 def _erode_mask(maskBYX, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=False):
     assert 0 <= tolerance < 0.5
     maskBYX = tf.cast(maskBYX, tf.int32)
-    ker = circular_kernel(radius)
-    thld = np.ceil(np.sum(ker) * (1 - tolerance))
-    conv = _convolve(maskBYX, ker, symmetric_padding=symmetric_padding)
+    ker, rad = circular_kernel(radius)
+    thld = tf.math.ceil(tf.cast(tf.math.reduce_sum(ker), tf.float32) * tf.cast(1 - tolerance, tf.float32))
+    conv = _convolve(maskBYX, ker, rad, symmetric_padding=symmetric_padding)
     return tf.math.greater_equal(conv, tf.cast(thld, tf.int32))
 
 
 
-def circular_kernel(radius: float) -> np.ndarray:
+def circular_kernel(radius: float) :
     """
     Create a circular 2D kernel of ones with a given float radius.
-
     Args:
         radius: The radius of the circle (float).
-
     Returns:
-        A 2D numpy array representing the circular kernel.
+        A 2D TensorFlow tensor representing the circular kernel (dtype: tf.int32).
     """
-    diameter = int(2 * np.ceil(radius) + 1)
+    radius_int = tf.cast(radius, tf.int32)
+    diameter = tf.cast(2 * radius_int + 1, tf.int32)
     center = diameter // 2
-    y, x = np.ogrid[-center:diameter - center, -center:diameter - center]
-    distance = np.sqrt(x**2 + y**2)
-    kernel = np.zeros((diameter, diameter), dtype=np.int32)
-    kernel[distance <= radius] = 1
-    return kernel
+
+    # Create a grid of coordinates
+    y = tf.range(-center, diameter - center, dtype=tf.float32)
+    x = tf.range(-center, diameter - center, dtype=tf.float32)
+    y_grid, x_grid = tf.meshgrid(y, x, indexing='ij')
+
+    # Compute the distance from the center
+    distance = tf.math.sqrt(x_grid**2 + y_grid**2)
+
+    # Create the circular kernel
+    kernel = tf.zeros((diameter, diameter), dtype=tf.int32)
+    kernel = tf.where(distance <= radius, tf.ones_like(kernel, dtype=tf.int32), kernel)
+
+    return kernel, radius_int
 
 
 def _contour_IoU_fun(pred_contour, mask, size):
@@ -272,15 +280,13 @@ def _contour_IoU_fun(pred_contour, mask, size):
 
 def _compute_contours(maskBYX):
     kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]])
-    conv = _convolve(maskBYX, kernel, symmetric_padding=True)
+    conv = _convolve(maskBYX, kernel, 1, symmetric_padding=True)
     return tf.math.greater(conv, tf.cast(0, conv.dtype)) # detect at least one zero in the neighborhood
 
 
-def _convolve(imageBYX, kernel, symmetric_padding:bool):
-    Y, X = kernel.shape
-    assert Y%2==1 and X%2==1, f"invalid kernel shape: must be uneven, got {Y} x {X}"
+def _convolve(imageBYX, kernel, radius, symmetric_padding:bool):
     if symmetric_padding:
-        imageBYX = tf.pad(imageBYX, [[0, 0], [Y//2, Y//2], [X//2, X//2]], 'SYMMETRIC')
+        imageBYX = tf.pad(imageBYX, [[0, 0], [radius, radius], [radius, radius]], 'SYMMETRIC')
     imageBYX = imageBYX[..., tf.newaxis]
     kernel = tf.cast(kernel, imageBYX.dtype)
     conv = tf.nn.conv2d(input, kernel[:, :, tf.newaxis, tf.newaxis], strides=1, padding='VALID' if symmetric_padding else "SAME")
