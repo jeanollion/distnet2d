@@ -4,13 +4,13 @@ from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun
     FPR
 
 
-def get_metrics_fun(center_scale: float, max_objects_number: int = 0, category:bool = False, tracking:bool=True):
+def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = False, tracking:bool=True):
     """
     return metric function for disnet2D
     assumes iterator in return_central_only= True mode (thus framewindow = 1 and next = true)
     Parameters
     ----------
-    center_scale
+    scale
     max_objects_number
     reduce
 
@@ -19,7 +19,6 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0, category:b
 
     """
 
-    scale = tf.cast(center_scale, tf.float32)
     coord_distance_function = coord_distance_fun(max=True, sqrt=True, pop_fraction=0.25)
     spa_max_fun = get_argmax_2d_by_object_fun()
     mean_fun = get_mean_by_object_fun()
@@ -41,7 +40,7 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0, category:b
         labels = tf.transpose(labels, perm=[2, 0, 1])  # (1, Y, X)
         edm = tf.transpose(edm, perm=[2, 0, 1]) # (1, Y, X)
         gdcm = tf.transpose(gdcm, perm=[2, 0, 1])  # (1, Y, X)
-        center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, scale)))
+        center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, tf.cast(scale/2., tf.float32))))
         ids, sizes, N = get_label_size(labels, max_objects_number)  # (1, N), (1, N)
         ids = ids[0]
         sizes = sizes[0]
@@ -63,12 +62,12 @@ def get_metrics_fun(center_scale: float, max_objects_number: int = 0, category:b
         # EDM : foreground/background IoU
         pred_foreground = tf.math.greater(edm, tf.cast(0.5, edm.dtype))
         true_foreground = tf.math.greater(labels, tf.cast(0, labels.dtype))
-        edm_IoU = IoU(true_foreground, pred_foreground, tolerance=False)
+        edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=scale/8.)
         metrics.append(edm_IoU)
 
         # Surface-based False Positive Rate (FPR) based on EDM
-        #fpr = FPR(true_foreground, pred_foreground, tolerance=True)
-        #metrics.append(-fpr)
+        fpr = FPR(true_foreground, pred_foreground, tolerance_radius=scale/4.)
+        metrics.append(-fpr)
 
         # contour IoU : problem: true positive contours are usually not precise enough.
         #pred_contours = tf.math.logical_and(tf.math.greater(edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(edm, tf.cast(1.5, edm.dtype)))

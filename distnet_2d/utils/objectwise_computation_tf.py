@@ -211,32 +211,58 @@ def _generate_kernel(sizeY, sizeX, C=1, O=0):
     return kernel
 
 
-def IoU(true_foreground, pred_foreground, tolerance:bool=False):
-    true_inter = _dilate_mask(true_foreground) if tolerance else true_foreground
+def IoU(true_foreground, pred_foreground, tolerance_radius:float=0):
+    true_inter = _dilate_mask(true_foreground, radius=tolerance_radius, symmetric_padding=True) if tolerance_radius>=1 else true_foreground
     intersection = tf.math.count_nonzero(tf.math.logical_and(true_inter, pred_foreground), keepdims=False)
     union = tf.math.count_nonzero(tf.math.logical_or(true_foreground, pred_foreground), keepdims=False)
     return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))  # if union is null -> metric is 1
 
 
-def FPR(true_foreground, pred_foreground, tolerance:bool=False):
+def FPR(true_foreground, pred_foreground, tolerance_radius:float=0):
     true_background = tf.math.logical_not(true_foreground)
     false_positives = tf.logical_and(pred_foreground, true_background)
-    false_positives = _erode_mask(false_positives) if tolerance else false_positives
+    false_positives = _erode_mask(false_positives, radius=tolerance_radius, symmetric_padding=False) if tolerance_radius>=1 else false_positives
     num_fp = tf.reduce_sum(tf.cast(false_positives, tf.float32))
     num_tn = tf.reduce_sum(tf.cast(true_background, tf.float32))
     return tf.math.divide_no_nan(num_fp, num_tn)
 
 
-def _dilate_mask(maskBYX):
+def _dilate_mask(maskBYX, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=True):
+    assert 0<=tolerance<0.5
     maskBYX = tf.cast(maskBYX, tf.int32)
-    conv = _convolve(maskBYX, tf.ones(shape=[3, 3], dtype=tf.int32))
-    return tf.math.greater(conv, tf.cast(2, tf.int32))
+    ker = circular_kernel(radius)
+    thld = np.floor(np.sum(ker) * tolerance)
+    conv = _convolve(maskBYX, ker, symmetric_padding=symmetric_padding)
+    return tf.math.greater(conv, tf.cast(thld, tf.int32))
 
 
-def _erode_mask(maskBYX):
+def _erode_mask(maskBYX, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=False):
+    assert 0 <= tolerance < 0.5
     maskBYX = tf.cast(maskBYX, tf.int32)
-    conv = _convolve(maskBYX, tf.ones(shape=[3, 3], dtype=tf.int32))
-    return tf.math.greater_equal(conv, tf.cast(7, tf.int32))
+    ker = circular_kernel(radius)
+    thld = np.ceil(np.sum(ker) * (1 - tolerance))
+    conv = _convolve(maskBYX, ker, symmetric_padding=symmetric_padding)
+    return tf.math.greater_equal(conv, tf.cast(thld, tf.int32))
+
+
+
+def circular_kernel(radius: float) -> np.ndarray:
+    """
+    Create a circular 2D kernel of ones with a given float radius.
+
+    Args:
+        radius: The radius of the circle (float).
+
+    Returns:
+        A 2D numpy array representing the circular kernel.
+    """
+    diameter = int(2 * np.ceil(radius) + 1)
+    center = diameter // 2
+    y, x = np.ogrid[-center:diameter - center, -center:diameter - center]
+    distance = np.sqrt(x**2 + y**2)
+    kernel = np.zeros((diameter, diameter), dtype=np.int32)
+    kernel[distance <= radius] = 1
+    return kernel
 
 
 def _contour_IoU_fun(pred_contour, mask, size):
@@ -245,13 +271,17 @@ def _contour_IoU_fun(pred_contour, mask, size):
 
 
 def _compute_contours(maskBYX):
-    kernel = [[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]]
-    conv = _convolve(maskBYX, kernel)
-    return tf.math.greater(conv, 0) # detect at least one zero in the neighborhood
+    kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]])
+    conv = _convolve(maskBYX, kernel, symmetric_padding=True)
+    return tf.math.greater(conv, tf.cast(0, conv.dtype)) # detect at least one zero in the neighborhood
 
 
-def _convolve(imageBYX, kernel):
-    padded = tf.pad(imageBYX, [[0, 0], [1, 1], [1, 1]], 'SYMMETRIC')
-    input = padded[..., tf.newaxis]
-    conv = tf.nn.conv2d(input, kernel[:, :, tf.newaxis, tf.newaxis], strides=1, padding='VALID')
+def _convolve(imageBYX, kernel, symmetric_padding:bool):
+    Y, X = kernel.shape
+    assert Y%2==1 and X%2==1, f"invalid kernel shape: must be uneven, got {Y} x {X}"
+    if symmetric_padding:
+        imageBYX = tf.pad(imageBYX, [[0, 0], [Y//2, Y//2], [X//2, X//2]], 'SYMMETRIC')
+    imageBYX = imageBYX[..., tf.newaxis]
+    kernel = tf.cast(kernel, imageBYX.dtype)
+    conv = tf.nn.conv2d(input, kernel[:, :, tf.newaxis, tf.newaxis], strides=1, padding='VALID' if symmetric_padding else "SAME")
     return conv[..., 0]
