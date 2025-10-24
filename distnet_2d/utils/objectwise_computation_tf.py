@@ -289,5 +289,5 @@ def _convolve(imageBYX, kernel, radius, symmetric_padding:bool):
         imageBYX = tf.pad(imageBYX, [[0, 0], [radius, radius], [radius, radius]], 'SYMMETRIC')
     imageBYX = imageBYX[..., tf.newaxis]
     kernel = tf.cast(kernel, imageBYX.dtype)
-    conv = tf.nn.conv2d(input, kernel[:, :, tf.newaxis, tf.newaxis], strides=1, padding='VALID' if symmetric_padding else "SAME")
+    conv = tf.nn.conv2d(imageBYX, kernel[:, :, tf.newaxis, tf.newaxis], strides=1, padding='VALID' if symmetric_padding else "SAME")
     return conv[..., 0]
