@@ -1,7 +1,7 @@
 import tensorflow as tf
 from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun, get_argmax_2d_by_object_fun, \
     get_mean_by_object_fun, get_label_size, IoU, objectwise_compute, objectwise_compute_channel, reduce_pop_size, \
-    FPR
+    FP
 
 
 def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = False, tracking:bool=True):
@@ -60,14 +60,14 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
         metrics = []
 
         # EDM : foreground/background IoU
-        pred_foreground = tf.math.greater(edm, tf.cast(0.5, edm.dtype))
+        pred_foreground = tf.math.greater(edm, tf.cast(0, edm.dtype))
         true_foreground = tf.math.greater(labels, tf.cast(0, labels.dtype))
-        edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=scale/8.)
+        edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=scale / 8.) #
         metrics.append(edm_IoU)
 
-        # Surface-based False Positive Rate (FPR) based on EDM
-        fpr = FPR(true_foreground, pred_foreground, tolerance_radius=scale/4.)
-        metrics.append(-fpr)
+        # Surface-based False Positive Density (FPD) based on EDM
+        fp = FP(true_foreground, pred_foreground, rate=False, tolerance_radius=scale / 4.) #
+        metrics.append(-fp)
 
         # contour IoU : problem: true positive contours are usually not precise enough.
         #pred_contours = tf.math.logical_and(tf.math.greater(edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(edm, tf.cast(1.5, edm.dtype)))

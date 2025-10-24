@@ -218,13 +218,18 @@ def IoU(true_foreground, pred_foreground, tolerance_radius:float=0):
     return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))  # if union is null -> metric is 1
 
 
-def FPR(true_foreground, pred_foreground, tolerance_radius:float=0):
+def FP(true_foreground, pred_foreground, rate:bool = False, tolerance_radius:float=0):
     true_background = tf.math.logical_not(true_foreground)
     false_positives = tf.logical_and(pred_foreground, true_background)
     false_positives = _erode_mask(false_positives, radius=tolerance_radius, symmetric_padding=False) if tolerance_radius>=1 else false_positives
-    num_fp = tf.reduce_sum(tf.cast(false_positives, tf.float32))
-    num_tn = tf.reduce_sum(tf.cast(true_background, tf.float32))
-    return tf.math.divide_no_nan(num_fp, num_tn)
+    fp = tf.math.count_nonzero(false_positives, keepdims=False)
+    if rate: # FPR
+        tn = tf.math.count_nonzero(true_background, keepdims=False) # for FRP
+        return tf.math.divide_no_nan(tf.cast(fp, tf.float32), tf.cast(tn, tf.float32))
+    else: # FPD
+        #return tf.cast(fp, tf.float32)
+        npix = tf.reduce_prod(tf.shape(true_background)) # for FPD
+        return tf.math.divide(tf.cast(fp, tf.float32), tf.cast(npix, tf.float32))
 
 
 def _dilate_mask(maskBYX, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=True):
