@@ -2,6 +2,9 @@ import time
 from pathlib import Path
 import sys
 from scipy.ndimage import gaussian_filter
+
+from distnet_2d.utils.objectwise_computation_tf import circular_kernel, _erode_mask
+
 path_root = Path(__file__).parents[1]
 sys.path.append(path_root.joinpath("dataset_iterator").__str__())
 sys.path.append(path_root.joinpath("distne2d").__str__())
@@ -29,11 +32,16 @@ from distnet_2d.model import get_distnet_2d, architectures, get_distnet_2d_seg
 
 seg = False
 if not seg:
-    dn = get_distnet_2d((None, None), 4, 1, True, category_number=2, config=architectures.BlendD3(filters=128, self_attention=0, attention=0, skip_connections=True, early_downsampling=True), predict_edm_derivatives=True, predict_cdm_derivatives=True)
+    #t = [[0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 0, 0, 0, 0]]
+    #print(_erode_mask(np.array(t)[np.newaxis], radius=2))
+    print(circular_kernel(2.5))
 
-    tf.keras.utils.plot_model(dn, "/data/model.png", show_shapes=True)
-    #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
-    #print(dn.summary())
+    if False:
+        dn = get_distnet_2d((None, None), 4, 1, True, category_number=2, config=architectures.BlendD3(filters=128, self_attention=0, attention=0, skip_connections=True, early_downsampling=True), predict_edm_derivatives=True, predict_cdm_derivatives=True)
+
+        tf.keras.utils.plot_model(dn, "/data/model.png", show_shapes=True)
+        #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
+        #print(dn.summary())
 
     if False:
 
