@@ -5,14 +5,14 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="DiSTNet2D",
-    version="0.2.2",
+    version="0.2.3",
     author="Jean Ollion",
     author_email="jean.ollion@sabilab.fr",
     description="tensorflow/keras implementation of DiSTNet 2D",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/jeanollion/distnet2d",
-    download_url='https://github.com/jeanollion/distnet2d/releases/download/v0.2.2/distnet2d-0.2.2.tar.gz',
+    download_url='https://github.com/jeanollion/distnet2d/releases/download/v0.2.3/distnet2d-0.2.3.tar.gz',
     packages=setuptools.find_packages(),
     keywords=['Segmentation', 'Tracking', 'Cell', 'Tensorflow', 'Keras'],
     classifiers=[
