@@ -212,8 +212,8 @@ def _generate_kernel(sizeY, sizeX, C=1, O=0):
 
 
 def IoU(true_foreground, pred_foreground, tolerance_radius:float=0):
-    true_inter = _dilate_mask(true_foreground, radius=tolerance_radius, symmetric_padding=True) if tolerance_radius>=1 else true_foreground
-    intersection = tf.math.count_nonzero(tf.math.logical_and(true_inter, pred_foreground), keepdims=False)
+    true_foreground_dil = _dilate_mask(true_foreground, radius=tolerance_radius, symmetric_padding=True) if tolerance_radius>=1 else true_foreground
+    intersection = tf.math.count_nonzero(tf.math.logical_and(true_foreground_dil, pred_foreground), keepdims=False)
     union = tf.math.count_nonzero(tf.math.logical_or(true_foreground, pred_foreground), keepdims=False)
     return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))  # if union is null -> metric is 1
 

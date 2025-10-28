@@ -62,11 +62,11 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
         # EDM : foreground/background IoU
         pred_foreground = tf.math.greater(edm, tf.cast(0, edm.dtype))
         true_foreground = tf.math.greater(labels, tf.cast(0, labels.dtype))
-        edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=scale / 8.) #
+        edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=0) #
         metrics.append(edm_IoU)
 
         # Surface-based False Positive Density (FPD) based on EDM
-        fp = FP(true_foreground, pred_foreground, rate=False, tolerance_radius=scale / 4.) #
+        fp = FP(true_foreground, pred_foreground, rate=False, tolerance_radius = 1 + scale / 6.) # higher tolerance_radius radius to focus on instances
         metrics.append(-fp)
 
         # contour IoU : problem: true positive contours are usually not precise enough.
