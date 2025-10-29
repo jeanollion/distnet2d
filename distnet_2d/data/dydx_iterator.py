@@ -202,6 +202,9 @@ class DyDxIterator(TrackingIterator):
         if perform_elasticdeform or perform_tiling:
             for c in converted_from_float16:
                 batch_by_channel[c] = batch_by_channel[c].astype('float16')
+        if self.return_image_index: # reshape to match image shape
+            n_chan = self.frame_window * (2 if self.channels_next[1] else 1) + 1
+            batch_by_channel["image_idx"] = np.reshape(batch_by_channel["image_idx"], (-1, 1, 1, n_chan))
         return batch_by_channel, aug_param_array, ref_channel
 
     @staticmethod

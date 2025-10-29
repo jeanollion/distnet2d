@@ -527,7 +527,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         if n_inputs == 1:
             inputs = [ tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name="input") ]
             if frame_aware and frame_window > 0:
-                frame_index = tf.keras.layers.Input(shape=[n_frames], name="input2_frameindex")
+                frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name="input2_frameindex")
                 inputs.append(frame_index)
             input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=True,  name="MergeInputs")(inputs[0]) if frame_window > 0 else inputs[0]
         else:
@@ -536,7 +536,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                 input_stacked = Stack(axis = -2, name="InputStack")(inputs)
                 input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=False, name="MergeInputs")(input_stacked)
                 if frame_aware:
-                    frame_index = tf.keras.layers.Input(shape=[n_frames], name=f"input{n_inputs}_frameindex")
+                    frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name=f"input{n_inputs}_frameindex")
                     inputs.append(frame_index)
             else:
                 inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(n_inputs)]
@@ -582,7 +582,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
             feature_prev = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
             feature_next = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
             if frame_aware:
-                frame_distance = tf.cast(tf.gather(frame_index, frame_next, axis=-1) - tf.gather(frame_index, frame_prev, axis=-1), tf.int32)
+                frame_distance = tf.cast(tf.gather(frame_index[:,0,0], frame_next, axis=-1) - tf.gather(frame_index[:,0,0], frame_prev, axis=-1), tf.int32)
 
             if attention>0:
                 attention_result = attention_op([feature_prev, feature_next, frame_distance]) if frame_aware else attention_op([feature_prev, feature_next])
