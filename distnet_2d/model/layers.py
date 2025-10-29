@@ -681,3 +681,30 @@ def ker_size_to_string(ker_size, dims=2):
     if not isinstance(ker_size, (list, tuple)):
         ker_size = ensure_multiplicity(dims, ker_size)
     return 'x'.join([str(k) for k in ker_size])
+
+# util class to avoid that a tf.Variable is saved into the model weights
+class HideVariableWrapper:
+    def __init__(self, value:tf.Variable):
+        self.value = value
+
+    def assign(self, value, **kwargs):
+        return self.value.assign(value, **kwargs)
+
+    def assign_add(self, delta, **kwargs):
+        return self.value.assign_add(delta, **kwargs)
+
+    def assign_sub(self, delta, **kwargs):
+        return self.value.assign_sub(delta, **kwargs)
+
+    def __getitem__(self, item):
+        return self.value[item]
+
+    def get_shape(self):
+        return self.value.get_shape()
+
+    @property
+    def shape(self):
+        return self.value.shape
+
+    def numpy(self):
+        return self.value.numpy()

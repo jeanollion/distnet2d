@@ -49,6 +49,7 @@ class DyDxIterator(TrackingIterator):
                  long_term:bool = True,
                  tracking:bool = True,
                  return_next_displacement:bool = True,
+                 frame_aware:bool=False, # return actual frame (relative to central frame)
                  output_float16=False,
                  **kwargs):
         assert len(channel_keywords)>=2, 'keyword should contain at least 2 elements in this order: grayscale input images, object labels, [other grayscale input images]'
@@ -86,6 +87,7 @@ class DyDxIterator(TrackingIterator):
         self.return_next_displacement=return_next_displacement
         self.n_label_max = kwargs.pop("n_label_max", 2000)
         self.long_term=long_term
+        self.frame_aware=frame_aware
         self.output_central_only = False
         nchan = len(channel_keywords)
         if input_label_keywords is not None:
@@ -109,8 +111,10 @@ class DyDxIterator(TrackingIterator):
                          mask_channels=[1] + self.label_input_channels,
                          n_frames = self.frame_window,
                          aug_remove_prob=aug_remove_prob,
+                         frame_subsampling=1, # disable default frame subsampling mechanism
                          aug_all_frames=False,
                          convert_masks_to_dtype=False,
+                         return_image_index = self.frame_aware,
                          extract_tile_function=extract_tile_function,
                          elasticdeform_parameters=elasticdeform_parameters,
                          **kwargs)
@@ -142,7 +146,13 @@ class DyDxIterator(TrackingIterator):
                     n_frames = self.frame_window
         else:
             n_frames = 0
-        kwargs.update({"n_frames":n_frames})
+        #print(f"aug sub: {self.aug_frame_subsampling} -> nframes={n_frames}", flush=True)
+        kwargs.update({"n_frames":n_frames, "ref_channel_idx":1 if not input_only else 0})
+        if n_frames > 0: # only open subsampled frames, except for labels and prevlinks that requires all the frames to reconstruct lineage
+            frames = np.array(self._get_end_points(n_frames, False)) - n_frames
+            #print(f"frame increment: {frames}")
+            kwargs.update({"frame_increment_per_channel": {c:frames for c in range(len(self.channel_keywords)) if c!=1 }})
+            kwargs.update({"frame_increment_per_array": {self.category_array_idx : frames}})
         batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False, **kwargs)
         ref_shape = batch_by_channel[0].shape
         for c in range(1, len(self.channel_keywords)):
@@ -171,12 +181,13 @@ class DyDxIterator(TrackingIterator):
             # get previous labels and store in batch_by_channel BEFORE applying tiling and elastic deform
             self._get_prev_label(batch_by_channel, n_frames)
         batch_by_channel["batch_size"] = batch_by_channel[0].shape[0] # batch size is recorded here: it will be used in case of tiling
-        if n_frames>1: # remove unused frames
+        if n_frames>1: # remove unused frames for labels
             sel = self._get_end_points(n_frames, False)
-            channels = [c for c in batch_by_channel if not isinstance(c, str) and c>=0]
-            #print(f"remove unused frames: nframes: {n_frames*2+1} sel: {sel} channels: {channels}")
-            for c in channels:
-                batch_by_channel[c] = batch_by_channel[c][..., sel]
+            #print(f"remove unused frames: nframes: {n_frames*2+1} sel: {sel} channels: {1}")
+            batch_by_channel[1] = batch_by_channel[1][..., sel]
+            if self.return_image_index:
+                batch_by_channel["image_idx"] = batch_by_channel["image_idx"][:, sel]
+
         if perform_elasticdeform or perform_tiling: ## elastic deform do not support float16 type -> temporarily convert to float32
             channels = [c for c in batch_by_channel.keys() if not isinstance(c, str) and c>=0]
             converted_from_float16=[]

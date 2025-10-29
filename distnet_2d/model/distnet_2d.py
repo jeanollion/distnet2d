@@ -1,6 +1,6 @@
 import tensorflow as tf
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
-    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper
 import numpy as np
 from .spatial_attention import SpatialAttention2D
 from ..utils.helpers import ensure_multiplicity, flatten_list
@@ -36,7 +36,7 @@ class DiSTNetModel(tf.keras.Model):
         self.edm_weight = edm_loss_weight
         if edm_frequency_weights is not None:
             assert len(edm_frequency_weights) == 2 , "edm_frequency_weights must be a list of len 2"
-        self.edm_frequency_weights = np.asarray(edm_frequency_weights, dtype="float32") if edm_frequency_weights is not None else None
+        self.edm_frequency_weights = HideVariableWrapper(tf.Variable(np.asarray(edm_frequency_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="edm_frequency_weights")) if edm_frequency_weights is not None else None
         self.center_weight = center_loss_weight
         self.cdm_loss_radius = float(cdm_loss_radius)
         self.displacement_weight = displacement_loss_weight
@@ -132,7 +132,7 @@ class DiSTNetModel(tf.keras.Model):
             n_frame_pairs += (fw - 1) * (2 if self.next else 1)
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
-        batch_dim = tf.shape(x)[0]
+        batch_dim = tf.shape(x[0])[0]
         displacement_weight = self.displacement_weight / (2. * n_fp_mul) if fw > 0 else 0 # y & x
         link_multiplicity_weight = self.link_multiplicity_weight / (n_fp_mul * float(n_frame_pairs)) if fw > 0 else 0
         edm_weight = self.edm_weight / float(n_frames) # divide by channel number ?
@@ -342,7 +342,18 @@ def get_distnet_2d(spatial_dimensions, n_inputs:int,
             config,
             name: str="DiSTNet2D",
             **kwargs):
-    return get_distnet_2d_model(spatial_dimensions, n_inputs, upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode, skip_connections=config.skip_connections, encoder_settings=config.encoder_settings, feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings, attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, attention_positional_encoding=config.attention_positional_encoding, combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size, blending_filter_factor=config.blending_filter_factor, frame_window=frame_window, next=next, name=name, **kwargs)
+    return get_distnet_2d_model(spatial_dimensions, n_inputs,
+                                upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode,
+                                skip_connections=config.skip_connections,
+                                encoder_settings=config.encoder_settings, decoder_settings=config.decoder_settings,
+                                feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, feature_decoder_settings=config.feature_decoder_settings,
+                                attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, attention_positional_encoding=config.attention_positional_encoding,
+                                combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size,
+                                blending_filter_factor=config.blending_filter_factor,
+                                frame_window=frame_window, next=next,
+                                frame_aware = config.frame_aware,
+                                frame_max_distance = config.frame_max_distance,
+                                name=name, **kwargs)
 
 def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          n_inputs:int,
@@ -356,7 +367,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          combine_kernel_size:int = 1,
                          pair_combine_kernel_size:int = 1,
                          blending_filter_factor:float = 0.5,
-                         skip_stop_gradient:bool = False, # was True
+                         skip_stop_gradient:bool = False,  # was True
                          skip_connections = True,  # bool or list
                          skip_combine_mode:str="conv",  #conv, wsconv
                          attention : int = 0,
@@ -366,7 +377,9 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                          frame_window:int = 1,
                          next:bool=True,
                          long_term:bool = True,
-                         tracking:bool = True, # if false: outputs are only EDM and CDM
+                         tracking:bool = True,  # if false: outputs are only EDM and CDM
+                         frame_aware:bool = False,
+                         frame_max_distance:int = 0,
                          inference_gap_number:int = 0,
                          predict_next_displacement:bool = True,
                          predict_edm_derivatives:bool = False,
@@ -446,7 +459,7 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
         combine_features_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="CombineFeatures") if frame_window > 0 else lambda features : features[0]
         if attention>0:
-            attention_op = SpatialAttention2D(num_heads=attention, positional_encoding=attention_positional_encoding, dropout=attention_dropout, l2_reg=l2_reg, name="Attention")
+            attention_op = SpatialAttention2D(num_heads=attention, positional_encoding=attention_positional_encoding, frame_distance_aware_size=max(frame_window, frame_max_distance) if frame_aware else 0, dropout=attention_dropout, l2_reg=l2_reg, name="Attention")
         pair_combine_op = Combine(filters=feature_filters, kernel_size = pair_combine_kernel_size, l2_reg=l2_reg, name="FeaturePairCombine")
         all_pair_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="AllFeaturePairCombine")
         feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, l2_reg=l2_reg, name="FeaturePairFeatureCombine") # change here was feature_filters
@@ -503,22 +516,28 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                         decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=category_number, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
-                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}")
+                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}")
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}") )
+                    d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()) )
 
         # Create GRAPH
         if n_inputs == 1:
-            inputs = [ tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name="Input") ]
+            inputs = [ tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name="input") ]
+            if frame_aware and frame_window > 0:
+                frame_index = tf.keras.layers.Input(shape=[n_frames], name="input2_frameindex")
+                inputs.append(frame_index)
             input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=True,  name="MergeInputs")(inputs[0]) if frame_window > 0 else inputs[0]
         else:
             if frame_window > 0:
-                inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name=f"Input{i}") for i in range(n_inputs)]
+                inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name=f"input{i}") for i in range(n_inputs)]
                 input_stacked = Stack(axis = -2, name="InputStack")(inputs)
                 input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=False, name="MergeInputs")(input_stacked)
+                if frame_aware:
+                    frame_index = tf.keras.layers.Input(shape=[n_frames], name=f"input{n_inputs}_frameindex")
+                    inputs.append(frame_index)
             else:
                 inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(n_inputs)]
                 input_merged = tf.keras.layers.Concatenate(axis=-1, name="MergeInputs")(inputs)
@@ -541,25 +560,40 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
 
         # frame pairs
         if frame_window > 0 :
-            feature_prev = []
-            feature_next = []
+            feature_prev, feature_next = [], []
+            frame_prev, frame_next = [], []
             for i in range(1, n_frames):
                 feature_prev.append(all_features[i-1])
                 feature_next.append(all_features[i])
+                frame_prev.append(i-1)
+                frame_next.append(i)
             if long_term:
                 for c in range(0, frame_window-1):
                     feature_prev.append(all_features[c])
                     feature_next.append(all_features[frame_window])
+                    frame_prev.append(c)
+                    frame_next.append(frame_window)
                 if next:
                     for c in range(frame_window+2, n_frames):
                         feature_prev.append(all_features[frame_window])
                         feature_next.append(all_features[c])
+                        frame_prev.append(frame_window)
+                        frame_next.append(c)
             feature_prev = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
             feature_next = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
+            if frame_aware:
+                frame_distance = tf.cast(tf.gather(frame_index, frame_next, axis=-1) - tf.gather(frame_index, frame_prev, axis=-1), tf.int32)
+
             if attention>0:
-                attention_result = attention_op([feature_prev, feature_next])
+                attention_result = attention_op([feature_prev, feature_next, frame_distance]) if frame_aware else attention_op([feature_prev, feature_next])
                 feature_pair = pair_combine_op([feature_prev, feature_next, attention_result])
             else:
+                if frame_aware:
+                    frame_distance_embedding_layer = tf.keras.layers.Embedding(input_dim=max(frame_window, frame_max_distance), output_dim=feature_filters, name="FrameDistanceEmbedding")
+                    frame_distance_emb = frame_distance_embedding_layer(frame_distance)
+                    frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, feature_filters])
+                    feature_prev = feature_prev + frame_distance_emb
+                    feature_next = feature_next + frame_distance_emb
                 feature_pair = pair_combine_op([feature_prev, feature_next])
 
             all_feature_pairs = SplitBatch(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pair)
@@ -606,13 +640,13 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                         if k.endswith("FW"):
                             output_name_bw = k.replace("FW", "BW")
                             output_name = decoder_output_names[decoder_name][k].replace("FW", "")
-                            output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = output_name)([output_per_dec.pop(output_name_bw), output_per_dec.pop(k)])
+                            output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = output_name.lower())([output_per_dec.pop(output_name_bw), output_per_dec.pop(k)])
                 if decoder_name=="Seg" and predict_edm_derivatives:
                     output_name = "EDM"
-                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop("EDMdY"), output_per_dec.pop("EDMdX")])
+                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("EDMdY"), output_per_dec.pop("EDMdX")])
                 if decoder_name=="Center" and predict_cdm_derivatives:
                     output_name = "CDM"
-                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name])([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
+                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
                 outputs.extend(output_per_dec.values())
         return DiSTNetModel(inputs, outputs, name=name, frame_window=frame_window, next=next, spatial_dims=spatial_dimensions if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=category_number, **kwargs)
 
@@ -678,6 +712,8 @@ def decoder_op(
         ):
         if layer_idx > 0:
             name=f"{name}{layer_idx}"
+        elif name is not None:
+            name = name.lower()
         if n_conv==0 and activation_out is not None:
             activation = activation_out
         if n_conv>0 and activation_out is None:

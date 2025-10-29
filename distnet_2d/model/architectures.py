@@ -19,24 +19,38 @@ def get_architecture(architecture_type:str, **kwargs):
     else:
         raise ValueError(f"Unknown architecture type: {architecture_type}")
 
-
-class BlendD2:
-    def __init__(self, filters:int = 128, blending_filter_factor:float=0.5, early_downsampling:bool = True, downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
-        prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
-        self.name = f"{prefix}blendD2-{filters}"
-        if attention>0 or self_attention>0:
-            print(f"spatial dimension at attention layer: {spatial_dimensions[0] / 2**2} x {spatial_dimensions[1] / 2**2}")
-        self.skip_connections=skip_connections
+class Blend:
+    def __init__(self, 
+                 filters:int,
+                 blending_filter_factor:float=0.5,
+                 early_downsampling:bool = True, downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", 
+                 batch_norm:bool = True, dropout:float=0.2, 
+                 self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d",
+                 combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1],
+                 frame_aware:bool=False, frame_max_distance:int=0):
+        self.filters = filters
+        self.skip_connections = skip_connections
         self.attention = attention
-        self.self_attention=self_attention
-        self.attention_positional_encoding=attention_positional_encoding
-        self.dropout=dropout
+        self.self_attention = self_attention
+        self.attention_positional_encoding = attention_positional_encoding
+        self.dropout = dropout
+        self.batch_norm = batch_norm
         self.combine_kernel_size = combine_kernel_size
         self.pair_combine_kernel_size = pair_combine_kernel_size
-        self.blending_filter_factor=blending_filter_factor
-        self.downsampling_mode=downsampling_mode
+        self.blending_filter_factor = blending_filter_factor
+        self.downsampling_mode = downsampling_mode
         self.upsampling_mode = upsampling_mode
-        self.early_downsampling=early_downsampling
+        self.early_downsampling = early_downsampling
+        self.frame_aware = frame_aware
+        self.frame_max_distance = frame_max_distance
+
+class BlendD2(Blend):
+    def __init__(self, filters:int = 128, spatial_dimensions=None, **kwargs):
+        super().__init__(filters=filters, **kwargs)
+        prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
+        self.name = f"{prefix}blendD2-{filters}"
+        if self.attention > 0 or self.self_attention > 0:
+            print(  f"spatial dimension at attention layer: {spatial_dimensions[0] / 2 ** 2} x {spatial_dimensions[1] / 2 ** 2}")
         ker0, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 2 )
         ker1_2, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2)
@@ -54,25 +68,25 @@ class BlendD2:
                 {"filters":filters, "kernel_size":ker1, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
             ]
         ]
-        if early_downsampling:
+        if self.early_downsampling:
             self.encoder_settings[0].pop(0)
         self.feature_settings = [
-            {"op":"res2d", "dilation":dil2, "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":dil2 if self_attention>0 else dil2_2, "kernel_size":ker2 if self_attention>0 else ker2_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":filters, "op":"selfattention" if self_attention>0 else "res2d", "kernel_size":ker2 if self_attention>0 else ker2_3, "dilation":dil2 if self_attention>0 else dil2_3, "dropout_rate":dropout, "num_attention_heads":self_attention },
-            {"op":"res2d", "dilation":dil2, "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":dil2 if self_attention>0 else dil2_2, "kernel_size":ker2 if self_attention>0 else ker2_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":1., "op":"conv", "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
+            {"op":"res2d", "dilation":dil2, "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":dil2 if self.self_attention>0 else dil2_2, "kernel_size":ker2 if self.self_attention>0 else ker2_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":filters, "op":"selfattention" if self.self_attention>0 else "res2d", "kernel_size":ker2 if self.self_attention>0 else ker2_3, "dilation":dil2 if self.self_attention>0 else dil2_3, "dropout_rate":self.dropout, "num_attention_heads":self.self_attention },
+            {"op":"res2d", "dilation":dil2, "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":dil2 if self.self_attention>0 else dil2_2, "kernel_size":ker2 if self.self_attention>0 else ker2_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "kernel_size":ker2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":self.batch_norm},
         ]
         self.feature_blending_settings = [
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False, "split_conv":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False, "split_conv":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False, "split_conv":False}
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False, "split_conv":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False, "split_conv":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False, "split_conv":False}
         ]
         self.feature_decoder_settings = [
-            {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
+            {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":self.batch_norm}
         ]
         self.decoder_settings = [
             {"filters":16, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
@@ -80,23 +94,14 @@ class BlendD2:
         ]
 
 
-class BlendD3:
-    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, early_downsampling:bool=True, downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
-        prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
+class BlendD3(Blend):
+    def __init__(self, filters:int = 192, spatial_dimensions=None, **kwargs):
+        super().__init__(filters=filters, **kwargs)
+        prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
-        if attention>0 or self_attention>0:
+        if self.attention>0 or self.self_attention>0:
             print(f"spatial dimension at attention layer: {spatial_dimensions[0] / 2**3} x {spatial_dimensions[1] / 2**3}")
-        self.skip_connections=skip_connections
-        self.attention = attention
-        self.self_attention=self_attention
-        self.attention_positional_encoding=attention_positional_encoding
-        self.dropout=dropout
-        self.combine_kernel_size = combine_kernel_size
-        self.pair_combine_kernel_size = pair_combine_kernel_size
-        self.blending_filter_factor = blending_filter_factor
-        self.downsampling_mode = downsampling_mode
-        self.upsampling_mode = upsampling_mode
-        self.early_downsampling = early_downsampling
+
         ker0, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 2)
         ker2, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 2 * 2)
@@ -118,26 +123,26 @@ class BlendD3:
                 {"filters":filters, "kernel_size":ker2, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
             ]
         ]
-        if early_downsampling:
+        if self.early_downsampling:
             self.encoder_settings[0].pop(0)
 
         self.feature_settings = [
-            {"op":"res2d", "dilation":dil3, "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":dil3 if self_attention>0 else dil3_2, "kernel_size":ker3 if self_attention>0 else ker3_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":filters, "op":"selfattention" if self_attention>0 else "res2d", "kernel_size":ker3 if self_attention>0 else ker3_3, "dilation":dil3 if self_attention>0 else dil3_3, "dropout_rate":dropout },
-            {"op":"res2d", "dilation":dil3, "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":dil3 if self_attention>0 else dil3_2, "kernel_size":ker3 if self_attention>0 else ker3_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":1., "op":"conv", "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
+            {"op":"res2d", "dilation":dil3, "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":dil3 if self.self_attention>0 else dil3_2, "kernel_size":ker3 if self.self_attention>0 else ker3_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":filters, "op":"selfattention" if self.self_attention>0 else "res2d", "kernel_size":ker3 if self.self_attention>0 else ker3_3, "dilation":dil3 if self.self_attention>0 else dil3_3, "dropout_rate":self.dropout },
+            {"op":"res2d", "dilation":dil3, "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":dil3 if self.self_attention>0 else dil3_2, "kernel_size":ker3 if self.self_attention>0 else ker3_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "kernel_size":ker3, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":self.batch_norm},
         ]
         self.feature_blending_settings = [
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False}
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False}
         ]
         self.feature_decoder_settings = [
-            {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
+            {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":self.batch_norm}
         ]
         self.decoder_settings = [
             {"filters":16, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},
@@ -146,23 +151,14 @@ class BlendD3:
         ]
 
 
-class BlendD4:
-    def __init__(self, filters:int = 192, blending_filter_factor:float=0.5, early_downsampling:bool = True, downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", batch_norm:bool = True, dropout:float=0.2, self_attention:int = 0, attention:int = 0, attention_positional_encoding:str="2d", combine_kernel_size:int=1, pair_combine_kernel_size:int=5, skip_connections=[-1], spatial_dimensions=None):
-        prefix = f"{'a' if attention else ''}{'sa' if self_attention else ''}"
+class BlendD4(Blend):
+    def __init__(self, filters:int = 192, spatial_dimensions=None, **kwargs):
+        super().__init__(filters=filters, **kwargs)
+        prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
-        if attention>0 or self_attention>0:
+        if self.attention>0 or self.self_attention>0:
             print(f"spatial dimension at attention layer: {spatial_dimensions[0] / 2**4} x {spatial_dimensions[1] / 2**4}")
-        self.skip_connections=skip_connections
-        self.attention = attention
-        self.self_attention=self_attention
-        self.attention_positional_encoding=attention_positional_encoding
-        self.dropout=dropout
-        self.combine_kernel_size = combine_kernel_size
-        self.pair_combine_kernel_size = pair_combine_kernel_size
-        self.blending_filter_factor = blending_filter_factor
-        self.downsampling_mode = downsampling_mode
-        self.upsampling_mode = upsampling_mode
-        self.early_downsampling = early_downsampling
+
         ker0, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, spatial_dimensions, 2)
         ker2, _ = get_kernels_and_dilation(5, 1, spatial_dimensions, 2 ** 2)
@@ -191,26 +187,26 @@ class BlendD4:
                 {"filters":filters, "kernel_size":ker3, "downscale":2, "weight_scaled":False, "dropout_rate":0, "batch_norm":False}
             ]
         ]
-        if early_downsampling:
+        if self.early_downsampling:
             self.encoder_settings[0].pop(0)
 
         self.feature_settings = [
-            {"op":"res2d", "dilation":dil4, "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":dil4 if self_attention>0 else dil4_2, "kernel_size":ker4 if self_attention>0 else ker4_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":filters, "op":"selfattention" if self_attention>0 else "res2d", "kernel_size":ker4 if self_attention>0 else ker4_3, "dilation":dil4 if self_attention>0 else dil4_3, "dropout_rate":dropout },
-            {"op":"res2d", "dilation":dil4, "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "dilation":dil4 if self_attention>0 else dil4_2, "kernel_size":ker4 if self_attention>0 else ker4_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":1., "op":"conv", "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm},
+            {"op":"res2d", "dilation":dil4, "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":dil4 if self.self_attention>0 else dil4_2, "kernel_size":ker4 if self.self_attention>0 else ker4_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":filters, "op":"selfattention" if self.self_attention>0 else "res2d", "kernel_size":ker4 if self.self_attention>0 else ker4_3, "dilation":dil4 if self.self_attention>0 else dil4_3, "dropout_rate":self.dropout },
+            {"op":"res2d", "dilation":dil4, "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "dilation":dil4 if self.self_attention>0 else dil4_2, "kernel_size":ker4 if self.self_attention>0 else ker4_2, "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "kernel_size":ker4, "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":self.batch_norm},
         ]
         self.feature_blending_settings = [
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False}
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False}
         ]
         self.feature_decoder_settings = [
-            {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":dropout, "batch_norm":False},
-            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":batch_norm}
+            {"filters":0.5, "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
+            {"filters":1., "op":"conv", "weighted_sum":False, "weight_scaled":False, "dropout_rate":0, "batch_norm":self.batch_norm}
         ]
         self.decoder_settings = [
             {"filters":16, "op":"conv", "n_conv":0, "conv_kernel_size":4, "up_kernel_size":4, "weight_scaled_up":False, "batch_norm_up":False, "dropout_rate":0},

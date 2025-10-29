@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 
 class SpatialAttention2D(tf.keras.layers.Layer):
-    def __init__(self, num_heads:int=1, positional_encoding:str= "2d", filters:int=0, return_attention:bool=False, dropout:float=0.1, l2_reg:float=0., name="Attention"):
+    def __init__(self, num_heads:int=1, positional_encoding:str= "2d", filters:int=0, frame_distance_aware_size:int=0, return_attention:bool=False, dropout:float=0.1, l2_reg:float=0., name="Attention"):
         '''
             filters : number of output channels
             if positional_encoding: filters must correspond to input channel number
@@ -16,14 +16,18 @@ class SpatialAttention2D(tf.keras.layers.Layer):
         self.return_attention=return_attention
         self.dropout=dropout
         self.l2_reg=l2_reg
+        self.frame_distance_aware_size = frame_distance_aware_size
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"num_heads": self.num_heads, "positional_encoding": self.positional_encoding, "dropout":self.dropout, "filters":self.filters, "return_attention":self.return_attention, "l2_reg":self.l2_reg})
+      config.update({"num_heads": self.num_heads, "positional_encoding": self.positional_encoding, "frame_distance_aware_size":self.frame_distance_aware_size, "dropout":self.dropout, "filters":self.filters, "return_attention":self.return_attention, "l2_reg":self.l2_reg})
       return config
 
     def build(self, input_shape):
-        input_shape_, input_shape = input_shape
+        if self.frame_distance_aware_size>0:
+            input_shape_, input_shape, frame_distance = input_shape
+        else:
+            input_shape_, input_shape = input_shape
         try:
             input_shape = input_shape.as_list()
         except:
@@ -146,13 +150,21 @@ class SpatialAttention2D(tf.keras.layers.Layer):
                 self.pos_embedding_x = tf.keras.layers.Embedding(self.spatial_dims[1], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncX")
             else:
                 self.pos_embedding = tf.keras.layers.Embedding(self.spatial_dim, input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEnc")
+
+
+        if self.frame_distance_aware_size>0:
+            self.frame_distance_embedding = tf.keras.layers.Embedding(input_dim=self.frame_distance_aware_size, output_dim=input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None, name="FrameDistanceEmbedding")
+
         super().build(input_shape)
 
     def call(self, x, training:bool=None):
         '''
             x : tensor with shape (batch_size, y, x, channels)
         '''
-        [input, output] = x
+        if self.frame_distance_aware_size>0:
+            [input, output, distance] = x
+        else:
+            [input, output] = x
         shape = tf.shape(output)
         batch_size = shape[0]
         #spatial_dims = shape[1:-1]
@@ -191,7 +203,16 @@ class SpatialAttention2D(tf.keras.layers.Layer):
                 pos_emb = tf.reshape(pos_emb, (self.spatial_dims[0], self.spatial_dims[1], self.filters)) #for broadcasting purpose
                 query = output + pos_emb # broadcast
                 key = input + pos_emb # broadcast
-        # TODO Legacy mode : add pos_emb to values
+        else :
+            query = output
+            key = input
+
+        if self.frame_distance_aware_size>0:
+            frame_dist_emb = self.frame_distance_embedding(distance)
+            frame_dist_emb = tf.reshape(frame_dist_emb, [-1, 1, 1, self.filters])
+            query = query + frame_dist_emb
+            key = key + frame_dist_emb
+
         attention_output = self.attention_layer(query=query, value=input, key=key, training=training, return_attention_scores=self.return_attention)
         return attention_output
 
