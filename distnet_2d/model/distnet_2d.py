@@ -586,15 +586,18 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
 
             if attention>0:
                 attention_result = attention_op([feature_prev, feature_next, frame_distance]) if frame_aware else attention_op([feature_prev, feature_next])
+                if frame_aware:
+                    attention_result, frame_distance_emb = attention_result
                 feature_pair = pair_combine_op([feature_prev, feature_next, attention_result])
+                if frame_aware:
+                    feature_pair = feature_pair + frame_distance_emb
             else:
+                feature_pair = pair_combine_op([feature_prev, feature_next])
                 if frame_aware:
                     frame_distance_embedding_layer = tf.keras.layers.Embedding(input_dim=max(frame_window, frame_max_distance), output_dim=feature_filters, name="FrameDistanceEmbedding")
                     frame_distance_emb = frame_distance_embedding_layer(frame_distance)
                     frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, feature_filters])
-                    feature_prev = feature_prev + frame_distance_emb
-                    feature_next = feature_next + frame_distance_emb
-                feature_pair = pair_combine_op([feature_prev, feature_next])
+                    feature_pair = feature_pair + frame_distance_emb
 
             all_feature_pairs = SplitBatch(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pair)
             combined_feature_pairs = all_pair_combine_op(all_feature_pairs)

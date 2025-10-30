@@ -165,11 +165,7 @@ class SpatialAttention2D(tf.keras.layers.Layer):
             [input, output, distance] = x
         else:
             [input, output] = x
-        shape = tf.shape(output)
-        batch_size = shape[0]
-        #spatial_dims = shape[1:-1]
-        #spatial_dim = tf.reduce_prod(spatial_dims)
-        depth_dim = shape[3]
+        value = input
         if "sine" in self.positional_encoding:
             key = input + self.pos_enc  # broadcast
             query = output + self.pos_enc
@@ -207,14 +203,17 @@ class SpatialAttention2D(tf.keras.layers.Layer):
             query = output
             key = input
 
-        if self.frame_distance_aware_size>0:
+        if self.frame_distance_aware_size > 0:
             frame_dist_emb = self.frame_distance_embedding(distance)
             frame_dist_emb = tf.reshape(frame_dist_emb, [-1, 1, 1, self.filters])
             query = query + frame_dist_emb
             key = key + frame_dist_emb
 
-        attention_output = self.attention_layer(query=query, value=input, key=key, training=training, return_attention_scores=self.return_attention)
-        return attention_output
+        attention_output = self.attention_layer(query=query, value=value, key=key, training=training, return_attention_scores=self.return_attention)
+        if self.frame_distance_aware_size > 0:
+            return attention_output, frame_dist_emb
+        else:
+            return attention_output
 
     def compute_output_shape(self, input_shape):
         if self.return_attention:
