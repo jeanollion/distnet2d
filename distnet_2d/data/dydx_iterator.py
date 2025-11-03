@@ -30,7 +30,7 @@ class DyDxIterator(TrackingIterator):
                  frame_window:int,
                  aug_frame_subsampling,  # either int: frame number interval will be drawn uniformly in [frame_window,aug_frame_subsampling] or callable that generate an frame number interval (int)
                  erase_edge_cell_size:int,
-                 next_frames:bool = True,
+                 future_frames:bool = True,
                  allow_frame_subsampling_direct_neigh:bool = False,
                  aug_remove_prob: float = 0.005,
                  return_link_multiplicity:bool = True,
@@ -44,13 +44,12 @@ class DyDxIterator(TrackingIterator):
                  scale_edm:bool = False,  # for each cell max edm value is 1
                  center_mode:str = "MEDOID",  # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
                  center_distance_mode = "GEODESIC",  # GEODESIC, EUCLIDEAN
-                 input_label_center_idx:int = -1, # center of target label are centers of the input label of this index
+                 input_label_center_idx:int = -1,  # center of target label are centers of the input label of this index
                  return_label_rank = False,
                  long_term:bool = True,
                  tracking:bool = True,
                  return_next_displacement:bool = True,
-                 frame_aware:bool=False, # return actual frame (relative to central frame)
-                 output_float16=False,
+                 frame_aware:bool=False,  # return actual frame (relative to central frame)
                  **kwargs):
         assert len(channel_keywords)>=2, 'keyword should contain at least 2 elements in this order: grayscale input images, object labels, [other grayscale input images]'
         if frame_window == 0:
@@ -73,7 +72,6 @@ class DyDxIterator(TrackingIterator):
         self.erase_edge_cell_size=erase_edge_cell_size
         self.aug_frame_subsampling=aug_frame_subsampling
         self.allow_frame_subsampling_direct_neigh=allow_frame_subsampling_direct_neigh
-        self.output_float16=output_float16
         self.return_edm_derivatives=return_edm_derivatives
         self.scale_edm = scale_edm
         self.return_center=return_center
@@ -107,11 +105,11 @@ class DyDxIterator(TrackingIterator):
                          input_channels=[0] + [i for i in range(2, nchan)] + self.label_input_channels,
                          output_channels=[1],
                          channels_prev=[True]*len(channel_keywords),
-                         channels_next=[next_frames] * len(channel_keywords),
+                         channels_next=[future_frames] * len(channel_keywords),
                          mask_channels=[1] + self.label_input_channels,
                          n_frames = self.frame_window,
                          aug_remove_prob=aug_remove_prob,
-                         frame_subsampling=1, # disable default frame subsampling mechanism
+                         frame_subsampling=1,  # disable default frame subsampling mechanism
                          aug_all_frames=False,
                          convert_masks_to_dtype=False,
                          return_image_index = self.frame_aware,
@@ -399,12 +397,8 @@ class DyDxIterator(TrackingIterator):
                     nextLabelArr = nextLabelArr[:, 1:]
         if self.return_edm_derivatives:
             edm = np.concatenate([edm, der_y, der_x], -1)
-        if self.output_float16:
-            edm = edm.astype('float16', copy=False)
         all_channels = [edm]
         if self.return_center:
-            if self.output_float16:
-                centerIm = centerIm.astype('float16', copy=False)
             all_channels.append(centerIm)
         downscale_factor = 1./self.downscale if self.downscale>1 else 0
         scale = [1, downscale_factor, downscale_factor, 1]
@@ -417,9 +411,6 @@ class DyDxIterator(TrackingIterator):
         if ndisp:
             dyIm = np.concatenate([dyIm, dyImNext], -1)
             dxIm = np.concatenate([dxIm, dxImNext], -1)
-        if self.output_float16 and self.tracking:
-            dyIm = dyIm.astype('float16', copy=False)
-            dxIm = dxIm.astype('float16', copy=False)
         if self.tracking:
             all_channels.append(dyIm)
             all_channels.append(dxIm)
