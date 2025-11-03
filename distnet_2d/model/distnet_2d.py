@@ -536,14 +536,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             if attention>0:
                 attention_result = attention_op([feature_prev + frame_dist_emb, feature_next + frame_dist_emb, feature_prev]) if arch.frame_aware else attention_op([feature_prev, feature_next])
                 feature_pairs_batch = pair_combine_op([feature_prev, feature_next, attention_result])
-                if arch.frame_aware:
-                    feature_pairs_batch = feature_pairs_batch + frame_dist_emb
             else:
                 feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
-                if arch.frame_aware:
-                    feature_pairs_batch = feature_pairs_batch + frame_dist_emb
-
-            feature_pairs_list = SplitBatch(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pairs_batch)
+            feature_pairs_list = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairs")(feature_pairs_batch)
+            if arch.frame_aware:
+                feature_pairs_list_to_blend = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairsDistEmb")(feature_pairs_batch + frame_dist_emb)
+            else:
+                feature_pairs_list_to_blend = feature_pairs_list
 
         # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
         if isinstance(arch, TemA):
@@ -554,9 +553,9 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name="CentralFeatureAttCombine")
             features_att_list = feature_att_op(features_list) # blend segmentation information
             if arch.frame_window > 0:
-                blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list) # blend tracking information
+                blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list_to_blend) # blend tracking information
                 # cross blend segmentation & tracking information
-                central_feature_pair_list = [feature_pairs_list[i] for i in inference_pair_idx]
+                central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in inference_pair_idx]
                 central_feature_att = central_feature_att_op( ([features_list[arch.frame_window]], central_feature_pair_list) ) # cross attention : central pair and feature pair involving central frame
                 features_att_list[arch.frame_window] = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
             blended_features_batch = tf.concat(features_att_list, 0)
@@ -577,7 +576,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             # include operations in graph
             combined_features = combine_features_op(features_list) # combine individual features
             if arch.frame_window > 0:
-                combined_feature_pairs = all_pair_combine_op(feature_pairs_list)
+                combined_feature_pairs = all_pair_combine_op(feature_pairs_list_to_blend)
                 combined_features = feature_pair_feature_combine_op([combined_features, combined_feature_pairs])
                 for op in feature_blending_convs:
                     combined_features = op(combined_features)
