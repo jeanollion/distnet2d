@@ -1,8 +1,14 @@
+from pyexpat import features
+
 import tensorflow as tf
+
+from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
-    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper, \
+    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype
 import numpy as np
 from .spatial_attention import SpatialAttention2D
+from .temporal_attention import TemporalAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives
 from ..utils.agc import adaptive_clip_grad
@@ -12,7 +18,7 @@ import time
 class DiSTNetModel(tf.keras.Model):
     def __init__(self, *args, spatial_dims,
                  edm_loss_weight:float=1,
-                 edm_frequency_weights:list = None, # weights to balance foreground/background classes
+                 edm_frequency_weights:list = None,  # weights to balance foreground/background classes
                  center_loss_weight:float=1,
                  displacement_loss_weight:float=1,
                  link_multiplicity_loss_weight:float=1,
@@ -23,10 +29,10 @@ class DiSTNetModel(tf.keras.Model):
                  displacement_loss=PseudoHuber(1),
                  link_multiplicity_class_weights=None,  # array of weights: [single, multiple, null] or None = auto
                  link_multiplicity_max_class_weight=50,
-                 next:bool=True,
                  frame_window=3,
+                 future_frames: bool = True,
                  long_term:bool=True,
-                 predict_next_displacement:bool=True,
+                 predict_fw:bool=True,
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
                  category_number:int=0, category_class_weights = None, category_max_class_weight=10,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
@@ -44,8 +50,8 @@ class DiSTNetModel(tf.keras.Model):
         self.category_weight = category_loss_weight if category_number > 1 else 0
         self.category_number=category_number
         self.spatial_dims = spatial_dims
-        self.next = next
-        self.predict_next_displacement=predict_next_displacement
+        self.future_frames = future_frames
+        self.predict_fw=predict_fw
         self.frame_window = frame_window
         self.edm_loss = edm_loss
         self.edm_derivative_loss = edm_derivative_loss
@@ -125,11 +131,11 @@ class DiSTNetModel(tf.keras.Model):
             self.gradient_accumulator.init_train_step()
 
         fw = self.frame_window
-        n_frames = fw * (2 if self.next else 1) + 1
-        n_frame_pairs = fw * (2 if self.next else 1)
-        n_fp_mul = 2 if self.predict_next_displacement else 1
+        n_frames = fw * (2 if self.future_frames else 1) + 1
+        n_frame_pairs = fw * (2 if self.future_frames else 1)
+        n_fp_mul = 2 if self.predict_fw else 1
         if self.long_term:
-            n_frame_pairs += (fw - 1) * (2 if self.next else 1)
+            n_frame_pairs += (fw - 1) * (2 if self.future_frames else 1)
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
         batch_dim = tf.shape(x[0])[0]
@@ -213,13 +219,16 @@ class DiSTNetModel(tf.keras.Model):
             loss = 0.
             for k, l in losses.items():
                 loss += l * loss_weights[k]
-            if mixed_precision:
-                loss = self.optimizer.get_scaled_loss(loss)
+
+            losses["loss"] = loss
 
             # print(f"reg loss: {len(self.losses)} values: {self.losses}")
             if len(self.losses)>0:
                 loss += tf.add_n(self.losses) # regularizers
-            losses["loss"] = loss
+
+            if mixed_precision:
+                loss = self.optimizer.get_scaled_loss(loss)
+
             # scale loss for distribution
             num_replicas = tf.distribute.get_strategy().num_replicas_in_sync
             if num_replicas > 1:
@@ -283,23 +292,23 @@ class DiSTNetModel(tf.keras.Model):
     def _to_pair_mask(self, cell_mask):
         fw = self.frame_window
         mask = cell_mask[..., 1:]
-        if self.predict_next_displacement:
+        if self.predict_fw:
             mask_next = cell_mask[..., :-1]
         if self.long_term and fw > 1:
             mask_center = tf.tile(mask[..., fw - 1:fw], [1, 1, 1, fw - 1])
-            if self.predict_next_displacement:
-                if self.next:
+            if self.predict_fw:
+                if self.future_frames:
                     mask = tf.concat(
                         [mask, mask_center, cell_mask[..., -fw + 1:], mask_next, cell_mask[..., :fw - 1], mask_center],
                         -1)
                 else:
                     mask = tf.concat([mask, mask_center, mask_next, cell_mask[..., :fw - 1]], -1)
             else:
-                if self.next:
+                if self.future_frames:
                     mask = tf.concat([mask, mask_center, cell_mask[..., -fw + 1:]], -1)
                 else:
                     mask = tf.concat([mask, mask_center], -1)
-        elif self.predict_next_displacement:
+        elif self.predict_fw:
             mask = tf.concat([mask, mask_next], -1)
         return mask
 
@@ -321,7 +330,7 @@ class DiSTNetModel(tf.keras.Model):
 
     def set_inference(self, inference:bool=True):
         for layer in self.layers:
-            if isinstance(layer, (NConvToBatch2D, BatchToChannel, SelectFeature)):
+            if isinstance(layer, (NConvToBatch2D, BatchToChannel, SelectFeature, TemporalAttention)):
                 layer.inference_mode = inference
 
     def save(self, *args, inference:bool, **kwargs):
@@ -336,62 +345,14 @@ class DiSTNetModel(tf.keras.Model):
             self.compile()
 
 
-def get_distnet_2d(spatial_dimensions, n_inputs:int,
-            frame_window:int,
-            next:bool,
-            config,
-            name: str="DiSTNet2D",
-            **kwargs):
-    return get_distnet_2d_model(spatial_dimensions, n_inputs,
-                                upsampling_mode=config.upsampling_mode, downsampling_mode=config.downsampling_mode,
-                                skip_connections=config.skip_connections,
-                                encoder_settings=config.encoder_settings, decoder_settings=config.decoder_settings,
-                                feature_settings=config.feature_settings, feature_blending_settings=config.feature_blending_settings, feature_decoder_settings=config.feature_decoder_settings,
-                                attention=config.attention, attention_dropout=config.dropout, self_attention=config.self_attention, attention_positional_encoding=config.attention_positional_encoding,
-                                combine_kernel_size=config.combine_kernel_size, pair_combine_kernel_size=config.pair_combine_kernel_size,
-                                blending_filter_factor=config.blending_filter_factor,
-                                frame_window=frame_window, next=next,
-                                frame_aware = config.frame_aware,
-                                frame_max_distance = config.frame_max_distance,
-                                name=name, **kwargs)
-
-def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
-                         n_inputs:int,
-                         encoder_settings:list,
-                         feature_settings: list,
-                         feature_blending_settings: list,
-                         feature_decoder_settings:list,
-                         decoder_settings: list,
-                         upsampling_mode:str="tconv",  # tconv, up_nn, up_bilinear
-                         downsampling_mode:str = "maxpool_and_stride",  #maxpool, stride, maxpool_and_stride
-                         combine_kernel_size:int = 1,
-                         pair_combine_kernel_size:int = 1,
-                         blending_filter_factor:float = 0.5,
-                         skip_stop_gradient:bool = False,  # was True
-                         skip_connections = True,  # bool or list
-                         skip_combine_mode:str="conv",  #conv, wsconv
-                         attention : int = 0,
-                         attention_dropout:float = 0.1,
-                         attention_positional_encoding="2d",
-                         self_attention: int = 0,
-                         frame_window:int = 1,
-                         next:bool=True,
-                         long_term:bool = True,
-                         tracking:bool = True,  # if false: outputs are only EDM and CDM
-                         frame_aware:bool = False,
-                         frame_max_distance:int = 0,
-                         inference_gap_number:int = 0,
-                         predict_next_displacement:bool = True,
-                         predict_edm_derivatives:bool = False,
-                         predict_cdm_derivatives:bool = False,
-                         scale_edm:bool = False,
-                         category_number:int = 0,  # category for each cell instance (segmentation level), <=1 means do not predict category
-                         l2_reg:float = 0,
-                         name: str="DiSTNet2D",
-                         legacy_multi_input_arch:bool=False,
-                         **kwargs,
-                         ):
-        if frame_window == 0:
+def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are passed on to DiSTNet2D Model
+        spatial_dimensions = arch.spatial_dimensions
+        long_term = arch.long_term,
+        attention = arch.attention
+        attention_filters = arch.attention_filters
+        inference_gap_number = arch.inference_gap_number
+        tracking = arch.tracking
+        if arch.frame_window == 0:
             attention = 0
             long_term = False
             tracking = False
@@ -400,42 +361,43 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
             kwargs["displacement_loss_weight"] = 0
             kwargs["link_multiplicity_loss_weight"] = 0
 
-        print(f"edm activation: {'tanh' if scale_edm else 'linear'}")
-        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in encoder_settings])
-        assert len(encoder_settings)==len(decoder_settings), "decoder should have same length as encoder"
+        print(f"edm activation: {'tanh' if arch.scale_edm else 'linear'}")
+        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in arch.encoder_settings])
+        assert len(arch.encoder_settings) == len(arch.decoder_settings), "decoder should have same length as encoder"
         if spatial_dimensions is None:
             spatial_dimensions = [None, None]
         else:
             spatial_dimensions = list(spatial_dimensions)
             assert len(spatial_dimensions) == 2, "2D input required"
-        if attention>0 or self_attention>0:
+        if attention>0 or arch.self_attention>0:
             assert spatial_dimensions[0] is not None and spatial_dimensions[0] > 0, "for attention mechanism, spatial dim must be provided"
             assert spatial_dimensions[1] is not None and spatial_dimensions[1] > 0, "for attention mechanism, spatial dim must be provided"
-            print(f"attention positional encoding mode: {attention_positional_encoding}")
+            print(f"attention positional encoding mode: {arch.attention_positional_encoding}")
         else:
             spatial_dimensions = [None, None] # no attention : no need to enforce fixed size
-        if frame_window<=1:
+        if arch.frame_window<=1:
             long_term = False
-        n_frames = frame_window * (2 if next else 1) + 1
+        n_frames = arch.frame_window * (2 if arch.future_frames else 1) + 1
+        skip_connections = arch.skip_connections
         if skip_connections == False:
-            skip_connections = [len(encoder_settings)] # only at feature level
+            skip_connections = [len(arch.encoder_settings)] # only at feature level
         elif skip_connections == True:
-            skip_connections = [i for i in range(len(encoder_settings)+1)]
+            skip_connections = [i for i in range(len(arch.encoder_settings) + 1)]
         else:
             assert isinstance(skip_connections, (list))
-            skip_connections = [i if i>=0 else len(encoder_settings)+1+i for i in skip_connections]
-        inference_pair_idx = [frame_window - 1, frame_window]
+            skip_connections = [i if i>=0 else len(arch.encoder_settings) + 1 + i for i in skip_connections]
+        inference_pair_idx = [arch.frame_window - 1, arch.frame_window]
         inference_pair_sel_bw = [0]
         inference_pair_sel_fw = [1]
         if inference_gap_number > 1:
             assert long_term, "long term must be enabled for gap prediction"
-            assert inference_gap_number < frame_window, f"gap number must be lower or equal to: {frame_window-1} got {inference_gap_number}"
-            n_gap_max = frame_window - 1
+            assert inference_gap_number < arch.frame_window, f"gap number must be lower or equal to: {arch.frame_window-1} got {inference_gap_number}"
+            n_gap_max = arch.frame_window - 1
             n_pairs_0 = n_frames - 1
             for gap in range(inference_gap_number):
                 inference_pair_sel_bw.append(len(inference_pair_idx))
                 inference_pair_idx.append(n_pairs_0 + n_gap_max - gap - 1)
-                if next:
+                if arch.future_frames:
                     inference_pair_sel_fw.append(len(inference_pair_idx))
                     inference_pair_idx.append(n_pairs_0 + n_gap_max + gap )
         #print(f"inference_pair_idx {inference_pair_idx} bw: {inference_pair_sel_bw}={[inference_pair_idx[i] for i in inference_pair_sel_bw]} fw: {inference_pair_sel_fw}=={[inference_pair_idx[i] for i in inference_pair_sel_fw]}")
@@ -443,51 +405,39 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
         encoder_layers = []
         contraction_per_layer = []
         no_residual_layer = []
-        last_input_filters = n_inputs
-        if n_inputs > 1 and legacy_multi_input_arch:
-            last_input_filters = 1
-            print(f"legacy multi-input arch")
-        for l_idx, param_list in enumerate(encoder_settings):
-            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, frame_window), downsampling_mode=downsampling_mode, attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, skip_stop_gradient=skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
+        last_input_filters = arch.n_inputs
+        for l_idx, param_list in enumerate(arch.encoder_settings):
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window), downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
             last_input_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
             no_residual_layer.append(residual_filters==0)
         # define feature operations
-        feature_convs, _, _, feature_filters, _ = parse_param_list(feature_settings, "FeatureSequence", attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, last_input_filters=out_filters)
-        combine_filters = int(feature_filters * n_frames  * blending_filter_factor)
-        print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
-        combine_features_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="CombineFeatures") if frame_window > 0 else lambda features : features[0]
+        feature_convs, _, _, feature_filters, _ = parse_param_list(arch.feature_settings, "FeatureSequence", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, last_input_filters=out_filters)
         if attention>0:
-            attention_op = SpatialAttention2D(num_heads=attention, positional_encoding=attention_positional_encoding, frame_distance_aware_size=max(frame_window, frame_max_distance) if frame_aware else 0, dropout=attention_dropout, l2_reg=l2_reg, name="Attention")
-        pair_combine_op = Combine(filters=feature_filters, kernel_size = pair_combine_kernel_size, l2_reg=l2_reg, name="FeaturePairCombine")
-        all_pair_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, compensate_gradient = True, l2_reg=l2_reg, name="AllFeaturePairCombine")
-        feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=combine_kernel_size, l2_reg=l2_reg, name="FeaturePairFeatureCombine") # change here was feature_filters
-
-        for f in feature_blending_settings:
-            if "filters" not in f or f["filters"]<0:
-                f["filters"] = combine_filters
-        feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(feature_blending_settings, "FeatureBlendingSequence", attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, last_input_filters=combine_filters)
-
-        if len(encoder_settings) in skip_connections:
-            feature_skip_op = Combine(filters=feature_filters, l2_reg=l2_reg, name="FeatureSkip")
-            feature_pair_skip_op = Combine(filters=feature_filters, l2_reg=l2_reg, name="FeaturePairSkip")
+            if attention_filters is None: # legacy behavior
+                attention_filters = feature_filters
+            attention_op = SpatialAttention2D(num_heads=attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=arch.frame_aware, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention")
+        pair_combine_op = Combine(filters=feature_filters, kernel_size = arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairCombine")
+        if len(arch.encoder_settings) in skip_connections:
+            feature_skip_op = Combine(filters=feature_filters, l2_reg=arch.l2_reg, name="FeatureSkip")
+            feature_pair_skip_op = Combine(filters=feature_filters, l2_reg=arch.l2_reg, name="FeaturePairSkip")
 
         # define decoder operations
         decoder_layers={"Seg":[], "Center":[], "Track":[], "LinkMultiplicity":[]} if tracking else {"Seg":[], "Center":[]}
-        if category_number > 1:
+        if arch.category_number > 1:
             decoder_layers["Cat"] = []
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
-        decoder_feature_op={n: get_seq_and_filters(parse_param_list(feature_decoder_settings, f"Features{n}", attention_positional_encoding=attention_positional_encoding, l2_reg=l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
+        decoder_feature_op={n: get_seq_and_filters(parse_param_list(arch.feature_decoder_settings, f"Features{n}", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
         decoder_out={name:{} for name in decoder_layers.keys()}
-        output_per_decoder = {"Seg": {"EDM":0}, "Center": {"CDM":1}, "Track": {"dYBW":2, "dXBW":3} if not predict_next_displacement else {"dYBW":2, "dXBW":3, "dYFW":2, "dXFW":3}, "LinkMultiplicity": {"LinkMultiplicityBW":4} if not predict_next_displacement else {"LinkMultiplicityBW":4, "LinkMultiplicityFW":4}}
-        if predict_edm_derivatives:
+        output_per_decoder = {"Seg": {"EDM":0}, "Center": {"CDM":1}, "Track": {"dYBW":2, "dXBW":3} if not arch.predict_fw else {"dYBW":2, "dXBW":3, "dYFW":2, "dXFW":3}, "LinkMultiplicity": {"LinkMultiplicityBW":4} if not arch.predict_fw else {"LinkMultiplicityBW":4, "LinkMultiplicityFW":4}}
+        if arch.predict_edm_derivatives:
             output_per_decoder["Seg"]["EDMdY"]=0
             output_per_decoder["Seg"]["EDMdX"]=0
-        if predict_cdm_derivatives:
+        if arch.predict_cdm_derivatives:
             output_per_decoder["Center"]["CDMdY"]=1
             output_per_decoder["Center"]["CDMdX"]=1
-        if category_number > 1:
+        if arch.category_number > 1:
             output_per_decoder["Cat"] = {"Category":5 if tracking else 2}
         decoder_output_names = dict()
         for n, o_ns in output_per_decoder.items():
@@ -496,53 +446,54 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                 decoder_output_names[n][o_n] = f"Output{o_i:02}_{o_n}"
         n_frame_pairs = n_frames -1
         if long_term:
-            n_frame_pairs = n_frame_pairs + (frame_window-1) * (2 if next else 1)
+            n_frame_pairs = n_frame_pairs + (arch.frame_window-1) * (2 if arch.future_frames else 1)
         decoder_is_segmentation = {"Seg": True, "Center": True, "Track": False, "LinkMultiplicity": False} if tracking else {"Seg":True, "Center":True}
-        if category_number > 1:
+        if arch.category_number > 1:
             decoder_is_segmentation["Cat"] = True
         skip_per_decoder = {"Seg": skip_connections, "Center": [], "Track": [], "LinkMultiplicity": [], "Cat":[]}
 
-        for l_idx, param_list in enumerate(decoder_settings):
+        for l_idx, param_list in enumerate(arch.decoder_settings):
             if l_idx==0:
                 for dSegName in output_per_decoder["Seg"].keys():
-                    output_name = None if frame_window > 0 or predict_edm_derivatives else decoder_output_names["Seg"][dSegName]
-                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="tanh" if scale_edm else "linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
+                    output_name = None if arch.frame_window > 0 or arch.predict_edm_derivatives else decoder_output_names["Seg"][dSegName]
+                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
                 for dCenterName in output_per_decoder["Center"].keys():
-                    output_name = None if frame_window > 0 or predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
-                    decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
-                if category_number > 1:
+                    output_name = None if arch.frame_window > 0 or arch.predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
+                    decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
+                if arch.category_number > 1:
                     for dCatName in output_per_decoder["Cat"].keys():
-                        output_name = None if frame_window > 0 else decoder_output_names["Cat"][dCatName]
-                        decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=category_number, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
+                        output_name = None if arch.frame_window > 0 else decoder_output_names["Cat"][dCatName]
+                        decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
-                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
+                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    d_layers.append( decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=upsampling_mode, skip_combine_mode=skip_combine_mode, combine_kernel_size=combine_kernel_size, activation="relu", l2_reg=l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()) )
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
-        if n_inputs == 1:
+        if arch.n_inputs == 1:
             inputs = [ tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name="input") ]
-            if frame_aware and frame_window > 0:
+            if arch.frame_aware and arch.frame_window > 0:
                 frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name="input2_frameindex")
                 inputs.append(frame_index)
-            input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=True,  name="MergeInputs")(inputs[0]) if frame_window > 0 else inputs[0]
+            input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=True,  name="MergeInputs")(inputs[0]) if arch.frame_window > 0 else inputs[0]
         else:
-            if frame_window > 0:
-                inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name=f"input{i}") for i in range(n_inputs)]
+            if arch.frame_window > 0:
+                inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name=f"input{i}") for i in range(arch.n_inputs)]
                 input_stacked = Stack(axis = -2, name="InputStack")(inputs)
                 input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=False, name="MergeInputs")(input_stacked)
-                if frame_aware:
-                    frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name=f"input{n_inputs}_frameindex")
+                if arch.frame_aware:
+                    frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name=f"input{arch.n_inputs}_frameindex")
                     inputs.append(frame_index)
             else:
-                inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(n_inputs)]
+                inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(arch.n_inputs)]
                 input_merged = tf.keras.layers.Concatenate(axis=-1, name="MergeInputs")(inputs)
-        print(f"input dims: {n_inputs} x {spatial_dimensions} frames={n_frames}")
+        print(f"input dims: {arch.n_inputs} x {spatial_dimensions} frames={n_frames}")
 
+        # encoder part
         downsampled = [input_merged]
         residuals = []
         for l in encoder_layers:
@@ -550,78 +501,105 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
             downsampled.append(down)
             residuals.append(res)
         residuals = residuals[::-1]
-        feature = downsampled[-1]
+        features_batch = downsampled[-1]
         for op in feature_convs:
-            feature = op(feature)
+            features_batch = op(features_batch)
 
-        # combine individual features
-        all_features = SplitBatch(n_frames, compensate_gradient = False, name = "SplitFeatures")(feature) if frame_window > 0 else [feature]
-        combined_features = combine_features_op(all_features)
+        features_list = SplitBatch(n_frames, compensate_gradient=False, name="SplitFeatures")(features_batch) if arch.frame_window > 0 else [features_batch]
 
-        # frame pairs
-        if frame_window > 0 :
+        # feature_pairs
+        if arch.frame_window > 0 :
             feature_prev, feature_next = [], []
             frame_prev, frame_next = [], []
             for i in range(1, n_frames):
-                feature_prev.append(all_features[i-1])
-                feature_next.append(all_features[i])
+                feature_prev.append(features_list[i-1])
+                feature_next.append(features_list[i])
                 frame_prev.append(i-1)
                 frame_next.append(i)
             if long_term:
-                for c in range(0, frame_window-1):
-                    feature_prev.append(all_features[c])
-                    feature_next.append(all_features[frame_window])
+                for c in range(0, arch.frame_window-1):
+                    feature_prev.append(features_list[c])
+                    feature_next.append(features_list[arch.frame_window])
                     frame_prev.append(c)
-                    frame_next.append(frame_window)
-                if next:
-                    for c in range(frame_window+2, n_frames):
-                        feature_prev.append(all_features[frame_window])
-                        feature_next.append(all_features[c])
-                        frame_prev.append(frame_window)
+                    frame_next.append(arch.frame_window)
+                if arch.future_frames:
+                    for c in range(arch.frame_window+2, n_frames):
+                        feature_prev.append(features_list[arch.frame_window])
+                        feature_next.append(features_list[c])
+                        frame_prev.append(arch.frame_window)
                         frame_next.append(c)
             feature_prev = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
             feature_next = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
-            if frame_aware:
-                frame_distance = tf.cast(tf.gather(frame_index[:,0,0], frame_next, axis=-1) - tf.gather(frame_index[:,0,0], frame_prev, axis=-1), tf.int32)
+            if arch.frame_aware:
+                frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = frame_prev, frame_next_idx = frame_next)(frame_index)
 
             if attention>0:
-                attention_result = attention_op([feature_prev, feature_next, frame_distance]) if frame_aware else attention_op([feature_prev, feature_next])
-                if frame_aware:
-                    attention_result, frame_distance_emb = attention_result
-                feature_pair = pair_combine_op([feature_prev, feature_next, attention_result])
-                if frame_aware:
-                    feature_pair = feature_pair + frame_distance_emb
+                attention_result = attention_op([feature_prev + frame_dist_emb, feature_next + frame_dist_emb, feature_prev]) if arch.frame_aware else attention_op([feature_prev, feature_next])
+                feature_pairs_batch = pair_combine_op([feature_prev, feature_next, attention_result])
+                if arch.frame_aware:
+                    feature_pairs_batch = feature_pairs_batch + frame_dist_emb
             else:
-                feature_pair = pair_combine_op([feature_prev, feature_next])
-                if frame_aware:
-                    frame_distance_embedding_layer = tf.keras.layers.Embedding(input_dim=max(frame_window, frame_max_distance), output_dim=feature_filters, name="FrameDistanceEmbedding")
-                    frame_distance_emb = frame_distance_embedding_layer(frame_distance)
-                    frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, feature_filters])
-                    feature_pair = feature_pair + frame_distance_emb
+                feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
+                if arch.frame_aware:
+                    feature_pairs_batch = feature_pairs_batch + frame_dist_emb
 
-            all_feature_pairs = SplitBatch(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pair)
-            combined_feature_pairs = all_pair_combine_op(all_feature_pairs)
-            combined_features = feature_pair_feature_combine_op([combined_features, combined_feature_pairs])
-            for op in feature_blending_convs:
-                combined_features = op(combined_features)
+            feature_pairs_list = SplitBatch(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pairs_batch)
 
-            feature_per_frame = NConvToBatch2D(compensate_gradient = True, n_conv = n_frames, inference_idx=frame_window, filters = feature_filters, name =f"SegmentationFeatures")(combined_features) # (N_CHAN x B, Y, X, F)
-            feature_per_frame_pair = NConvToBatch2D(compensate_gradient = True, n_conv = n_frame_pairs, inference_idx=inference_pair_idx, filters = feature_filters, name =f"TrackingFeatures")(combined_features) # (N_PAIRS x B, Y, X, F)
-        else:
-            feature_per_frame = combined_features
+        # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
+        if isinstance(arch, TemA):
+            feature_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=arch.frame_window, return_list=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
+            if arch.frame_window > 0:
+                feature_pair_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeaturePairAttention")
+                central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_CentralFeatureFeaturePairAttention")
+            central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name="CentralFeatureAttCombine")
+            features_att_list = feature_att_op(features_list) # blend segmentation information
+            if arch.frame_window > 0:
+                blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list) # blend tracking information
+                # cross blend segmentation & tracking information
+                central_feature_pair_list = [feature_pairs_list[i] for i in inference_pair_idx]
+                central_feature_att = central_feature_att_op( ([features_list[arch.frame_window]], central_feature_pair_list) ) # cross attention : central pair and feature pair involving central frame
+                features_att_list[arch.frame_window] = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
+            blended_features_batch = tf.concat(features_att_list, 0)
 
-        if len(encoder_settings) in skip_connections and frame_window > 0: # skip connection at feature level
-            feature_skip = SelectFeature(inference_idx=frame_window, name ="SelectFeature")([feature, all_features])
-            feature_per_frame = feature_skip_op([feature_skip, feature_per_frame])
-            feature_pair_skip = SelectFeature(inference_idx=inference_pair_idx, name ="SelectFeaturePair")([feature_pair, all_feature_pairs])
-            feature_per_frame_pair = feature_pair_skip_op([feature_pair_skip, feature_per_frame_pair])
+        elif isinstance(arch, Blend): # BLEND architecture (first architecture) : combine feature / feature pair with convolution part so that each frame / frame pair has access to information from all other feature pairs / features
+            # define operations:
+            combine_filters = int(feature_filters * n_frames * arch.blending_filter_factor)
+            print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
+            combine_features_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, compensate_gradient=True, l2_reg=arch.l2_reg, name="CombineFeatures") if arch.frame_window > 0 else lambda features: features[0]
+            all_pair_combine_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, compensate_gradient=True, l2_reg=arch.l2_reg, name="AllFeaturePairCombine")
+            feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairFeatureCombine")  # change here was feature_filters
 
+            for f in arch.feature_blending_settings:
+                if "filters" not in f or f["filters"] < 0:
+                    f["filters"] = combine_filters
+            feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings, "FeatureBlendingSequence", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, last_input_filters=combine_filters)
+
+            # include operations in graph
+            combined_features = combine_features_op(features_list) # combine individual features
+            if arch.frame_window > 0:
+                combined_feature_pairs = all_pair_combine_op(feature_pairs_list)
+                combined_features = feature_pair_feature_combine_op([combined_features, combined_feature_pairs])
+                for op in feature_blending_convs:
+                    combined_features = op(combined_features)
+
+                blended_features_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F)
+                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F)
+            else:
+                blended_features_batch = combined_features
+
+        if len(arch.encoder_settings) in skip_connections and arch.frame_window > 0: # skip connection at feature level
+            feature_skip = SelectFeature(inference_idx=arch.frame_window, name ="SelectFeature")([features_batch, features_list])
+            features_batch = feature_skip_op([feature_skip, blended_features_batch])
+            feature_pair_skip = SelectFeature(inference_idx=inference_pair_idx, name ="SelectFeaturePair")([feature_pairs_batch, feature_pairs_list])
+            feature_pairs_batch = feature_pair_skip_op([feature_pair_skip, blended_feature_pairs_batch])
+
+        # decoder part
         outputs=[]
         for decoder_name, is_segmentation in decoder_is_segmentation.items():
             if is_segmentation is not None:
                 d_layers = decoder_layers[decoder_name]
                 skip = skip_per_decoder[decoder_name]
-                up = feature_per_frame if is_segmentation else feature_per_frame_pair
+                up = features_batch if is_segmentation else feature_pairs_batch
                 for op in decoder_feature_op[decoder_name][0]:
                     up = op(up)
                 for i, (l, res) in enumerate(zip(d_layers[::-1], residuals[:-1])):
@@ -631,27 +609,27 @@ def get_distnet_2d_model(spatial_dimensions:[list, tuple],  # (Y, X)
                     if output_name in decoder_out[decoder_name]:
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
-                        if not is_segmentation and predict_next_displacement and not output_name.endswith(("FW", "BW")) or (decoder_name=="Seg" and predict_edm_derivatives or decoder_name== "Center" and predict_cdm_derivatives) and not output_name.endswith(("dX", "dY")):
+                        if not is_segmentation and arch.predict_fw and not output_name.endswith(("FW", "BW")) or (decoder_name == "Seg" and arch.predict_edm_derivatives or decoder_name == "Center" and arch.predict_cdm_derivatives) and not output_name.endswith(("dX", "dY")):
                             layer_output_name += "_" # will be concatenated -> output name is used @ concat
                         fw = output_name.endswith("FW")
                         b2c_inference_idx = None if is_segmentation else (inference_pair_sel_fw if fw else inference_pair_sel_bw)
                         up_out = d_out([up, residuals[-1] if 0 in skip else None]) # (N_OUT x B, Y, X, F)
-                        up_out = BatchToChannel(n_splits = n_frames if is_segmentation else n_frame_pairs, n_splits_inference= 1 if is_segmentation else len(inference_pair_idx), inference_idx=b2c_inference_idx, compensate_gradient = False, name = layer_output_name)(up_out) if frame_window > 0 else up_out
+                        up_out = BatchToChannel(n_splits = n_frames if is_segmentation else n_frame_pairs, n_splits_inference= 1 if is_segmentation else len(inference_pair_idx), inference_idx=b2c_inference_idx, compensate_gradient = False, name = layer_output_name)(up_out) if arch.frame_window > 0 else up_out
                         output_per_dec[output_name] = up_out
-                if predict_next_displacement: # merge BW and FW outputs
+                if arch.predict_fw: # merge BW and FW outputs
                     for k in list(output_per_dec.keys()):
                         if k.endswith("FW"):
                             output_name_bw = k.replace("FW", "BW")
                             output_name = decoder_output_names[decoder_name][k].replace("FW", "")
-                            output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, name = output_name.lower())([output_per_dec.pop(output_name_bw), output_per_dec.pop(k)])
-                if decoder_name=="Seg" and predict_edm_derivatives:
+                            output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, autocast=False, name = output_name.lower())([output_per_dec.pop(output_name_bw), output_per_dec.pop(k)])
+                if decoder_name=="Seg" and arch.predict_edm_derivatives:
                     output_name = "EDM"
-                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("EDMdY"), output_per_dec.pop("EDMdX")])
-                if decoder_name=="Center" and predict_cdm_derivatives:
+                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("EDMdY"), output_per_dec.pop("EDMdX")])
+                if decoder_name=="Center" and arch.predict_cdm_derivatives:
                     output_name = "CDM"
-                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1,  name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
+                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
                 outputs.extend(output_per_dec.values())
-        return DiSTNetModel(inputs, outputs, name=name, frame_window=frame_window, next=next, spatial_dims=spatial_dimensions if attention > 0 or self_attention > 0 else None, long_term=long_term, predict_next_displacement=predict_next_displacement, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=category_number, **kwargs)
+        return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if attention > 0 or arch.self_attention > 0 else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=arch.predict_cdm_derivatives, predict_edm_derivatives=arch.predict_edm_derivatives, category_number=arch.category_number, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
@@ -705,7 +683,7 @@ def decoder_op(
             dropout_rate_up:float=0,
             activation: str="relu",
             activation_out : str = None,
-            op:str = "conv", # conv,resconv2d, resconv2d
+            op:str = "conv", # conv, resconv2d, resconv2d
             weighted_sum:bool=False, # in case op = resconv2d, resconv2d
             n_conv:int = 1,
             l2_reg:float=0,
@@ -725,23 +703,23 @@ def decoder_op(
             filters_out = filters
 
         up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg)
-        up_op_out = upsampling_op(filters=filters_out, parent_name=None if output_name is not None else name, name = output_name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg)
+        up_op_out = upsampling_op(filters=filters_out, parent_name=None if output_name is not None else name, name = output_name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 else None)
         if skip_combine_mode.lower()=="conv" or skip_combine_mode.lower()=="wsconv":
-            combine = Combine(name = output_name if output_name is not None and n_conv==0 else name+"_combine", filters=filters if filters_out is None or n_conv>0 else filters_out, kernel_size = combine_kernel_size, l2_reg=l2_reg, weight_scaled=skip_combine_mode.lower()=="wsconv")
+            combine = Combine(name = output_name if output_name is not None and n_conv==0 else name+"_combine", output_dtype="float32" if layer_idx==0 and n_conv==0 else None, filters=filters if filters_out is None or n_conv>0 else filters_out, kernel_size = combine_kernel_size, l2_reg=l2_reg, weight_scaled=skip_combine_mode.lower()=="wsconv")
         else:
             combine = None
         op = op.lower().replace("_", "")
         if op == "res1d" or op=="resconv1d":
             raise NotImplementedError("ResConv1D are not implemented")
         elif op == "res2d" or op=="resconv2d":
-            convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
+            convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
         else:
             if weight_scaled:
-                convs = [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
+                convs = [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
             elif batch_norm or dropout_rate>0:
-                convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}"if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
+                convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}"if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
             else:
-                convs = [tf.keras.layers.Conv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
+                convs = [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
         def op(input):
             down, res = input
             up = up_op_out(down) if n_conv==0 and res is None else up_op(down)
@@ -749,6 +727,7 @@ def decoder_op(
                 if combine is not None:
                     up = combine([up, res])
                 else:
+                    res = tf.cast(res, up.dtype)
                     up = up + res
             for c in convs:
                 up = c(up)
@@ -761,13 +740,13 @@ def upsampling_op(
             size_factor:int=2,
             kernel_size: int=0,
             mode:str="tconv", # tconv, up_nn, up_bilinear
-            norm_layer:str=None,
             activation: str="relu",
             batch_norm:bool = False,
             weight_scaled:bool = False,
             dropout_rate:float = 0,
             use_bias:bool = True,
             l2_reg:float = 0,
+            output_dtype=None,
             name: str= None,
         ):
         assert mode in ["tconv", "up_nn", "up_bilinear"], "invalid mode"
@@ -777,18 +756,18 @@ def upsampling_op(
             if weight_scaled:
                 raise NotImplementedError("Weight scaled transpose conv is not implemented")
             elif batch_norm or dropout_rate>0:
-                upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
+                upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
             else:
                 kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None
-                upsample = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, kernel_regularizer=kernel_regularizer, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
+                upsample = Conv2DTransposeWithDtype(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, kernel_regularizer=kernel_regularizer, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
             upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{parent_name}_Upsample{size_factor}x{size_factor}_{interpolation}" if parent_name is not None else name)
             if batch_norm:
-                conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation )
+                conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation )
             else:
-                conv = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides=1, padding='same', name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, use_bias=use_bias, activation=activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None )
+                conv = Conv2DWithDtype(filters=filters, kernel_size=kernel_size, strides=1, padding='same', output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, use_bias=use_bias, activation=activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None )
         def op(input):
             x = upsample(input)
             if conv is not None:
@@ -849,15 +828,15 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="2D", dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, num_attention_heads:int=1, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="2D", attention_filters:int=None, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, num_attention_heads:int=1, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
-        raise NotImplementedError("ResConv1D is not implmeneted")
+        raise NotImplementedError("ResConv1D is not implemented")
     elif op =="res2d" or op == "resconv2d":
         return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, split_conv=split_conv, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
-        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
+        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, attention_filters=attention_filters, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
         self_attention_skip_op = Combine(filters=filters, l2_reg=l2_reg, name=f"{name}_SelfAttentionSkip")
         def op(x):
             sa = self_attention_op([x, x])

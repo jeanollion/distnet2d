@@ -76,7 +76,10 @@ class SelectFeature(tf.keras.layers.Layer):
             else:
                 return input_split[self.inference_idx]
         else:
-            return input_concat
+            if input_concat is None:
+                return tf.concat(input_split, axis = 0)
+            else:
+                return input_concat
 
 class ChannelToBatch(tf.keras.layers.Layer):
     def __init__(self, compensate_gradient:bool = False, add_channel_axis:bool = True, name: str="ChannelToBatch"):
@@ -153,7 +156,7 @@ class BatchToChannel(tf.keras.layers.Layer):
             assert isinstance(inference_idx, list), f"inference_idx must be a list of indices: {inference_idx}"
             assert np.all(np.asarray(inference_idx)<n_splits_inference), f"all inference_idx must be lower than {n_splits_inference} got {inference_idx}"
         self.inference_idx = inference_idx
-        super().__init__(name=name)
+        super().__init__(name=name, autocast=False)
 
     def get_config(self):
       config = super().get_config().copy()
@@ -187,6 +190,32 @@ class BatchToChannel(tf.keras.layers.Layer):
             input = tf.gather(input, axis=0, indices=self.inference_idx) # (N, B, Y, X, F)
         input = tf.transpose(input, perm=self.perm) # (B, Y, X, N, F)
         return tf.reshape(input, target_shape2) # (B, Y, X, N x F)
+
+class FrameDistanceEmbedding(tf.keras.layers.Layer):
+    def __init__(self, input_dim:int, output_dim:int, frame_prev_idx:list, frame_next_idx:list , name:str="FrameDistanceEmbedding"):
+        self.input_dim=input_dim
+        self.output_dim=output_dim
+        self.frame_next_idx=frame_next_idx
+        self.frame_prev_idx=frame_prev_idx
+        assert len(frame_prev_idx) == len(frame_next_idx)
+        self.embedding=None
+        super().__init__(name=name)
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"input_dim": self.input_dim, "output_dim":self.output_dim, "frame_prev_idx":self.frame_prev_idx, "frame_next_idx":self.frame_next_idx})
+      return config
+
+    def build(self, input_shape):
+        self.embedding = tf.keras.layers.Embedding(input_dim=self.input_dim, output_dim=self.output_dim, input_length=len(self.frame_next_idx))
+        super().build(input_shape)
+
+    def call(self, frame_index): # (B, 1, 1, FW)
+        frame_distance = tf.cast( tf.gather(frame_index[:, 0, 0], self.frame_next_idx, axis=-1) - tf.gather(frame_index[:, 0, 0], self.frame_prev_idx, axis=-1), tf.int32 ) # (B, N)
+        frame_distance_emb = self.embedding(frame_distance) # (B, N, C)
+        frame_distance_emb = tf.transpose(frame_distance_emb, perm=[1, 0, 2]) # (N, B, C)
+        frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim]) # ( N x B, 1, 1, C )
+        return frame_distance_emb
 
 def get_grad_weight_fun(weight):
     @tf.custom_gradient
@@ -243,15 +272,17 @@ class Stack(tf.keras.layers.Layer):
         config.update({'axis': self.axis})
         return config
 
+
 class Combine(tf.keras.layers.Layer):
     def __init__(
             self,
-            filters: int,
+            filters: int = 0,
             kernel_size: int=1,
             weight_scaled:bool = False,
             activation: str="relu",
             compensate_gradient:bool = False,
             l2_reg: float=0,
+            output_dtype:str = None,
             name: str="Combine",
         ):
         self.activation = activation
@@ -260,30 +291,38 @@ class Combine(tf.keras.layers.Layer):
         self.weight_scaled = weight_scaled
         self.compensate_gradient = compensate_gradient
         self.l2_reg=l2_reg
+        self.output_dtype=output_dtype
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "weight_scaled":self.weight_scaled, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg})
+      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "weight_scaled":self.weight_scaled, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
+        if self.filters <=0:
+            f = [s[-1] for s in input_shape]
+            filters = f[0]
+            assert np.all(np.array(f) == f[0]), "when filter is not provided, all input tensor must have same filter number"
+        else:
+            filters = self.filters
         self.concat = tf.keras.layers.Concatenate(axis=-1, name = self.name+"_concat")
         if self.weight_scaled:
             self.combine_conv = WSConv2D(
-                filters=self.filters,
+                filters=filters,
                 kernel_size=self.kernel_size,
                 padding='same',
                 activation=self.activation,
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
                 name=self.name+"_conv1x1")
         else:
-            self.combine_conv = tf.keras.layers.Conv2D(
-                filters=self.filters,
+            self.combine_conv = Conv2DWithDtype(
+                filters=filters,
                 kernel_size=self.kernel_size,
                 padding='same',
                 activation=self.activation,
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
+                output_dtype=self.output_dtype,
                 name=self.name+"_conv1x1")
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./len(input_shape))
@@ -299,6 +338,7 @@ class Combine(tf.keras.layers.Layer):
         x = self.combine_conv(x)
         # x = get_print_grad_fun(f"{self.name} before before conv")(x)
         return x
+
 
 class WeigthedGradient(tf.keras.layers.Layer):
     def __init__(self, weight, name: str="WeigthedGradient"):
@@ -317,6 +357,7 @@ class WeigthedGradient(tf.keras.layers.Layer):
                 return dy * self.weight
         return x, grad
 
+
 class ResConv2D(tf.keras.layers.Layer):
     def __init__(
             self,
@@ -328,6 +369,7 @@ class ResConv2D(tf.keras.layers.Layer):
             weight_scaled:bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
+            output_dtype=None,
             split_conv:bool = False,
             name: str="ResConv2D",
     ):
@@ -340,10 +382,12 @@ class ResConv2D(tf.keras.layers.Layer):
         self.weight_scaled = weight_scaled
         self.weighted_sum = weighted_sum
         self.l2_reg = l2_reg
+        self.output_dtype=output_dtype
         self.split_conv=split_conv
+
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "split_conv":self.split_conv})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype, "split_conv":self.split_conv})
       return config
 
     def build(self, input_shape):
@@ -385,6 +429,8 @@ class ResConv2D(tf.keras.layers.Layer):
             x = self.bn1(x, training = training)
         x = self.activation_layer(x) #* self.gamma
         x = self.conv2(x)
+        if self.output_dtype is not None:
+            x = tf.cast(x, dtype=self.output_dtype)
         if self.batch_norm:
             x = self.bn2(x, training = training)
         if self.dropout_rate>0:
@@ -393,6 +439,7 @@ class ResConv2D(tf.keras.layers.Layer):
             return self.activation_layer(self.ws([input, x]))
         else:
             return self.activation_layer(input + x)
+
 
 class Conv2DBNDrop(tf.keras.layers.Layer):
     def __init__(
@@ -405,6 +452,7 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             batch_norm : bool = True,
             activation:str = "relu",
             l2_reg:float = 0,
+            output_dtype=None,
             name: str="ConvBNDrop",
     ):
         super().__init__(name=name)
@@ -416,10 +464,11 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
         self.batch_norm=batch_norm
         self.strides=strides
         self.l2_reg = l2_reg
+        self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "l2_reg":self.l2_reg})
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -442,11 +491,43 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
 
     def call(self, input, training=None):
         x = self.conv(input)
+        if self.output_dtype is not None:
+            x = tf.cast(x, dtype=self.output_dtype)
         if self.batch_norm:
             x = self.bn(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         return self.activation_layer(x)
+
+
+class Conv2DWithDtype(tf.keras.layers.Conv2D):
+    def __init__(self, *args, output_dtype:str=None, **kwargs):
+        self._activation = kwargs.pop('activation', None)
+        super(Conv2DWithDtype, self).__init__(*args, activation=None, **kwargs)
+        self.output_dtype = output_dtype
+        self.activation = None  # Will be set in build()
+
+    def build(self, input_shape):
+        super(Conv2DWithDtype, self).build(input_shape)
+        if self._activation is not None:
+            self.activation = tf.keras.activations.get(self._activation)
+
+    def call(self, inputs):
+        output = super(Conv2DWithDtype, self).call(inputs)
+        if self.output_dtype is not None:
+            output = tf.cast(output, dtype=self.output_dtype)
+        if self.activation is not None:
+            output = self.activation(output)
+        return output
+
+    def get_config(self):
+        config = super(Conv2DWithDtype, self).get_config()
+        config.update({
+            'output_dtype': self.output_dtype,
+            'activation': tf.keras.activations.serialize(self._activation)
+        })
+        return config
+
 
 class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
     def __init__(
@@ -458,6 +539,7 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             batch_norm : bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
+            output_dtype=None,
             name: str="ResConv2DTransposeBNDrop",
     ):
         super().__init__(name=name)
@@ -468,10 +550,11 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
         self.batch_norm=batch_norm
         self.strides=strides
         self.l2_reg=l2_reg
+        self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "l2_reg":self.l2_reg})
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -494,11 +577,60 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
 
     def call(self, input, training=None):
         x = self.conv(input)
+        if self.output_dtype is not None:
+            x = tf.cast(x, dtype=self.output_dtype)
         if self.batch_norm:
             x = self.bn(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         return self.activation_layer(x)
+
+
+class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
+    def __init__(self, *args, output_dtype=None, **kwargs):
+        self._activation = kwargs.pop('activation', None)
+        super(Conv2DTransposeWithDtype, self).__init__(*args, activation=None, **kwargs)
+        self.output_dtype = output_dtype
+        self.activation = None  # Will be set in build()
+
+    def build(self, input_shape):
+        super(Conv2DTransposeWithDtype, self).build(input_shape)
+        if self._activation is not None:
+            self.activation = tf.keras.activations.get(self._activation)
+
+    def call(self, inputs):
+        output = super(Conv2DTransposeWithDtype, self).call(inputs)
+        if self.output_dtype is not None:
+            output = tf.cast(output, dtype=self.output_dtype)
+        if self.activation is not None:
+            output = self.activation(output)
+        return output
+
+    def get_config(self):
+        config = super(Conv2DTransposeWithDtype, self).get_config()
+        config.update({
+            'output_dtype': self.output_dtype,
+            'activation': tf.keras.activations.serialize(self._activation)
+        })
+        return config
+
+
+class UpSampling2DWithDtype(tf.keras.layers.UpSampling2D):
+    def __init__(self, *args, output_dtype=None, **kwargs):
+        super(UpSampling2DWithDtype, self).__init__(*args, **kwargs)
+        self.output_dtype = output_dtype
+
+    def call(self, inputs):
+        output = super(UpSampling2DWithDtype, self).call(inputs)
+        if self.output_dtype is not None:
+            output = tf.cast(output, dtype=self.output_dtype)
+        return output
+
+    def get_config(self):
+        config = super(UpSampling2DWithDtype, self).get_config()
+        config.update({'output_dtype': self.output_dtype.name})
+        return config
+
 
 class SplitConv2D(tf.keras.layers.Layer):
     def __init__(
@@ -589,7 +721,7 @@ def get_gamma(activation):
         #raise ValueError(f"activation {activation} not supported yet")
 
 class WSConv2D(tf.keras.layers.Conv2D):
-    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, kernel_initializer="he_normal", **kwargs):
+    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, kernel_initializer="he_normal", output_dtype:str=None, **kwargs):
         activation = kwargs.pop("activation", "linear") # bypass activation
         gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
         super().__init__(kernel_initializer=kernel_initializer, *args, **kwargs)
@@ -598,6 +730,7 @@ class WSConv2D(tf.keras.layers.Conv2D):
         self.activation_layer = tf.keras.activations.get(activation)
         self.dropout_rate = dropout_rate
         self.gamma = gamma
+        self.output_dtype=output_dtype
 
     def build(self, input_shape):
         super().build(input_shape)
@@ -634,13 +767,15 @@ class WSConv2D(tf.keras.layers.Conv2D):
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({"eps":self.eps, "use_gain": self.use_gain, "activation_layer":tf.keras.activations.serialize(self.activation_layer), "dropout_rate":self.dropout_rate, "gamma":self.gamma})
+        config.update({"eps":self.eps, "use_gain": self.use_gain, "output_dtype":self.output_dtype, "activation_layer":tf.keras.activations.serialize(self.activation_layer), "dropout_rate":self.dropout_rate, "gamma":self.gamma})
         return config
 
     def call(self, input, training=None):
         x = super().call(input)
         if self.dropout_rate>0:
             x = self.dropout(x, training = training)
+        if self.output_dtype is not None:
+            x = tf.cast(x, dtype=self.output_dtype)
         if self.activation_layer is not None:
             x = self.activation_layer(x) #* self.gamma
         return x

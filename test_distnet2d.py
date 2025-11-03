@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 from scipy.ndimage import gaussian_filter
 
+from distnet_2d.model.architectures import BlendD2
 from distnet_2d.utils.objectwise_computation_tf import circular_kernel, _erode_mask
 
 path_root = Path(__file__).parents[1]
@@ -32,13 +33,20 @@ from distnet_2d.model import get_distnet_2d, architectures, get_distnet_2d_seg
 
 seg = False
 if not seg:
+    a = np.array(["a1", "a2", "a3"])
+    b = np.array(["b1", "b2", "b3"])
+    ab = np.concatenate([a, b], axis=0)
+    emb = np.array(["aa", "bb"], dtype=ab.dtype)
+    #print(f"ab={ab}")
+    #print(f"emb={np.repeat(emb, a.shape[0], axis=0)}")
     #t = [[0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 0, 0, 0, 0]]
     #print(_erode_mask(np.array(t)[np.newaxis], radius=2))
-    print(circular_kernel(2.5))
-
-    if False:
-        dn = get_distnet_2d((None, None), 4, 1, True, category_number=2, config=architectures.BlendD3(filters=128, self_attention=0, attention=0, skip_connections=True, early_downsampling=True), predict_edm_derivatives=True, predict_cdm_derivatives=True)
-
+    #print(tf.broadcast_dynamic_shape(tf.shape(emb), tf.shape(ab)))
+    if True:
+        from tensorflow.keras import mixed_precision
+        mixed_precision.set_global_policy('mixed_float16')
+        dn = get_distnet_2d(arch=architectures.TemAD2(frame_window=9, spatial_dimensions=(384, 32), filters=128, self_attention=64, attention=64, skip_connections=False, early_downsampling=True, category_number=0, predict_edm_derivatives=False, predict_cdm_derivatives=False))
+        #dn([tf.zeros(shape=(2, 384, 32, 7)), tf.zeros(shape=(2, 1, 1, 7))])
         tf.keras.utils.plot_model(dn, "/data/model.png", show_shapes=True)
         #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
         #print(dn.summary())
