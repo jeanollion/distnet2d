@@ -219,6 +219,9 @@ class DiSTNetModel(tf.keras.Model):
             loss = 0.
             for k, l in losses.items():
                 loss += l * loss_weights[k]
+
+            losses["loss"] = loss
+
             # print(f"reg loss: {len(self.losses)} values: {self.losses}")
             if len(self.losses)>0:
                 loss += tf.add_n(self.losses) # regularizers
@@ -226,7 +229,6 @@ class DiSTNetModel(tf.keras.Model):
             if mixed_precision:
                 loss = self.optimizer.get_scaled_loss(loss)
 
-            losses["loss"] = loss
             # scale loss for distribution
             num_replicas = tf.distribute.get_strategy().num_replicas_in_sync
             if num_replicas > 1:
@@ -543,6 +545,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
             feature_pairs_list = SplitBatch(n_frame_pairs, compensate_gradient = False, name = "SplitFeaturePairs")(feature_pairs_batch)
 
+        # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
         if isinstance(arch, TemA):
             feature_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=arch.frame_window, return_list=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
             if arch.frame_window > 0:
