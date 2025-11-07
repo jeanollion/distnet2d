@@ -144,6 +144,35 @@ class SplitBatch(tf.keras.layers.Layer):
         splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
         return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
 
+class SplitReplaceConcatBatch(tf.keras.layers.Layer):
+    def __init__(self, n_splits:int, replace_idx:int, compensate_gradient:bool = False, name:str="SplitReplaceMergeBatch2D"):
+        self.n_splits=n_splits
+        self.replace_idx = replace_idx
+        self.compensate_gradient=compensate_gradient
+        self.split_layer = None
+        self.inference_mode = None
+        super().__init__(name=name)
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"n_splits": self.n_splits, "compensate_gradient":self.compensate_gradient, "replace_idx":self.replace_idx})
+      return config
+
+    def build(self, input_shape):
+        relace_shape, concat_shape = input_shape
+        self.split_layer = SplitBatch(n_splits=self.n_splits, compensate_gradient=self.compensate_gradient)
+        self.split_layer.build(concat_shape)
+        super().build(input_shape)
+
+    def call(self, input): # (N x B, Y, X, C)
+        replace, concat = input
+        if self.inference_mode: # N = 1
+            return replace
+        else:
+            input_list = self.split_layer(concat)  # N x (B, Y, X, C)
+            input_list[self.replace_idx] = replace
+        return tf.concat(input_list, 0) # (N x B, Y, X, C)
+
 class BatchToChannel(tf.keras.layers.Layer):
     def __init__(self, n_splits:int, n_splits_inference:int=1, inference_idx=None, compensate_gradient:bool = False, name:str= "BatchToChannel"):
         self.n_splits=n_splits
@@ -524,7 +553,7 @@ class Conv2DWithDtype(tf.keras.layers.Conv2D):
         config = super(Conv2DWithDtype, self).get_config()
         config.update({
             'output_dtype': self.output_dtype,
-            'activation': tf.keras.activations.serialize(self._activation)
+            'activation': self._activation if isinstance(self._activation, str) else tf.keras.activations.serialize(self._activation)
         })
         return config
 
@@ -610,7 +639,7 @@ class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
         config = super(Conv2DTransposeWithDtype, self).get_config()
         config.update({
             'output_dtype': self.output_dtype,
-            'activation': tf.keras.activations.serialize(self._activation)
+            'activation': self._activation if isinstance(self._activation, str) else tf.keras.activations.serialize(self._activation)
         })
         return config
 

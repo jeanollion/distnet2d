@@ -5,7 +5,7 @@ import tensorflow as tf
 from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper, \
-    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype
+    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch
 import numpy as np
 from .spatial_attention import SpatialAttention2D
 from .temporal_attention import TemporalAttention
@@ -330,7 +330,7 @@ class DiSTNetModel(tf.keras.Model):
 
     def set_inference(self, inference:bool=True):
         for layer in self.layers:
-            if isinstance(layer, (NConvToBatch2D, BatchToChannel, SelectFeature, TemporalAttention)):
+            if isinstance(layer, (NConvToBatch2D, BatchToChannel, SelectFeature, TemporalAttention, SplitReplaceConcatBatch)):
                 layer.inference_mode = inference
 
     def save(self, *args, inference:bool, **kwargs):
@@ -546,19 +546,20 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
         if isinstance(arch, TemA):
-            feature_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=arch.frame_window, return_list=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
+            feature_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
             if arch.frame_window > 0:
                 feature_pair_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeaturePairAttention")
                 central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_CentralFeatureFeaturePairAttention")
-            central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name="CentralFeatureAttCombine")
-            features_att_list = feature_att_op(features_list) # blend segmentation information
+            central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name=f"CentralFeatureAttCombine")
+            blended_features_batch = feature_att_op(features_list) # blend segmentation information
             if arch.frame_window > 0:
                 blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list_to_blend) # blend tracking information
                 # cross blend segmentation & tracking information
                 central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in inference_pair_idx]
                 central_feature_att = central_feature_att_op( ([features_list[arch.frame_window]], central_feature_pair_list) ) # cross attention : central pair and feature pair involving central frame
-                features_att_list[arch.frame_window] = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
-            blended_features_batch = tf.concat(features_att_list, 0)
+                central_feature = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
+                blended_features_batch = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window)([central_feature, blended_features_batch])
+
 
         elif isinstance(arch, Blend): # BLEND architecture (first architecture) : combine feature / feature pair with convolution part so that each frame / frame pair has access to information from all other feature pairs / features
             # define operations:

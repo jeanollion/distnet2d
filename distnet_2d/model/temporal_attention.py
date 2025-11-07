@@ -18,6 +18,7 @@ class TemporalAttention(tf.keras.layers.Layer):
         self.dropout=dropout
         self.l2_reg=l2_reg
         self.intra_mode = intra_mode # if true: input is (idx, array), otherwise input is (tensor, array)
+        self.temporal_dim=None
         self.inference_idx = inference_idx
         self.inference_mode = False
         if self.intra_mode:
