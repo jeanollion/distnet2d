@@ -187,10 +187,12 @@ class DiSTNetModel(tf.keras.Model):
                 if self.cdm_loss_radius <= 0:
                     cdm_mask = cell_mask
                     cdm_mask_interior = cell_mask_interior
+                    weight_map = None
                 else:
                     cdm_mask = tf.math.less_equal(y[1], self.cdm_loss_radius)
+                    weight_map = tf.math.exp(- y[1] / tf.cast(self.cdm_loss_radius/2., y[1].dtype))
                     cdm_mask_interior = cdm_mask
-                center_loss = compute_loss_derivatives(y[1], cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss)
+                center_loss = compute_loss_derivatives(y[1], cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
                 losses["CDM"] = center_loss
                 loss_weights["CDM"] = center_weight
