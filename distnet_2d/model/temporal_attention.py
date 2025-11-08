@@ -94,7 +94,6 @@ class TemporalAttention(tf.keras.layers.Layer):
             else:
                 idx_list = range(T)
             query_list = [all_values[i] + t_emb[:, :, :, i] for i in idx_list]
-
         # Flatten spatial dimensions for efficiency: (B*H*W, T, C)
         key_flat = tf.reshape(key, [-1, T, C])
         query_list_flat = [tf.reshape(query, [-1, 1, C]) for query in query_list]
@@ -107,9 +106,9 @@ class TemporalAttention(tf.keras.layers.Layer):
             training=training
         ) for query_flat in query_list_flat]
         attention_output_list = [tf.reshape(attention_output, shape) for attention_output in attention_output_list]
-        if self.intra_mode and self.return_list:
+        if self.return_list:
             return attention_output_list
-        elif isinstance(self.inference_idx, (list, tuple)):
-            return tf.concat(attention_output_list, 0)
-        else:
+        if self.inference_mode and not isinstance(self.inference_idx, (list, tuple)):
             return attention_output_list[0]
+        else:
+            return tf.concat(attention_output_list, 0)
