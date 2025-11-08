@@ -1,3 +1,5 @@
+import contextlib
+
 from pyexpat import features
 
 import tensorflow as tf
@@ -5,7 +7,7 @@ import tensorflow as tf
 from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper, \
-    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype
+    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch
 import numpy as np
 from .spatial_attention import SpatialAttention2D
 from .temporal_attention import TemporalAttention
@@ -37,6 +39,7 @@ class DiSTNetModel(tf.keras.Model):
                  category_number:int=0, category_class_weights = None, category_max_class_weight=10,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
+                 perform_test_step:bool=False,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.edm_weight = edm_loss_weight
@@ -93,41 +96,40 @@ class DiSTNetModel(tf.keras.Model):
         self.displacement_loss.reduction = tf.keras.losses.Reduction.NONE
 
         # metrics associated to losses for to display accurate loss in a distributed setting
-        self.edm_loss_metric = tf.keras.metrics.Mean(name="EDM")
-        self.center_loss_metric = tf.keras.metrics.Mean(name="CDM")
-        self.category_loss_metric = tf.keras.metrics.Mean(name="category") if self.category_weight > 0 else None
-        self.dx_loss_metric = tf.keras.metrics.Mean(name="dX")
-        self.dy_loss_metric = tf.keras.metrics.Mean(name="dY")
-        self.link_multiplicity_loss_metric = tf.keras.metrics.Mean(name="link_multiplicity")
-        self.loss_metric = tf.keras.metrics.Mean(name="loss")
-
-    @property
-    def metrics(self):
-        metrics = []
         if self.edm_weight > 0:
-            metrics.append(self.edm_loss_metric)
+            self.edm_loss_metric = tf.keras.metrics.Mean(name="EDM")
         if self.center_weight > 0:
-            metrics.append(self.center_loss_metric)
+            self.center_loss_metric = tf.keras.metrics.Mean(name="CDM")
+        if self.category_weight > 0 and self.category_number > 1:
+            self.category_loss_metric = tf.keras.metrics.Mean(name="category")
         if self.displacement_weight > 0:
-            metrics.append(self.dy_loss_metric)
-            metrics.append(self.dx_loss_metric)
+            self.dx_loss_metric = tf.keras.metrics.Mean(name="dX")
+            self.dy_loss_metric = tf.keras.metrics.Mean(name="dY")
         if self.link_multiplicity_weight > 0:
-            metrics.append(self.link_multiplicity_loss_metric)
-        if self.category_weight > 0:
-            metrics.append(self.category_loss_metric)
-        metrics.append(self.loss_metric)
-        if self._is_compiled:
-            if self.compiled_metrics is not None:
-                metrics += self.compiled_metrics.metrics
+            self.link_multiplicity_loss_metric = tf.keras.metrics.Mean(name="link_multiplicity")
+        self.loss_metric = tf.keras.metrics.Mean(name="loss")
+        self.perform_test_step=perform_test_step
 
-        for l in self._flatten_layers():
-            metrics.extend(l._metrics)
 
-        return metrics
+    @staticmethod
+    @contextlib.contextmanager
+    def nullcontext():
+        yield
+
+    def maybe_gradient_tape(self, training):
+        if training:
+            return tf.GradientTape(persistent=self.print_gradients)
+        return self.nullcontext()
 
 
     def train_step(self, data):
-        if self.use_grad_acc:
+        return self.step(data, training=True)
+
+    def test_step(self, data):
+        return self.step(data, False)
+
+    def step(self, data, training:bool):
+        if self.use_grad_acc and training:
             self.gradient_accumulator.init_train_step()
 
         fw = self.frame_window
@@ -150,7 +152,7 @@ class DiSTNetModel(tf.keras.Model):
         lm_idx = int(center_weight > 0) + 2 * int(displacement_weight > 0) + int(link_multiplicity_weight > 0)
         cat_idx = lm_idx + 1
 
-        with tf.GradientTape(persistent=self.print_gradients) as tape:
+        with self.maybe_gradient_tape(training) as tape:
             y_pred = self(x, training=True)  # Forward pass
             if self.predict_edm_derivatives:
                 edm, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=3, axis=-1)
@@ -185,10 +187,12 @@ class DiSTNetModel(tf.keras.Model):
                 if self.cdm_loss_radius <= 0:
                     cdm_mask = cell_mask
                     cdm_mask_interior = cell_mask_interior
+                    weight_map = None
                 else:
                     cdm_mask = tf.math.less_equal(y[1], self.cdm_loss_radius)
+                    weight_map = tf.math.exp(- y[1] / tf.cast(self.cdm_loss_radius/2., y[1].dtype))
                     cdm_mask_interior = cdm_mask
-                center_loss = compute_loss_derivatives(y[1], cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss)
+                center_loss = compute_loss_derivatives(y[1], cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
                 losses["CDM"] = center_loss
                 loss_weights["CDM"] = center_weight
@@ -234,7 +238,7 @@ class DiSTNetModel(tf.keras.Model):
             if num_replicas > 1:
                 loss *= 1.0 / num_replicas
 
-        if self.print_gradients:
+        if self.print_gradients and training:
             trainable_vars_tape = [t for t in self.trainable_variables if (t.name.startswith("DecoderSegEDM") or t.name.startswith("DecoderCenterCDM") or t.name.startswith("DecoderTrackY0") or t.name.startswith("DecoderTrackX0") or t.name.startswith("DecoderLinkMultiplicity0") or t.name.startswith("FeatureSequence_Op4") or t.name.startswith("Attention")) and ("/kernel" in t.name or "/wv" in t.name) ]
             for loss_name, loss_value in losses.items():
                 if loss_name != "loss" :
@@ -255,31 +259,31 @@ class DiSTNetModel(tf.keras.Model):
                                 print(f"AGC: layer: {v.name}, loss: {loss_name}, grad: {tf.math.sqrt(tf.reduce_mean(tf.math.square(g))).numpy()}")
 
         # Compute gradients
-        gradients = tape.gradient(loss, self.trainable_variables)
-        if mixed_precision:
-            gradients = self.optimizer.get_unscaled_gradients(gradients)
-        if self.use_agc:
-            gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
-        if not self.use_grad_acc:
-            self.optimizer.apply_gradients(zip(gradients, self.trainable_variables)) #Update weights
-        else:
-            self.gradient_accumulator.accumulate_gradients(gradients)
-            self.gradient_accumulator.apply_gradients()
+        if training:
+            gradients = tape.gradient(loss, self.trainable_variables)
+            if mixed_precision:
+                gradients = self.optimizer.get_unscaled_gradients(gradients)
+            if self.use_agc:
+                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
+            if not self.use_grad_acc:
+                self.optimizer.apply_gradients(zip(gradients, self.trainable_variables)) #Update weights
+            else:
+                self.gradient_accumulator.accumulate_gradients(gradients)
+                self.gradient_accumulator.apply_gradients()
 
         # Update metrics state
-        if edm_weight > 0:
+        if self.edm_weight > 0:
             self.edm_loss_metric.update_state(losses["EDM"], sample_weight=batch_dim)
-        if center_weight > 0:
+        if self.center_weight > 0:
             self.center_loss_metric.update_state(losses["CDM"], sample_weight=batch_dim)
-        if displacement_weight>0:
+        if self.displacement_weight > 0:
             self.dx_loss_metric.update_state(losses["dX"], sample_weight=batch_dim)
             self.dy_loss_metric.update_state(losses["dY"], sample_weight=batch_dim)
-        if link_multiplicity_weight >0:
+        if self.link_multiplicity_weight > 0:
             self.link_multiplicity_loss_metric.update_state(losses["link_multiplicity"], sample_weight=batch_dim)
-        if self.category_loss_metric is not None:
+        if self.category_weight > 0 and self.category_number > 1:
             self.category_loss_metric.update_state(losses["category"], sample_weight=batch_dim)
         self.loss_metric.update_state(losses["loss"], sample_weight=batch_dim)
-
         return self.compute_metrics(x, y, y_pred, None)
 
     def _compute_displacement_loss(self, y, y_pred, cell_mask):
@@ -330,7 +334,7 @@ class DiSTNetModel(tf.keras.Model):
 
     def set_inference(self, inference:bool=True):
         for layer in self.layers:
-            if isinstance(layer, (NConvToBatch2D, BatchToChannel, SelectFeature, TemporalAttention)):
+            if isinstance(layer, (NConvToBatch2D, BatchToChannel, SelectFeature, TemporalAttention, SplitReplaceConcatBatch)):
                 layer.inference_mode = inference
 
     def save(self, *args, inference:bool, **kwargs):
@@ -546,19 +550,20 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
         if isinstance(arch, TemA):
-            feature_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=arch.frame_window, return_list=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
+            feature_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
             if arch.frame_window > 0:
                 feature_pair_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeaturePairAttention")
                 central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_CentralFeatureFeaturePairAttention")
-            central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name="CentralFeatureAttCombine")
-            features_att_list = feature_att_op(features_list) # blend segmentation information
+            central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name=f"CentralFeatureAttCombine")
+            blended_features_batch = feature_att_op(features_list) # blend segmentation information
             if arch.frame_window > 0:
                 blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list_to_blend) # blend tracking information
                 # cross blend segmentation & tracking information
                 central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in inference_pair_idx]
                 central_feature_att = central_feature_att_op( ([features_list[arch.frame_window]], central_feature_pair_list) ) # cross attention : central pair and feature pair involving central frame
-                features_att_list[arch.frame_window] = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
-            blended_features_batch = tf.concat(features_att_list, 0)
+                central_feature = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
+                blended_features_batch = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window)([central_feature, blended_features_batch])
+
 
         elif isinstance(arch, Blend): # BLEND architecture (first architecture) : combine feature / feature pair with convolution part so that each frame / frame pair has access to information from all other feature pairs / features
             # define operations:
