@@ -356,7 +356,9 @@ class BlendD4(Blend, D4):
 
 
 class TemA(ArchBase):
-    def __init__(self, **kwargs):
+    def __init__(self, temporal_attention:int, **kwargs):
+        self.temporal_attention = temporal_attention
+        assert temporal_attention > 0
         super().__init__(frame_aware=True, pair_combine_kernel_size=1, **kwargs)
         assert self.attention > 0, "attention heads cannot be null"
 

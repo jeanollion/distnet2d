@@ -64,10 +64,8 @@ def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, p
     return loss
 
 
-def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=True, remove_background=False, dtype='float32'):
-    weight_list = np.array(weight_list).astype("float32")
-    n_classes = weight_list.shape[0]
-    weight_list = tf.cast(weight_list, dtype=dtype)
+def weighted_loss_by_category(original_loss_func, weight_list, sparse=True, remove_background=False, dtype='float32'):
+    n_classes = tf.shape(weight_list)[0]
     def loss_func(y_true, y_pred, sample_weight=None):
         if sparse:
             class_weights = tf.squeeze(y_true, axis=-1)
@@ -88,7 +86,7 @@ def weighted_loss_by_category(original_loss_func, weight_list, axis=-1, sparse=T
         return original_loss_func(y_true, y_pred, sample_weight=class_weights)
     return loss_func
 
-def balanced_category_loss(original_loss_func, n_classes, max_class_frequency=10, axis=-1, sparse=True, remove_background=False, dtype='float32'):
+def balanced_category_loss(original_loss_func, n_classes, max_class_frequency=10, sparse=True, remove_background=False, dtype='float32'):
     max_class_frequency = np.array([max_class_frequency]).astype(dtype)
     def loss_func(y_true, y_pred, sample_weight=None):
         if sparse:

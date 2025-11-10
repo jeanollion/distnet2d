@@ -20,7 +20,7 @@ import time
 class DiSTNetModel(tf.keras.Model):
     def __init__(self, *args, spatial_dims,
                  edm_loss_weight:float=1,
-                 edm_frequency_weights:list = None,  # weights to balance foreground/background classes
+                 edm_class_weights:list = None,  # weights to balance foreground/background classes
                  center_loss_weight:float=1,
                  displacement_loss_weight:float=1,
                  link_multiplicity_loss_weight:float=1,
@@ -43,9 +43,9 @@ class DiSTNetModel(tf.keras.Model):
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.edm_weight = edm_loss_weight
-        if edm_frequency_weights is not None:
-            assert len(edm_frequency_weights) == 2 , "edm_frequency_weights must be a list of len 2"
-        self.edm_frequency_weights = HideVariableWrapper(tf.Variable(np.asarray(edm_frequency_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="edm_frequency_weights")) if edm_frequency_weights is not None else None
+        if edm_class_weights is not None:
+            assert len(edm_class_weights) == 2 , "edm_class_weights must be a list of len 2"
+        self.edm_class_weights = HideVariableWrapper(tf.Variable(np.asarray(edm_class_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="edm_class_weights")) if edm_class_weights is not None else None
         self.center_weight = center_loss_weight
         self.cdm_loss_radius = float(cdm_loss_radius)
         self.displacement_weight = displacement_loss_weight
@@ -66,13 +66,15 @@ class DiSTNetModel(tf.keras.Model):
 
         if link_multiplicity_class_weights is not None:
             assert len(link_multiplicity_class_weights) == 3, "3 link multiplicity class weights should be provided: normal cell, dividing/merging cells, cell with no previous cell"
-            self.link_multiplicity_loss=weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), link_multiplicity_class_weights, remove_background=True)
+            self.link_multiplicity_class_weights = HideVariableWrapper( tf.Variable(np.asarray(link_multiplicity_class_weights, dtype="float32"), dtype=tf.float32, trainable=False,  name="link_multiplicity_class_weights"))
+            self.link_multiplicity_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), self.link_multiplicity_class_weights, remove_background=True)
         else:
             self.link_multiplicity_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
         if category_number > 1:
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
-                self.category_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_class_weights, remove_background=True)
+                self.category_class_weights = HideVariableWrapper(tf.Variable(np.asarray(category_class_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="category_class_weights"))
+                self.category_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), self.category_class_weights, remove_background=True)
             else:
                 self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
         else:
@@ -176,7 +178,7 @@ class DiSTNetModel(tf.keras.Model):
             cell_mask_interior = tf.math.greater(true_edm, 1.5) if self.cdm_derivative_loss or self.predict_cdm_derivatives or self.edm_derivative_loss else None
             # edm
             if edm_weight>0:
-                weight_map = tf.where(cell_mask, self.edm_frequency_weights[1], self.edm_frequency_weights[0]) if self.edm_frequency_weights is not None else None
+                weight_map = tf.where(cell_mask, self.edm_class_weights[1], self.edm_class_weights[0]) if self.edm_class_weights is not None else None
                 edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dy=edm_dy, pred_dx=edm_dx, mask_interior=cell_mask_interior, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
                 edm_loss = tf.reduce_mean(edm_loss)
                 losses["EDM"] = edm_loss
@@ -550,10 +552,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
         if isinstance(arch, TemA):
-            feature_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
+            feature_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
             if arch.frame_window > 0:
-                feature_pair_att_op = TemporalAttention(num_heads=attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeaturePairAttention")
-                central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_CentralFeatureFeaturePairAttention")
+                feature_pair_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeaturePairAttention")
+                central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=arch.temporal_attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_CentralFeatureFeaturePairAttention")
             central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name=f"CentralFeatureAttCombine")
             blended_features_batch = feature_att_op(features_list) # blend segmentation information
             if arch.frame_window > 0:
