@@ -29,7 +29,7 @@ class PseudoHuber(tf.keras.losses.Loss):
 
 
 def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, pred_dy=None, pred_dx=None, pred_lap=None, mask=None, mask_interior=None, derivative_loss: bool = False, laplacian_loss: bool = False, weight_map=None):
-    loss = loss_fun(true, tf.where(mask, pred, 0) if mask is not None else pred)
+    loss = loss_fun(true, tf.where(mask, pred, tf.cast(0, pred.dtype)) if mask is not None else pred)
     if weight_map is not None:
         loss = loss * weight_map
     #print(f"compute loss with mask: {mask is not None} interior: {mask_interior is not None} der: {derivative_loss} grad: {gradient_loss} lap: {laplacian_loss} pred lap: {y_pred_lap is not None} pred dy: {y_pred_dy is not None} pred dx: {y_pred_dx is not None}", flush=True)

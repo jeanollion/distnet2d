@@ -186,15 +186,24 @@ class DiSTNetModel(tf.keras.Model):
 
             # center
             if center_weight>0:
+                cdm_true = y[1]
                 if self.cdm_loss_radius <= 0:
                     cdm_mask = cell_mask
                     cdm_mask_interior = cell_mask_interior
                     weight_map = None
                 else:
-                    cdm_mask = tf.math.less_equal(y[1], self.cdm_loss_radius)
-                    weight_map = tf.math.exp(- y[1] / tf.cast(self.cdm_loss_radius/2., y[1].dtype))
-                    cdm_mask_interior = cdm_mask
-                center_loss = compute_loss_derivatives(y[1], cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
+                    #cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
+                    cdm_mask = None
+                    #cdm_true = tf.where(cdm_mask, cdm_true, tf.cast(0, y[1].dtype))
+                    half_rad = tf.cast(self.cdm_loss_radius/2., cdm_true.dtype)
+                    weight_map = tf.math.exp(- cdm_true / half_rad )
+                    #weight_map = tf.math.square( half_rad / ( half_rad + cdm_true ) )
+                    #weight_map = None
+                    tf.debugging.assert_all_finite(cdm_true, "NaN or Inf in cdm_true")
+                    tf.debugging.assert_all_finite(cdm, "NaN or Inf in cdm_pred")
+                    tf.debugging.assert_all_finite(weight_map, "NaN or Inf in weight_map")
+                    cdm_mask_interior = tf.math.less_equal(cdm_true, self.cdm_loss_radius) if self.predict_cdm_derivatives else None # cdm_mask
+                center_loss = compute_loss_derivatives(cdm_true, cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
                 losses["CDM"] = center_loss
                 loss_weights["CDM"] = center_weight
