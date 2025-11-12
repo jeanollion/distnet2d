@@ -866,9 +866,34 @@ class HideVariableWrapper:
     def get_shape(self):
         return self.value.get_shape()
 
+    def __len__(self):
+        return self.shape[0]
+
+    def __tensor__(self, dtype=None):
+        if dtype is not None:
+            return tf.cast(self.value, dtype)
+        else:
+            return self.value
+
     @property
     def shape(self):
         return self.value.shape
 
     def numpy(self):
         return self.value.numpy()
+
+    def __array__(self):
+        return self.value.numpy()
+
+    # Delegate all other tensor operations to self.value
+    def __getattr__(self, name):
+        return getattr(self.value, name)
+
+    def __hasattr__(self, name):
+        return self.__hasattr__(name) or hasattr(self.value, name)
+
+def _convert_to_tensor(value, dtype=None, name=None, as_ref=False):
+    if isinstance(value, HideVariableWrapper):
+        return tf.convert_to_tensor(value.value, dtype=dtype, name=name)
+    return tf.convert_to_tensor(value, dtype=dtype, name=name)
+tf.register_tensor_conversion_function(HideVariableWrapper, _convert_to_tensor)
