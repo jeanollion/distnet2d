@@ -142,7 +142,7 @@ class DiSTNetModel(tf.keras.Model):
             n_frame_pairs += (fw - 1) * (2 if self.future_frames else 1)
         mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
         x, y = data
-        batch_dim = tf.shape(x[0])[0]
+        batch_dim = tf.shape(y[0])[0]
         displacement_weight = self.displacement_weight / (2. * n_fp_mul) if fw > 0 else 0 # y & x
         link_multiplicity_weight = self.link_multiplicity_weight / (n_fp_mul * float(n_frame_pairs)) if fw > 0 else 0
         edm_weight = self.edm_weight / float(n_frames) # divide by channel number ?
@@ -192,17 +192,53 @@ class DiSTNetModel(tf.keras.Model):
                     cdm_mask_interior = cell_mask_interior
                     weight_map = None
                 else:
-                    #cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
-                    cdm_mask = None
+                    cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
+                    #cdm_mask = None
                     #cdm_true = tf.where(cdm_mask, cdm_true, tf.cast(0, y[1].dtype))
                     half_rad = tf.cast(self.cdm_loss_radius/2., cdm_true.dtype)
-                    weight_map = tf.math.exp(- cdm_true / half_rad )
+                    #weight_map = tf.math.exp( -tf.math.square(cdm_true / half_rad) )
+                    #weight_map = tf.clip_by_value(weight_map, 1e-2, 1)
+                    #cdm_mask = tf.math.greater(weight_map, tf.cast(0, weight_map.dtype))
+
                     #weight_map = tf.math.square( half_rad / ( half_rad + cdm_true ) )
-                    #weight_map = None
+                    weight_map = None
+
+                    def save_tensor_to_disk(tensor, filename):
+                        filename_str = filename.numpy().decode('utf-8')
+                        # Serialize tensor to bytes
+                        tensor_bytes = tf.io.serialize_tensor(tensor).numpy()
+                        # Write bytes to disk
+                        with open(filename_str, "wb") as f:
+                            f.write(tensor_bytes)
+                        return tensor
+
+                    def save_debug_data(x0, x1, x2, cdm):
+                        x0 = tf.identity(x0)
+                        x1 = tf.identity(x1)
+                        x2 = tf.identity(x2)
+                        cdm = tf.identity(cdm)
+                        x0 = tf.py_function(save_tensor_to_disk, [x0, "/data/input0.npy"], Tout=x0.dtype)
+                        x1 = tf.py_function(save_tensor_to_disk, [x1, "/data/input1.npy"], Tout=x1.dtype)
+                        x2 = tf.py_function(save_tensor_to_disk, [x2, "/data/input2.npy"], Tout=x2.dtype)
+                        cdm = tf.py_function(save_tensor_to_disk, [cdm, "/data/cdm.npy"], Tout=cdm.dtype)
+                        return [x0, x1, x2, cdm]
+
+                    def true_fn():
+                        return save_debug_data(x[0], x[1], x[2], cdm)
+
+                    def false_fn():
+                        return [x[0], x[1], x[2], cdm]
+
+                    has_nan = tf.reduce_any(tf.math.is_nan(cdm))
+                    x0,x1,x2, cdm = tf.cond(
+                        has_nan,
+                        true_fn,
+                        false_fn
+                    )
                     tf.debugging.assert_all_finite(cdm_true, "NaN or Inf in cdm_true")
+                    #tf.debugging.assert_all_finite(weight_map, "NaN or Inf in weight_map")
                     tf.debugging.assert_all_finite(cdm, "NaN or Inf in cdm_pred")
-                    tf.debugging.assert_all_finite(weight_map, "NaN or Inf in weight_map")
-                    cdm_mask_interior = tf.math.less_equal(cdm_true, self.cdm_loss_radius) if self.predict_cdm_derivatives else None # cdm_mask
+                    cdm_mask_interior = tf.math.less_equal(cdm_true, self.cdm_loss_radius) if self.predict_cdm_derivatives and cdm_mask is None else cdm_mask
                 center_loss = compute_loss_derivatives(cdm_true, cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
                 losses["CDM"] = center_loss
@@ -401,21 +437,28 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         else:
             assert isinstance(skip_connections, (list))
             skip_connections = [i if i>=0 else len(arch.encoder_settings) + 1 + i for i in skip_connections]
+        central_pair_idx = [arch.frame_window - 1, arch.frame_window]
         inference_pair_idx = [arch.frame_window - 1, arch.frame_window]
         inference_pair_sel_bw = [0]
         inference_pair_sel_fw = [1]
         if inference_gap_number > 1:
             assert long_term, "long term must be enabled for gap prediction"
             assert inference_gap_number < arch.frame_window, f"gap number must be lower or equal to: {arch.frame_window-1} got {inference_gap_number}"
-            n_gap_max = arch.frame_window - 1
-            n_pairs_0 = n_frames - 1
-            for gap in range(inference_gap_number):
+        n_gap_max = arch.frame_window - 1
+        n_pairs_0 = n_frames - 1
+        for gap in range(n_gap_max):
+            idx_past = n_pairs_0 + n_gap_max - gap - 1
+            central_pair_idx.append(idx_past)
+            if gap<inference_gap_number:
                 inference_pair_sel_bw.append(len(inference_pair_idx))
-                inference_pair_idx.append(n_pairs_0 + n_gap_max - gap - 1)
-                if arch.future_frames:
+                inference_pair_idx.append(idx_past)
+            if arch.future_frames:
+                idx_future = n_pairs_0 + n_gap_max + gap
+                central_pair_idx.append(idx_future)
+                if gap < inference_gap_number:
                     inference_pair_sel_fw.append(len(inference_pair_idx))
-                    inference_pair_idx.append(n_pairs_0 + n_gap_max + gap )
-        #print(f"inference_pair_idx {inference_pair_idx} bw: {inference_pair_sel_bw}={[inference_pair_idx[i] for i in inference_pair_sel_bw]} fw: {inference_pair_sel_fw}=={[inference_pair_idx[i] for i in inference_pair_sel_fw]}")
+                    inference_pair_idx.append(idx_future)
+        #print(f"central_pair_idx: {central_pair_idx} inference_pair_idx {inference_pair_idx} bw: {inference_pair_sel_bw}={[inference_pair_idx[i] for i in inference_pair_sel_bw]} fw: {inference_pair_sel_fw}=={[inference_pair_idx[i] for i in inference_pair_sel_fw]}")
         # define encoder operations
         encoder_layers = []
         contraction_per_layer = []
@@ -570,7 +613,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             if arch.frame_window > 0:
                 blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list_to_blend) # blend tracking information
                 # cross blend segmentation & tracking information
-                central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in inference_pair_idx]
+                central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in central_pair_idx] # was inference_pair_idx (mistake)
+                #print(f"inference idx: {arch.frame_window}/{len(features_list)} pair idx: {inference_pair_idx}/{len(feature_pairs_list_to_blend)}")
                 central_feature_att = central_feature_att_op( ([features_list[arch.frame_window]], central_feature_pair_list) ) # cross attention : central pair and feature pair involving central frame
                 central_feature = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
                 blended_features_batch = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window)([central_feature, blended_features_batch])
@@ -580,8 +624,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             # define operations:
             combine_filters = int(feature_filters * n_frames * arch.blending_filter_factor)
             print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
-            combine_features_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, compensate_gradient=True, l2_reg=arch.l2_reg, name="CombineFeatures") if arch.frame_window > 0 else lambda features: features[0]
-            all_pair_combine_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, compensate_gradient=True, l2_reg=arch.l2_reg, name="AllFeaturePairCombine")
+            combine_features_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="CombineFeatures") if arch.frame_window > 0 else lambda features: features[0]
+            all_pair_combine_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="AllFeaturePairCombine")
             feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairFeatureCombine")  # change here was feature_filters
 
             for f in arch.feature_blending_settings:
@@ -597,8 +641,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 for op in feature_blending_convs:
                     combined_features = op(combined_features)
 
-                blended_features_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F)
-                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F)
+                blended_features_batch = NConvToBatch2D(compensate_gradient=False, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F)
+                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=False, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F)
             else:
                 blended_features_batch = combined_features
 

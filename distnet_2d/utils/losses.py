@@ -66,7 +66,7 @@ def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, p
 
 def weighted_loss_by_category(original_loss_func, weight_list, sparse=True, remove_background=False, dtype='float32'):
     if isinstance(weight_list, (list, tuple)):
-        weight_list = np.arra(weight_list, dtype=dtype)
+        weight_list = np.array(weight_list, dtype=dtype)
     n_classes = len(weight_list)
 
     def loss_func(y_true, y_pred, sample_weight=None):

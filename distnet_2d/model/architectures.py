@@ -356,12 +356,13 @@ class BlendD4(Blend, D4):
 
 
 class TemA(ArchBase):
-    def __init__(self, temporal_attention:int, **kwargs):
+    def __init__(self, temporal_attention:int, attention:int, **kwargs):
         self.temporal_attention = temporal_attention
         assert temporal_attention > 0
-        super().__init__(frame_aware=True, pair_combine_kernel_size=1, **kwargs)
-        assert self.attention > 0, "attention heads cannot be null"
-
+        super().__init__(frame_aware=True, pair_combine_kernel_size=1 if attention==0 else 5, attention=attention, **kwargs)
+        ker4_fd = self.feature_decoder_settings[0]["kernel_size"]
+        self.feature_decoder_settings.insert(0, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
+        self.feature_decoder_settings.insert(0, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
 
 class TemAD2(TemA, D2):
     def __init__(self, **kwargs):
