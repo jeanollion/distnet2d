@@ -192,16 +192,16 @@ class DiSTNetModel(tf.keras.Model):
                     cdm_mask_interior = cell_mask_interior
                     weight_map = None
                 else:
-                    cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
-                    #cdm_mask = None
+                    #cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
+                    cdm_mask = None
                     #cdm_true = tf.where(cdm_mask, cdm_true, tf.cast(0, y[1].dtype))
                     half_rad = tf.cast(self.cdm_loss_radius/2., cdm_true.dtype)
-                    #weight_map = tf.math.exp( -tf.math.square(cdm_true / half_rad) )
-                    #weight_map = tf.clip_by_value(weight_map, 1e-2, 1)
+                    weight_map = tf.math.exp( -tf.math.square(cdm_true / half_rad) )
+                    weight_map = tf.clip_by_value(weight_map, 1e-3, 1)
                     #cdm_mask = tf.math.greater(weight_map, tf.cast(0, weight_map.dtype))
 
                     #weight_map = tf.math.square( half_rad / ( half_rad + cdm_true ) )
-                    weight_map = None
+                    #weight_map = None
 
                     def save_tensor_to_disk(tensor, filename):
                         filename_str = filename.numpy().decode('utf-8')
