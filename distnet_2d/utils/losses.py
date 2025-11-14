@@ -67,10 +67,10 @@ def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, p
 def weighted_loss_by_category(original_loss_func, weight_list, sparse=True, remove_background=False, dtype='float32'):
     if isinstance(weight_list, (list, tuple)):
         weight_list = np.array(weight_list, dtype=dtype)
-    n_classes = len(weight_list)
+    n_classes = tf.shape(weight_list)[0]
 
     def loss_func(y_true, y_pred, sample_weight=None):
-        weights = tf.cast(weight_list, dtype=dtype)
+        weights = tf.convert_to_tensor(weight_list, dtype=dtype)
         if sparse:
             class_weights = tf.squeeze(y_true, axis=-1)
             if not class_weights.dtype.is_integer:

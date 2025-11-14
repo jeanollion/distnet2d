@@ -933,6 +933,10 @@ class HideVariableWrapper:
     def shape(self):
         return self.value.shape
 
+    @property
+    def dtype(self):
+        return self.value.dtype
+
     def numpy(self):
         return self.value.numpy()
 
