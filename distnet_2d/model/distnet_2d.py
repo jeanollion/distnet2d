@@ -7,7 +7,8 @@ import tensorflow as tf
 from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper, \
-    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch
+    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch, SplitNConvToBatch2D, \
+    InferenceLayer
 import numpy as np
 from .spatial_attention import SpatialAttention2D
 from .temporal_attention import TemporalAttention
@@ -67,14 +68,14 @@ class DiSTNetModel(tf.keras.Model):
         if link_multiplicity_class_weights is not None:
             assert len(link_multiplicity_class_weights) == 3, "3 link multiplicity class weights should be provided: normal cell, dividing/merging cells, cell with no previous cell"
             self.link_multiplicity_class_weights = HideVariableWrapper( tf.Variable(np.asarray(link_multiplicity_class_weights, dtype="float32"), dtype=tf.float32, trainable=False,  name="link_multiplicity_class_weights"))
-            self.link_multiplicity_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), self.link_multiplicity_class_weights, remove_background=True)
+            self.link_multiplicity_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), self.link_multiplicity_class_weights.value, remove_background=True)
         else:
             self.link_multiplicity_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
         if category_number > 1:
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
                 self.category_class_weights = HideVariableWrapper(tf.Variable(np.asarray(category_class_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="category_class_weights"))
-                self.category_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), self.category_class_weights, remove_background=True)
+                self.category_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), self.category_class_weights.value, remove_background=True)
             else:
                 self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
         else:
@@ -381,7 +382,7 @@ class DiSTNetModel(tf.keras.Model):
 
     def set_inference(self, inference:bool=True):
         for layer in self.layers:
-            if isinstance(layer, (NConvToBatch2D, BatchToChannel, SelectFeature, TemporalAttention, SplitReplaceConcatBatch)):
+            if isinstance(layer, InferenceLayer):
                 layer.inference_mode = inference
 
     def save(self, *args, inference:bool, **kwargs):
@@ -514,22 +515,22 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             if l_idx==0:
                 for dSegName in output_per_decoder["Seg"].keys():
                     output_name = None if arch.frame_window > 0 or arch.predict_edm_derivatives else decoder_output_names["Seg"][dSegName]
-                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
+                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
                 for dCenterName in output_per_decoder["Center"].keys():
                     output_name = None if arch.frame_window > 0 or arch.predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
-                    decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
+                    decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
                 if arch.category_number > 1:
                     for dCatName in output_per_decoder["Cat"].keys():
                         output_name = None if arch.frame_window > 0 else decoder_output_names["Cat"][dCatName]
-                        decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
+                        decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
-                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
+                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.combine_kernel_size, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
         if arch.n_inputs == 1:
@@ -604,29 +605,33 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
         if isinstance(arch, TemA):
-            feature_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureAttention")
+            feature_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureTAtt")
+            nconv_op = SplitNConvToBatch2D(n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=False, name=f"{name}_FeatureWiseConv")
             if arch.frame_window > 0:
-                feature_pair_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeaturePairAttention")
-                central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=arch.temporal_attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_CentralFeatureFeaturePairAttention")
-            central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name=f"CentralFeatureAttCombine")
+                feature_pair_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeaturePairTAtt")
+                nconv_pair_op = SplitNConvToBatch2D(n_conv=n_frame_pairs, inference_idx=inference_pair_idx, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=False, name=f"{name}_FeaturePairWiseConv")
+                central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=arch.temporal_attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_CentralFeatureCrossTAtt")
+                split_replace_op = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window, name=f"{name}_CentralFeatureCrossTAttInclude")
+                central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name=f"CentralFeatureTAttCombine")
             blended_features_batch = feature_att_op(features_list) # blend segmentation information
             if arch.frame_window > 0:
                 blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list_to_blend) # blend tracking information
+                blended_feature_pairs_batch = nconv_pair_op(blended_feature_pairs_batch)
                 # cross blend segmentation & tracking information
                 central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in central_pair_idx] # was inference_pair_idx (mistake)
                 #print(f"inference idx: {arch.frame_window}/{len(features_list)} pair idx: {inference_pair_idx}/{len(feature_pairs_list_to_blend)}")
                 central_feature_att = central_feature_att_op( ([features_list[arch.frame_window]], central_feature_pair_list) ) # cross attention : central pair and feature pair involving central frame
                 central_feature = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
-                blended_features_batch = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window)([central_feature, blended_features_batch])
-
+                blended_features_batch = split_replace_op([central_feature, blended_features_batch])
+            blended_features_batch = nconv_op(blended_features_batch)
 
         elif isinstance(arch, Blend): # BLEND architecture (first architecture) : combine feature / feature pair with convolution part so that each frame / frame pair has access to information from all other feature pairs / features
             # define operations:
             combine_filters = int(feature_filters * n_frames * arch.blending_filter_factor)
             print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
-            combine_features_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="CombineFeatures") if arch.frame_window > 0 else lambda features: features[0]
-            all_pair_combine_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="AllFeaturePairCombine")
-            feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=arch.combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairFeatureCombine")  # change here was feature_filters
+            combine_features_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="CombineFeatures") if arch.frame_window > 0 else lambda features: features[0]
+            all_pair_combine_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="AllFeaturePairCombine")
+            feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairFeatureCombine")  # change here was feature_filters
 
             for f in arch.feature_blending_settings:
                 if "filters" not in f or f["filters"] < 0:

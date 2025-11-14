@@ -11,6 +11,8 @@ sys.path.append(path_root.joinpath("dataset_iterator").__str__())
 sys.path.append(path_root.joinpath("distne2d").__str__())
 #print(f"root={path_root} pixmclass {path_root.joinpath('pix_mclass')}")
 import tensorflow as tf
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 
 import numpy as np
@@ -45,11 +47,19 @@ if not seg:
     if True:
         from tensorflow.keras import mixed_precision
         mixed_precision.set_global_policy('mixed_float16')
-        dn = get_distnet_2d(arch=architectures.TemAD2(frame_window=9, spatial_dimensions=(384, 32), filters=128, self_attention=64, attention=64, skip_connections=False, early_downsampling=True, category_number=0, predict_edm_derivatives=False, predict_cdm_derivatives=False))
-        #dn([tf.zeros(shape=(2, 384, 32, 7)), tf.zeros(shape=(2, 1, 1, 7))])
-        tf.keras.utils.plot_model(dn, "/data/model.png", show_shapes=True)
+        dn = get_distnet_2d(arch=architectures.TemAD3(frame_window=9, spatial_dimensions=(384, 32), filters=192, temporal_attention=16, self_attention=16, attention=16, attention_filters=64, skip_connections=False, early_downsampling=True, category_number=0, predict_edm_derivatives=False, predict_cdm_derivatives=False))
+        #out = dn.predict([tf.zeros(shape=(2, 384, 32, 19)), tf.zeros(shape=(2, 1, 1, 19))])
+        #print(f"out: {[o.shape for o in out]}")
+        #dn.save_weights("/data/test.h5")
+        #dn.load_weights("/data/test.h5")
+        #dn.set_inference(True)
+        #dn.compile()
+        #out = dn.predict([tf.zeros(shape=(2, 384, 32, 19)), tf.zeros(shape=(2, 1, 1, 19))])
+        #print(f"out inference: {[o.shape for o in out]}")
+        #dn.save("/data/saved_model",  inference=True)
+        #tf.keras.utils.plot_model(dn, "/data/model.png", show_shapes=True)
         #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
-        #print(dn.summary())
+        print(dn.summary())
 
     if False:
 

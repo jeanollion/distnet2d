@@ -3,7 +3,10 @@ from math import ceil
 import tensorflow as tf
 import numpy as np
 
-class TemporalAttention(tf.keras.layers.Layer):
+from distnet_2d.model.layers import InferenceLayer
+
+
+class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, num_heads:int=1, attention_filters:int=0, intra_mode:bool=True, inference_idx:int=None, return_list:bool = False, dropout:float=0.1, l2_reg:float=0., name="TemporalAttention"):
         '''
             filters : number of output channels
@@ -20,7 +23,6 @@ class TemporalAttention(tf.keras.layers.Layer):
         self.intra_mode = intra_mode # if true: input is (idx, array), otherwise input is (tensor, array)
         self.temporal_dim=None
         self.inference_idx = inference_idx
-        self.inference_mode = False
         if self.intra_mode:
             assert inference_idx is not None and ( min(inference_idx) >= 0 if isinstance(inference_idx, (list, tuple )) else inference_idx >= 0 )
         self.return_list=return_list

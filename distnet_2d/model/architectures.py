@@ -47,7 +47,6 @@ class ArchBase:
                  batch_norm:bool = True, dropout:float=0.2, l2_reg:float=0,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",  #conv, wsconv
                  attention_filters:int = 0, attention:int = 0, attention_positional_encoding:str="2d",
-                 combine_kernel_size:int=1, pair_combine_kernel_size:int=5,
                  skip_connections=[-1], skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
                  predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False,
@@ -68,8 +67,6 @@ class ArchBase:
         self.attention = attention
         self.attention_filters = attention_filters
         self.attention_positional_encoding = attention_positional_encoding
-        self.combine_kernel_size = combine_kernel_size
-        self.pair_combine_kernel_size = pair_combine_kernel_size
         self.downsampling_mode = downsampling_mode
         self.upsampling_mode = upsampling_mode
         self.skip_combine_mode=skip_combine_mode
@@ -84,12 +81,14 @@ class ArchBase:
         self.predict_fw=predict_fw
         self.predict_edm_derivatives=predict_edm_derivatives
         self.predict_cdm_derivatives=predict_cdm_derivatives
-        # to be defined
+        # to be defined in ArchDepth
         self.encoder_settings = None
         self.feature_settings = None
         self.decoder_settings = None
         self.feature_decoder_settings = None
-
+        self.kernel_size_fd = None
+        self.blend_combine_kernel_size = None
+        self.pair_combine_kernel_size = None
 
 class ArchDepth(ArchBase):
     def __init__(self, filters:int, **kwargs):
@@ -97,7 +96,7 @@ class ArchDepth(ArchBase):
 
 
 class D2(ArchDepth):
-    def __init__(self, kernel_size_fd:int=5, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
         super().__init__(**kwargs)
         if self.attention>0 or self.self_attention>0:
             print(f"spatial dimension at attention layer: {self.spatial_dimensions[0] / 2**2} x {self.spatial_dimensions[1] / 2**2}")
@@ -107,7 +106,9 @@ class D2(ArchDepth):
         ker2, dil2 = get_kernels_and_dilation(5, 2, self.spatial_dimensions, 2 * 2)
         ker2_2, dil2_2 = get_kernels_and_dilation(5, 3, self.spatial_dimensions, 2 * 2)
         ker2_3, dil2_3 = get_kernels_and_dilation(5, 4, self.spatial_dimensions, 2 * 2)
-        ker2_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 * 2)
+        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 * 2)
+        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 2)
+        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1, self.spatial_dimensions, 2 * 2)
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False, "weight_scaled": False,
@@ -144,11 +145,11 @@ class D2(ArchDepth):
              "dropout_rate": 0, "batch_norm": self.batch_norm},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size": ker2_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},
-            {"op": "res2d", "kernel_size": ker2_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+            {"op": "res2d", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size": ker2_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0,
+            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0,
              "batch_norm": self.batch_norm}
         ]
         self.decoder_settings = [
@@ -160,7 +161,7 @@ class D2(ArchDepth):
 
 
 class D3(ArchDepth):
-    def __init__(self, kernel_size_fd:int=5, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
         super().__init__(**kwargs)
         if self.attention>0 or self.self_attention>0:
             print(f"spatial dimension at attention layer: {self.spatial_dimensions[0] / 2**3} x {self.spatial_dimensions[1] / 2**3}")
@@ -170,7 +171,10 @@ class D3(ArchDepth):
         ker3, dil3 = get_kernels_and_dilation(5, 2, self.spatial_dimensions, 2 ** 3)
         ker3_2, dil3_2 = get_kernels_and_dilation(5, 3, self.spatial_dimensions, 2 ** 3)
         ker3_3, dil3_3 = get_kernels_and_dilation(5, 4, self.spatial_dimensions, 2 ** 3)
-        ker3_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 ** 3)
+        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 ** 3)
+        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 3)
+        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, 2 * 3)
+
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False, "weight_scaled": False,
@@ -211,11 +215,11 @@ class D3(ArchDepth):
              "dropout_rate": 0, "batch_norm": self.batch_norm},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size": ker3_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},
-            {"op": "res2d", "kernel_size": ker3_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+            {"op": "res2d", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size": ker3_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0,
+            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0,
              "batch_norm": self.batch_norm}
         ]
         self.decoder_settings = [
@@ -229,7 +233,7 @@ class D3(ArchDepth):
 
 
 class D4(ArchDepth):
-    def __init__(self, kernel_size_fd:int=5, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
         super().__init__(**kwargs)
         if self.attention>0 or self.self_attention>0:
             print(f"spatial dimension at attention layer: {self.spatial_dimensions[0] / 2**4} x {self.spatial_dimensions[1] / 2**4}")
@@ -243,7 +247,10 @@ class D4(ArchDepth):
         ker4, dil4 = get_kernels_and_dilation(5, 2, self.spatial_dimensions, 2 ** 4)
         ker4_2, dil4_2 = get_kernels_and_dilation(5, 3, self.spatial_dimensions, 2 ** 4)
         ker4_3, dil4_3 = get_kernels_and_dilation(5, 4, self.spatial_dimensions, 2 ** 4)
-        ker4_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 ** 4)
+        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 ** 4)
+        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 4)
+        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, 2 * 4)
+
         self.encoder_settings = [
             [
                 {"filters": 16, "op": "conv", "kernel_size": ker0, "weighted_sum": False, "weight_scaled": False,
@@ -292,11 +299,11 @@ class D4(ArchDepth):
              "dropout_rate": 0, "batch_norm": self.batch_norm},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size":ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+            {"filters": 0.5, "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},
-            {"op": "res2d", "kernel_size":ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+            {"op": "res2d", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size":ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0,
+            {"filters": 1., "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": 0,
              "batch_norm": self.batch_norm}
         ]
         self.decoder_settings = [
@@ -321,7 +328,7 @@ class Blend(ArchBase):
 
 class BlendD2(Blend, D2):
     def __init__(self, filters:int = 128, **kwargs):
-        super().__init__(filters=filters, kernel_size_fd=3, **kwargs)
+        super().__init__(filters=filters, pair_combine_kernel_size=5, kernel_size_fd=3, **kwargs)
         prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
         self.name = f"{prefix}blendD2-{filters}"
         self.feature_blending_settings = [
@@ -333,7 +340,7 @@ class BlendD2(Blend, D2):
 
 class BlendD3(Blend, D3):
     def __init__(self, filters:int = 192, **kwargs):
-        super().__init__(filters=filters, kernel_size_fd=3, **kwargs)
+        super().__init__(filters=filters, pair_combine_kernel_size=5, kernel_size_fd=3, **kwargs)
         prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
         self.feature_blending_settings = [
@@ -345,7 +352,7 @@ class BlendD3(Blend, D3):
 
 class BlendD4(Blend, D4):
     def __init__(self, filters:int = 192, **kwargs):
-        super().__init__(filters=filters, kernel_size_fd=3, **kwargs)
+        super().__init__(filters=filters, pair_combine_kernel_size=5, kernel_size_fd=3, **kwargs)
         prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
         self.feature_blending_settings = [
@@ -356,27 +363,27 @@ class BlendD4(Blend, D4):
 
 
 class TemA(ArchBase):
-    def __init__(self, temporal_attention:int, attention:int, **kwargs):
+    def __init__(self, temporal_attention:int, **kwargs):
         self.temporal_attention = temporal_attention
         assert temporal_attention > 0
-        super().__init__(frame_aware=True, pair_combine_kernel_size=1 if attention==0 else 5, attention=attention, **kwargs)
+        super().__init__(frame_aware=True, **kwargs)
         ker4_fd = self.feature_decoder_settings[0]["kernel_size"]
         self.feature_decoder_settings.insert(0, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
         self.feature_decoder_settings.insert(0, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
 
 class TemAD2(TemA, D2):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, attention:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=5 if attention==0 else 3, attention=attention, **kwargs)
 
 
 class TemAD3(TemA, D3):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, attention:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=5 if attention==0 else 3, attention=attention, **kwargs)
 
 
 class TemAD4(TemA, D4):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, attention:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=5 if attention==0 else 3, attention=attention, **kwargs)
 
 
 def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, downsampling):
