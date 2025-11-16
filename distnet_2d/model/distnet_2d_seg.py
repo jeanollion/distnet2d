@@ -115,7 +115,7 @@ def get_distnet_2d_seg(n_inputs:int ,config, name: str="DiSTNet2DSeg",**kwargs):
                                     skip_stop_gradient=False, skip_connections=config.skip_connections,
                                     encoder_settings=config.encoder_settings, feature_settings=config.feature_settings,
                                     decoder_settings=config.decoder_settings, feature_decoder_settings=config.feature_decoder_settings,
-                                    combine_kernel_size=config.combine_kernel_size, name=name, **kwargs)
+                                    combine_kernel_size=config.blend_combine_kernel_size, name=name, **kwargs)
 
 def get_distnet_2d_seg_model(n_inputs: int, # inputs are concatenated in the channel axis
                              encoder_settings: list,

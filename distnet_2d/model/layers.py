@@ -10,12 +10,17 @@ class StopGradient(tf.keras.layers.Layer):
     def call(self, input):
         return tf.stop_gradient( input, name=self.name )
 
-class NConvToBatch2D(tf.keras.layers.Layer):
+class InferenceLayer:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inference_mode = False
+
+
+class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, name: str= "NConvToBatch2D"):
         super().__init__(name=name)
         self.n_conv = n_conv
         self.filters = filters
-        self.inference_mode=False
         self.inference_idx=inference_idx
         self.compensate_gradient=compensate_gradient
 
@@ -56,10 +61,61 @@ class NConvToBatch2D(tf.keras.layers.Layer):
         # output = get_print_grad_fun(f"{self.name} after concat")(output)
         return output
 
-class SelectFeature(tf.keras.layers.Layer):
+class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
+    def __init__(self, n_conv:int, inference_idx, filters:int, kernel, compensate_gradient:bool = False, name: str= "SplitNConvToBatch2D"):
+        super().__init__(name=name)
+        self.n_conv = n_conv
+        self.filters = filters
+        self.kernel = kernel
+        self.inference_idx=inference_idx if isinstance(inference_idx, (list, tuple)) else [inference_idx]
+        self.compensate_gradient=compensate_gradient
+        self.convs = None
+        self.split_layer = None
+        self.inference_split_layer = None
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"n_conv": self.n_conv, "filters":self.filters, "kernel":self.kernel, "compensate_gradient":self.compensate_gradient, "inference_idx":self.inference_idx})
+        return config
+
+    def build(self, input_shape):
+        self.convs = [
+            tf.keras.layers.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
+        for i in range(self.n_conv)]
+        self.split_layer = SplitBatch(n_splits=self.n_conv)
+        self.inference_split_layer = SplitBatch(n_splits=len(self.inference_idx))
+
+        if self.compensate_gradient and self.n_conv>1:
+            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
+            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
+        else:
+            self.grad_fun = None
+            self.grad_fun_inv = None
+        super().build(input_shape)
+
+    def call(self, input): # (B, Y, X, F)
+        if self.inference_mode: # only produce one output
+            input_split = self.inference_split_layer(input)
+            items = [self.convs[idx](input_split[i]) for i, idx in enumerate(self.inference_idx)]
+            if len(self.inference_idx)>1:
+                return tf.concat(items, axis=0)
+            else:
+                return items[0]
+        # input = get_print_grad_fun(f"{self.name} before split")(input)
+        if self.grad_fun_inv is not None:
+            input = self.grad_fun_inv(input)
+        input_split = self.split_layer(input)
+        inputs = [conv(input_split[i]) for i, conv in enumerate(self.convs)] # N x (B, Y, X, F)
+        # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
+        output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
+        if self.grad_fun is not None:
+            output = self.grad_fun(output) # compensate gradients to have same level in
+        # output = get_print_grad_fun(f"{self.name} after concat")(output)
+        return output
+
+class SelectFeature(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, inference_idx, name: str= "SelectFeature"):
         super().__init__(name=name)
-        self.inference_mode=False
         self.inference_idx=inference_idx
 
     def get_config(self):
@@ -144,13 +200,12 @@ class SplitBatch(tf.keras.layers.Layer):
         splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
         return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
 
-class SplitReplaceConcatBatch(tf.keras.layers.Layer):
+class SplitReplaceConcatBatch(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, n_splits:int, replace_idx:int, compensate_gradient:bool = False, name:str="SplitReplaceMergeBatch2D"):
         self.n_splits=n_splits
         self.replace_idx = replace_idx
         self.compensate_gradient=compensate_gradient
         self.split_layer = None
-        self.inference_mode = None
         super().__init__(name=name)
 
     def get_config(self):
@@ -173,11 +228,10 @@ class SplitReplaceConcatBatch(tf.keras.layers.Layer):
             input_list[self.replace_idx] = replace
         return tf.concat(input_list, 0) # (N x B, Y, X, C)
 
-class BatchToChannel(tf.keras.layers.Layer):
+class BatchToChannel(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, n_splits:int, n_splits_inference:int=1, inference_idx=None, compensate_gradient:bool = False, name:str= "BatchToChannel"):
         self.n_splits=n_splits
         self.compensate_gradient = compensate_gradient
-        self.inference_mode=False
         self.n_splits_inference=n_splits_inference
         if inference_idx is not None:
             if isinstance(inference_idx, int):
@@ -866,9 +920,25 @@ class HideVariableWrapper:
     def get_shape(self):
         return self.value.get_shape()
 
+    def __len__(self):
+        return self.shape[0]
+
+    def __tensor__(self, dtype=None):
+        if dtype is not None:
+            return tf.cast(self.value, dtype)
+        else:
+            return self.value
+
     @property
     def shape(self):
         return self.value.shape
 
+    @property
+    def dtype(self):
+        return self.value.dtype
+
     def numpy(self):
+        return self.value.numpy()
+
+    def __array__(self):
         return self.value.numpy()
