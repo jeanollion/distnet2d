@@ -194,7 +194,9 @@ class DiSTNetModel(tf.keras.Model):
                     weight_map = None
                 else:
                     cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
-                    weight_map = tf.math.exp(- tf.math.square(cdm_true / tf.cast(self.cdm_loss_radius/2., cdm_true.dtype)))
+                    half_rad = tf.cast(self.cdm_loss_radius, cdm_true.dtype) / tf.cast(2, cdm_true.dtype)
+                    weight_map = tf.math.exp(- tf.math.square(cdm_true / half_rad ) )
+                    weight_map = tf.where(cdm_mask, weight_map, 0)
                     cdm_mask_interior = cdm_mask
                 center_loss = compute_loss_derivatives(cdm_true, cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
