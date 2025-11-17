@@ -435,6 +435,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             if attention_filters is None: # legacy behavior
                 attention_filters = feature_filters
             attention_op = SpatialAttention2D(num_heads=attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=arch.frame_aware, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention")
+            pair_attention_skip_op = Combine(filters=feature_filters, kernel_size=arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairAttSkip")
         pair_combine_op = Combine(filters=feature_filters, kernel_size = arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairCombine")
         if len(arch.encoder_settings) in skip_connections:
             feature_skip_op = Combine(filters=feature_filters, l2_reg=arch.l2_reg, name="FeatureSkip")
@@ -549,12 +550,11 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             feature_next = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
             if arch.frame_aware:
                 frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = frame_prev, frame_next_idx = frame_next)(frame_index)
-
+            feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
             if attention>0:
-                attention_result = attention_op([feature_prev + frame_dist_emb, feature_next + frame_dist_emb, feature_prev]) if arch.frame_aware else attention_op([feature_prev, feature_next])
-                feature_pairs_batch = pair_combine_op([feature_prev, feature_next, attention_result])
-            else:
-                feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
+                attention_result = attention_op([feature_prev + frame_dist_emb, feature_next + frame_dist_emb, feature_pairs_batch]) if arch.frame_aware else attention_op([feature_prev, feature_next, feature_pairs_batch])
+                feature_pairs_batch = pair_attention_skip_op([feature_pairs_batch, attention_result])
+
             feature_pairs_list = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairs")(feature_pairs_batch)
             if arch.frame_aware:
                 feature_pairs_list_to_blend = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairsDistEmb")(feature_pairs_batch + frame_dist_emb)

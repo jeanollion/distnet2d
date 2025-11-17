@@ -159,18 +159,18 @@ class SpatialAttention2D(tf.keras.layers.Layer):
         '''
             x : tensor with shape (batch_size, y, x, channels)
         '''
-        if self.frame_distance_embedding: # value is input without the frame distance embedding
-            [input, output, value] = x
+        if len(x)==3:
+            [key, query, value] = x
         else:
-            [input, output] = x
-            value = input
+            [key, query] = x
+            value = key
         if "sine" in self.positional_encoding:
-            key = input + self.pos_enc  # broadcast
-            query = output + self.pos_enc
+            key = key + self.pos_enc  # broadcast
+            query = query + self.pos_enc
         elif "rotary" in self.positional_encoding or "rope" in self.positional_encoding:
             # Split query and key into two parts
-            q1, q2 = tf.split(output, 2, axis=-1)  # Each shape: (batch_size, num_heads, y, x, d_model//2)
-            k1, k2 = tf.split(input, 2, axis=-1)  # Each shape: (batch_size, num_heads, y, x, d_model//2)
+            q1, q2 = tf.split(query, 2, axis=-1)  # Each shape: (batch_size, num_heads, y, x, d_model//2)
+            k1, k2 = tf.split(key, 2, axis=-1)  # Each shape: (batch_size, num_heads, y, x, d_model//2)
             #print(f"q1: {q1.shape} q2 {q2.shape}, sin: {self.pos_enc_sin.shape} cos: {self.pos_enc_cos.shape}")
             # Apply rotation to query and key
             query = tf.concat([ q1 * self.pos_enc_cos - q2 * self.pos_enc_sin,  q1 * self.pos_enc_sin + q2 * self.pos_enc_cos ], axis=-1)
@@ -189,17 +189,17 @@ class SpatialAttention2D(tf.keras.layers.Layer):
                 #pos_emb_x = tf.transpose(pos_emb_x, [2, 0, 1]) #(self.filters, 1, x)
                 #pos_emb = tf.matmul(pos_emb_y, pos_emb_x, transpose_b=False, name=self.name+"pos_enc") #(self.filters, y, x) // TODO either scale or simply add the two vectors with broadcast
                 #pos_emb = tf.transpose(pos_emb, [1, 2, 0]) #(y, x, self.filters)
-                query = output + pos_emb # broadcast
-                key = input + pos_emb # broadcast
+                query = query + pos_emb # broadcast
+                key = key + pos_emb # broadcast
             else:
                 x_index = tf.range(self.spatial_dim, dtype=tf.int32)
                 pos_emb = self.pos_embedding(x_index) # (spa_dim, self.filters)
                 pos_emb = tf.reshape(pos_emb, (self.spatial_dims[0], self.spatial_dims[1], self.filters)) #for broadcasting purpose
-                query = output + pos_emb # broadcast
-                key = input + pos_emb # broadcast
+                query = query + pos_emb # broadcast
+                key = key + pos_emb # broadcast
         else :
-            query = output
-            key = input
+            query = query
+            key = key
 
         attention_output = self.attention_layer(query=query, value=value, key=key, training=training, return_attention_scores=self.return_attention)
         if self.return_attention:
