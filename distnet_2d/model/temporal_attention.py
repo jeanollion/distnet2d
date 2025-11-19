@@ -7,7 +7,7 @@ from distnet_2d.model.layers import InferenceLayer
 
 
 class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, num_heads:int=1, attention_filters:int=0, intra_mode:bool=True, inference_idx:int=None, return_list:bool = False, dropout:float=0.1, l2_reg:float=0., name="TemporalAttention"):
+    def __init__(self, num_heads:int, attention_filters:int=0, intra_mode:bool=True, inference_idx:int=None, return_list:bool = False, dropout:float=0.1, l2_reg:float=0., name="TemporalAttention"):
         '''
             filters : number of output channels
             if positional_encoding: filters must correspond to input channel number

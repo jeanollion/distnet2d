@@ -4,6 +4,7 @@ from pyexpat import features
 
 import tensorflow as tf
 
+from dataset_iterator.keras_metrics import EMANormalization
 from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper, \
@@ -41,6 +42,7 @@ class DiSTNetModel(tf.keras.Model):
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False,
+                 ema_kwargs:dict = None, # None -> no EMA. otherwise provide {alpha, step_number}
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.edm_weight = edm_loss_weight
@@ -110,7 +112,8 @@ class DiSTNetModel(tf.keras.Model):
             self.dy_loss_metric = tf.keras.metrics.Mean(name="dY")
         if self.link_multiplicity_weight > 0:
             self.link_multiplicity_loss_metric = tf.keras.metrics.Mean(name="link_multiplicity")
-        self.loss_metric = tf.keras.metrics.Mean(name="loss")
+        n_losses = (self.edm_weight > 0) + (self.center_weight > 0) + (self.category_weight > 0 and self.category_number > 1) + 2 * (self.displacement_weight > 0) + (self.link_multiplicity_weight > 0)
+        self.loss_metric = EMANormalization(num_losses = n_losses, **ema_kwargs, name="loss") if ema_kwargs is not None else tf.keras.metrics.Mean(name="loss")
         self.perform_test_step=perform_test_step
 
 
@@ -269,6 +272,8 @@ class DiSTNetModel(tf.keras.Model):
             gradients = tape.gradient(loss, self.trainable_variables)
             if mixed_precision:
                 gradients = self.optimizer.get_unscaled_gradients(gradients)
+            if hasattr(self, "log_gradients"):
+                self.log_gradients(gradients, loss)
             if self.use_agc:
                 gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
             if not self.use_grad_acc:
@@ -278,18 +283,28 @@ class DiSTNetModel(tf.keras.Model):
                 self.gradient_accumulator.apply_gradients()
 
         # Update metrics state
+        sub_losses = []
         if self.edm_weight > 0:
             self.edm_loss_metric.update_state(losses["EDM"], sample_weight=batch_dim)
+            sub_losses.append(losses["EDM"])
         if self.center_weight > 0:
             self.center_loss_metric.update_state(losses["CDM"], sample_weight=batch_dim)
+            sub_losses.append(losses["CDM"])
         if self.displacement_weight > 0:
             self.dx_loss_metric.update_state(losses["dX"], sample_weight=batch_dim)
             self.dy_loss_metric.update_state(losses["dY"], sample_weight=batch_dim)
+            sub_losses.append(losses["dX"])
+            sub_losses.append(losses["dY"])
         if self.link_multiplicity_weight > 0:
             self.link_multiplicity_loss_metric.update_state(losses["link_multiplicity"], sample_weight=batch_dim)
+            sub_losses.append(losses["link_multiplicity"])
         if self.category_weight > 0 and self.category_number > 1:
             self.category_loss_metric.update_state(losses["category"], sample_weight=batch_dim)
-        self.loss_metric.update_state(losses["loss"], sample_weight=batch_dim)
+            sub_losses.append(losses["category"])
+        if isinstance(self.loss_metric, EMANormalization):
+            self.loss_metric.update_state(sub_losses, sample_weight=batch_dim, val=not training)
+        else:
+            self.loss_metric.update_state(losses["loss"], sample_weight=batch_dim)
         return self.compute_metrics(x, y, y_pred, None)
 
     def _compute_displacement_loss(self, y, y_pred, cell_mask):
@@ -563,20 +578,20 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
         if isinstance(arch, TemA):
-            feature_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeatureTAtt")
-            nconv_op = SplitNConvToBatch2D(n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=False, name=f"{name}_FeatureWiseConv")
+            feature_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"FeatureTAtt")
+            nconv_op = SplitNConvToBatch2D(n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=False, name=f"FeatureWiseConv")
             if arch.frame_window > 0:
-                feature_pair_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_FeaturePairTAtt")
-                nconv_pair_op = SplitNConvToBatch2D(n_conv=n_frame_pairs, inference_idx=inference_pair_idx, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=False, name=f"{name}_FeaturePairWiseConv")
-                central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=arch.temporal_attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"{name}_CentralFeatureCrossTAtt")
-                split_replace_op = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window, name=f"{name}_CentralFeatureCrossTAttInclude")
+                feature_pair_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"FeaturePairTAtt")
+                nconv_pair_op = SplitNConvToBatch2D(n_conv=n_frame_pairs, inference_idx=inference_pair_idx, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=False, name=f"FeaturePairWiseConv")
+                central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=arch.temporal_attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"CentralFeatureCrossTAtt")
+                split_replace_op = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window, name=f"CentralFeatureCrossTAttInclude")
                 central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name=f"CentralFeatureTAttCombine")
             blended_features_batch = feature_att_op(features_list) # blend segmentation information
             if arch.frame_window > 0:
                 blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list_to_blend) # blend tracking information
                 blended_feature_pairs_batch = nconv_pair_op(blended_feature_pairs_batch)
                 # cross blend segmentation & tracking information
-                central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in central_pair_idx] # was inference_pair_idx (mistake)
+                central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in central_pair_idx]
                 #print(f"inference idx: {arch.frame_window}/{len(features_list)} pair idx: {inference_pair_idx}/{len(feature_pairs_list_to_blend)}")
                 central_feature_att = central_feature_att_op( ([features_list[arch.frame_window]], central_feature_pair_list) ) # cross attention : central pair and feature pair involving central frame
                 central_feature = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
@@ -587,8 +602,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             # define operations:
             combine_filters = int(feature_filters * n_frames * arch.blending_filter_factor)
             print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
-            combine_features_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="CombineFeatures") if arch.frame_window > 0 else lambda features: features[0]
-            all_pair_combine_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="AllFeaturePairCombine")
+            combine_features_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="CombineFeatures") if arch.frame_window > 0 else lambda features: features[0] # was compensate_gradient=True
+            all_pair_combine_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="AllFeaturePairCombine") # was compensate_gradient=True
             feature_pair_feature_combine_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairFeatureCombine")  # change here was feature_filters
 
             for f in arch.feature_blending_settings:
@@ -604,8 +619,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 for op in feature_blending_convs:
                     combined_features = op(combined_features)
 
-                blended_features_batch = NConvToBatch2D(compensate_gradient=False, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F)
-                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=False, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F)
+                blended_features_batch = NConvToBatch2D(compensate_gradient=False, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
+                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=False, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
             else:
                 blended_features_batch = combined_features
 
