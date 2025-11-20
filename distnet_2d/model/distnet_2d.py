@@ -362,13 +362,15 @@ class DiSTNetModel(tf.keras.Model):
         if inference:
             self.set_inference(True)
             self.trainable=False
+            loss = self.loss_metric
+            self.loss_metric = tf.keras.metrics.Mean(name="loss")  # to avoid depend on custom layer at inference time (not working)
             self.compile()
         super().save(*args, **kwargs)
         if inference:
             self.set_inference(False)
             self.trainable=True
+            self.loss_metric = loss
             self.compile()
-
 
 def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are passed on to DiSTNet2D Model
         spatial_dimensions = arch.spatial_dimensions
