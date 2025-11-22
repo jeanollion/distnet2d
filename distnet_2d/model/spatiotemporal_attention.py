@@ -7,7 +7,7 @@ from distnet_2d.model.layers import InferenceLayer
 class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
                  intra_mode: bool = True, inference_idx: int = None, return_list: bool = False,
-                 dropout: float = 0.1, l2_reg: float = 0., name="ConvSpatioTemporalAttention"):
+                 dropout: float = 0.1, l2_reg: float = 0., name="SpatioTemporalAttention"):
         super().__init__(name=name)
         self.num_heads = num_heads
         self.attention_filters = attention_filters
@@ -63,8 +63,6 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         self.spatial_dims = input_shape[1:-1]
         self.temporal_dim = len(input_shapes)
         self.filters = input_shape[-1]
-        if self.filters % self.num_heads != 0:
-            raise ValueError(f"filters ({self.filters}) must be divisible by num_heads ({self.num_heads})")
         if self.attention_filters is None or self.attention_filters <= 0:
             self.attention_filters = int(self.filters / self.num_heads)
         self.radius_y, self.radius_x = self.spatial_radius
@@ -92,6 +90,15 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
             name="SpatialPosEnc"
         )
+
+        # Pre-compute spatial offsets for graph mode compatibility
+        spatial_offsets = []
+        for dy in range(-self.radius_y, self.radius_y + 1):
+            for dx in range(-self.radius_x, self.radius_x + 1):
+                spatial_offsets.append([dy, dx])
+        self.spatial_offsets = tf.constant(spatial_offsets, dtype=tf.int32)
+        self.num_spatial = len(spatial_offsets)
+
         super().build(input_shape)
 
     def _get_query_spatial_indices(self, H, W):
@@ -182,38 +189,34 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         # Scaling factor
         scale = tf.math.rsqrt(tf.cast(d, tf.float32))
 
-        # Combined PASS: Compute scores and accumulate weighted values
-        out_acc = tf.zeros((B, Qcount, H, W, heads, d), dtype=Qproj_all.dtype)
-        scores_list = []
+        # PASS 1: Compute scores using TensorArray
+        scores_array = tf.TensorArray(dtype=Qproj_all.dtype, size=self.num_spatial, dynamic_size=False)
 
-        for dy in range(-self.radius_y, self.radius_y + 1):
-            for dx in range(-self.radius_x, self.radius_x + 1):
-                # Spatial embedding for this neighbor
-                spatial_idx = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
-                neighbor_spatial_emb = tf.reshape(key_spatial_emb[spatial_idx], (1, 1, 1, 1, Ck))
+        for s_idx in tf.range(self.num_spatial):
+            dy = self.spatial_offsets[s_idx, 0]
+            dx = self.spatial_offsets[s_idx, 1]
 
-                # Neighbor coordinates with edge handling
-                ny = tf.clip_by_value(cy_grid + dy, 0, H - 1)
-                nx = tf.clip_by_value(cx_grid + dx, 0, W - 1)
-                ny_b = tf.tile(ny[None, None, :, :], [B, T, 1, 1])
-                nx_b = tf.tile(nx[None, None, :, :], [B, T, 1, 1])
-                idx = tf.stack([b_idx, t_idx, ny_b, nx_b], axis=-1)
+            # Spatial embedding for this neighbor
+            spatial_idx = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
+            neighbor_spatial_emb = tf.reshape(key_spatial_emb[spatial_idx], (1, 1, 1, 1, Ck))
 
-                # Gather keys and values for all temporal frames
-                K_n = tf.gather_nd(K_all, idx) + neighbor_spatial_emb  # (B, T, H, W, Ck)
+            # Neighbor coordinates with edge handling
+            ny = tf.clip_by_value(cy_grid + dy, 0, H - 1)
+            nx = tf.clip_by_value(cx_grid + dx, 0, W - 1)
+            ny_b = tf.tile(ny[None, None, :, :], [B, T, 1, 1])
+            nx_b = tf.tile(nx[None, None, :, :], [B, T, 1, 1])
+            idx = tf.stack([b_idx, t_idx, ny_b, nx_b], axis=-1)
 
-                # Reshape for attention: (B, T, H, W, heads, d)
-                K_nh = tf.reshape(K_n, (B, T, H, W, heads, d))
+            # Gather keys for all temporal frames
+            K_n = tf.gather_nd(K_all, idx) + neighbor_spatial_emb  # (B, T, H, W, Ck)
+            K_nh = tf.reshape(K_n, (B, T, H, W, heads, d))
 
-                # Compute scores: Q(B,Qcount,H,W,heads,d) @ K(B,T,H,W,heads,d) -> (B,Qcount,T,H,W,heads)
-                # Use einsum for cleaner broadcasting
-                scores = tf.einsum('bqhwnd,bthwnd->bqthwn', Qproj_all, K_nh) * scale  # (B, Qcount, T, H, W, heads)
+            # Compute scores
+            scores = tf.einsum('bqhwnd,bthwnd->bqthwn', Qproj_all, K_nh) * scale
+            scores_array = scores_array.write(s_idx, scores)
 
-                # Store scores for softmax (will be T scores per spatial neighbor)
-                scores_list.append(scores)
-
-        # Stack all scores: (num_spatial, B, Qcount, T, H, W, heads) -> (B, Qcount, H, W, heads, num_spatial*T)
-        scores_stack = tf.stack(scores_list, axis=0)  # (S, B, Qcount, T, H, W, heads)
+        # Stack all scores and flatten for softmax
+        scores_stack = scores_array.stack()  # (S, B, Qcount, T, H, W, heads)
         scores_stack = tf.transpose(scores_stack, [1, 2, 4, 5, 6, 0, 3])  # (B, Qcount, H, W, heads, S, T)
         scores_flat = tf.reshape(scores_stack, (B, Qcount, H, W, heads, -1))  # (B, Qcount, H, W, heads, S*T)
 
@@ -222,13 +225,16 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         if self.dropout > 0 and training:
             weights = self.dropout_layer(weights, training=training)
 
-        # Reshape weights back: (B, Qcount, H, W, heads, S, T)
-        weights = tf.reshape(weights, (B, Qcount, H, W, heads, -1, T))
+        # Reshape weights back
+        weights = tf.reshape(weights, (B, Qcount, H, W, heads, self.num_spatial, T))
 
         # PASS 2: Accumulate weighted values
-        for s_idx, (dy, dx) in enumerate([(dy, dx)
-                                          for dy in range(-self.radius_y, self.radius_y + 1)
-                                          for dx in range(-self.radius_x, self.radius_x + 1)]):
+        out_acc = tf.zeros((B, Qcount, H, W, heads, d), dtype=Qproj_all.dtype)
+
+        for s_idx in tf.range(self.num_spatial):
+            dy = self.spatial_offsets[s_idx, 0]
+            dx = self.spatial_offsets[s_idx, 1]
+
             ny = tf.clip_by_value(cy_grid + dy, 0, H - 1)
             nx = tf.clip_by_value(cx_grid + dx, 0, W - 1)
             ny_b = tf.tile(ny[None, None, :, :], [B, T, 1, 1])
@@ -260,6 +266,7 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             return attention_output_list[0]
         else:
             return tf.concat(attention_output_list, 0)
+
 
 # faster but with high-memory footprint
 class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
@@ -356,19 +363,10 @@ class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
         self.attention_layer = tf.keras.layers.MultiHeadAttention(
             self.num_heads,
             key_dim=self.attention_filters,
-            output_shape = self.filters,
+            output_shape=self.filters,
             dropout=self.dropout,
             name="MultiHeadAttention"
         )
-
-        # Build attention layer with appropriate shapes
-        if self.intra_mode:
-            query_shape = (None, None, self.filters)
-        else:
-            query_shape = (None, None, query_shape[-1])
-        key_shape = (None, self.neighborhood_size, self.filters)
-
-        #self.attention_layer._build_from_signature(query=query_shape, value=key_shape, key=key_shape)
 
         # Temporal embeddings
         self.temp_embedding = tf.keras.layers.Embedding(
