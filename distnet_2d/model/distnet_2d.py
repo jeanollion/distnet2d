@@ -581,10 +581,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
         if isinstance(arch, TemA):
             feature_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"FeatureTAtt")
-            nconv_op = SplitNConvToBatch2D(n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=False, name=f"FeatureWiseConv")
+            nconv_op = SplitNConvToBatch2D(n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=True, name=f"FeatureWiseConv")
             if arch.frame_window > 0:
                 feature_pair_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"FeaturePairTAtt")
-                nconv_pair_op = SplitNConvToBatch2D(n_conv=n_frame_pairs, inference_idx=inference_pair_idx, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=False, name=f"FeaturePairWiseConv")
+                nconv_pair_op = SplitNConvToBatch2D(n_conv=n_frame_pairs, inference_idx=inference_pair_idx, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=True, name=f"FeaturePairWiseConv")
                 central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=arch.temporal_attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"CentralFeatureCrossTAtt")
                 split_replace_op = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window, name=f"CentralFeatureCrossTAttInclude")
                 central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name=f"CentralFeatureTAttCombine")
@@ -621,8 +621,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 for op in feature_blending_convs:
                     combined_features = op(combined_features)
 
-                blended_features_batch = NConvToBatch2D(compensate_gradient=False, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
-                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=False, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
+                blended_features_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
+                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
             else:
                 blended_features_batch = combined_features
 
