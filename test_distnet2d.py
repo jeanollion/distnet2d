@@ -33,23 +33,20 @@ from distnet_2d.model import get_distnet_2d, architectures, get_distnet_2d_seg
 
 seg = False
 if not seg:
-    a = np.array(["a1", "a2", "a3"])
-    b = np.array(["b1", "b2", "b3"])
-    ab = np.concatenate([a, b], axis=0)
-    emb = np.array(["aa", "bb"], dtype=ab.dtype)
-    #print(f"ab={ab}")
-    #print(f"emb={np.repeat(emb, a.shape[0], axis=0)}")
-    #t = [[0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 0, 0, 0, 0]]
-    #print(_erode_mask(np.array(t)[np.newaxis], radius=2))
-    #print(tf.broadcast_dynamic_shape(tf.shape(emb), tf.shape(ab)))
     if True:
         from tensorflow.keras import mixed_precision
         mixed_precision.set_global_policy('mixed_float16')
-        dn = get_distnet_2d(arch=architectures.TemAD2(frame_window=9, spatial_dimensions=(384, 32), filters=128, self_attention=64, attention=64, skip_connections=False, early_downsampling=True, category_number=0, predict_edm_derivatives=False, predict_cdm_derivatives=False))
-        #dn([tf.zeros(shape=(2, 384, 32, 7)), tf.zeros(shape=(2, 1, 1, 7))])
-        tf.keras.utils.plot_model(dn, "/data/model.png", show_shapes=True)
+        dn = get_distnet_2d(
+            arch=architectures.TemAD2(frame_window=3, spatial_dimensions=(64, 32), filters=128, self_attention=16, attention_filters=64,
+                                      temporal_attention=64, temporal_attention_spatial_radius=8,
+                                      skip_connections=False, early_downsampling=True, category_number=0, inference_gap_number=1,
+                                      predict_edm_derivatives=False, predict_cdm_derivatives=False))
+
+        out = dn([tf.zeros(shape=(1, 64, 32, 7)), tf.zeros(shape=(1, 1, 1, 7))])
+        print(f"{[o.shape for o in out]}")
+        #tf.keras.utils.plot_model(dn, "/data/model.png", dpi=96, show_shapes=True)
         #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
-        #print(dn.summary())
+        print(dn.summary())
 
     if False:
 

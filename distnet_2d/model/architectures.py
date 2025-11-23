@@ -64,7 +64,6 @@ class ArchBase:
         self.scale_edm=scale_edm
         self.skip_connections = skip_connections
         self.skip_stop_gradient=skip_stop_gradient
-        self.attention = attention
         self.attention_filters = attention_filters
         self.attention_positional_encoding = attention_positional_encoding
         self.downsampling_mode = downsampling_mode
@@ -98,8 +97,7 @@ class ArchDepth(ArchBase):
 class D2(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
         super().__init__(**kwargs)
-        if self.attention>0 or self.self_attention>0:
-            print(f"spatial dimension at attention layer: {self.spatial_dimensions[0] / 2**2} x {self.spatial_dimensions[1] / 2**2}")
+        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**2} x {self.spatial_dimensions[1] / 2**2}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2)
         ker1_2, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, 2)
@@ -163,8 +161,7 @@ class D2(ArchDepth):
 class D3(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
         super().__init__(**kwargs)
-        if self.attention>0 or self.self_attention>0:
-            print(f"spatial dimension at attention layer: {self.spatial_dimensions[0] / 2**3} x {self.spatial_dimensions[1] / 2**3}")
+        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**3} x {self.spatial_dimensions[1] / 2**3}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2)
         ker2, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2 * 2)
@@ -235,8 +232,7 @@ class D3(ArchDepth):
 class D4(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
         super().__init__(**kwargs)
-        if self.attention>0 or self.self_attention>0:
-            print(f"spatial dimension at attention layer: {self.spatial_dimensions[0] / 2**4} x {self.spatial_dimensions[1] / 2**4}")
+        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**4} x {self.spatial_dimensions[1] / 2**4}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2)
         ker2, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, 2 ** 2)
@@ -319,8 +315,9 @@ class D4(ArchDepth):
 
 
 class Blend(ArchBase):
-    def __init__(self, frame_aware:bool, blending_filter_factor:float=0.5, **kwargs):
+    def __init__(self, frame_aware:bool, attention:int=0, blending_filter_factor:float=0.5, **kwargs):
         super().__init__(frame_aware=frame_aware, **kwargs)
+        self.attention = attention
         self.blending_filter_factor = blending_filter_factor
         # to be defined
         self.feature_blending_settings = None
@@ -370,21 +367,29 @@ class TemA(ArchBase):
         ker4_fd = self.feature_decoder_settings[0]["kernel_size"]
         self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
         self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
+        # to be defined:
+        self.temporal_attention_spatial_radius = None
 
 class TemAD2(TemA, D2):
-    def __init__(self, attention:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=5 if attention==0 else 3, attention=attention, **kwargs)
-
+    def __init__(self, temporal_attention_spatial_radius:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=5, **kwargs)
+        self.temporal_attention_spatial_radius = limit_radius(temporal_attention_spatial_radius, self.spatial_dimensions, 2**2)
+        if self.temporal_attention_spatial_radius != temporal_attention_spatial_radius:
+            print(f"tempAtt rad: {self.temporal_attention_spatial_radius}")
 
 class TemAD3(TemA, D3):
-    def __init__(self, attention:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=5 if attention==0 else 3, attention=attention, **kwargs)
-
+    def __init__(self, temporal_attention_spatial_radius:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=5, **kwargs)
+        self.temporal_attention_spatial_radius = limit_radius(temporal_attention_spatial_radius, self.spatial_dimensions, 2**3)
+        if self.temporal_attention_spatial_radius != temporal_attention_spatial_radius:
+            print(f"tempAtt rad: {self.temporal_attention_spatial_radius}")
 
 class TemAD4(TemA, D4):
-    def __init__(self, attention:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=5 if attention==0 else 3, attention=attention, **kwargs)
-
+    def __init__(self, temporal_attention_spatial_radius:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=5, **kwargs)
+        self.temporal_attention_spatial_radius = limit_radius(temporal_attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
+        if self.temporal_attention_spatial_radius != temporal_attention_spatial_radius:
+            print(f"tempAtt rad: {self.temporal_attention_spatial_radius}")
 
 def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, downsampling):
     if spa_dimensions is None:
@@ -407,7 +412,19 @@ def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, dow
 
 
 def test_ker_dil(ker, dil, dim):
-    if ker == 1 and dil == 1 or dim is None or dim <= 0:
+    if ker==0 or ker == 1 and dil == 1 or dim is None or dim <= 0:
         return True
     size = (ker-1)*dil
     return dim >= size * 2
+
+def limit_radius(target_radius, spa_dimensions, downsampling):
+    if target_radius == 0 or spa_dimensions is None:
+        return target_radius
+    spa_dimensions = ensure_multiplicity(2, spa_dimensions)
+    rad = ensure_multiplicity(2, target_radius)
+    spa_dimensions = [d / downsampling if d is not None and d > 0 else None for d in spa_dimensions]
+    rad = [min(int((s-1)/2), r) for r, s in zip(rad, spa_dimensions)]
+    if rad[0] == rad[1]:
+        rad = rad[0]
+    print(f"rad: {target_radius} -> {rad} for dim: {spa_dimensions}")
+    return rad

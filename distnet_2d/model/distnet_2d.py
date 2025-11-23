@@ -9,9 +9,10 @@ from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper, \
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch, SplitNConvToBatch2D, \
-    InferenceLayer
+    InferenceLayer, SelectFeature2
 import numpy as np
 from .spatial_attention import SpatialAttention2D
+from .spatiotemporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatch
 from .temporal_attention import TemporalAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives
@@ -375,12 +376,10 @@ class DiSTNetModel(tf.keras.Model):
 def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are passed on to DiSTNet2D Model
         spatial_dimensions = arch.spatial_dimensions
         long_term = arch.long_term,
-        attention = arch.attention
         attention_filters = arch.attention_filters
         inference_gap_number = arch.inference_gap_number
         tracking = arch.tracking
         if arch.frame_window == 0:
-            attention = 0
             long_term = False
             tracking = False
         if not tracking:
@@ -396,7 +395,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         else:
             spatial_dimensions = list(spatial_dimensions)
             assert len(spatial_dimensions) == 2, "2D input required"
-        if attention>0 or arch.self_attention>0:
+        if arch.self_attention>0 or getattr(arch, "attention", 0)>0:
             assert spatial_dimensions[0] is not None and spatial_dimensions[0] > 0, "for attention mechanism, spatial dim must be provided"
             assert spatial_dimensions[1] is not None and spatial_dimensions[1] > 0, "for attention mechanism, spatial dim must be provided"
             print(f"attention positional encoding mode: {arch.attention_positional_encoding}")
@@ -413,6 +412,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         else:
             assert isinstance(skip_connections, (list))
             skip_connections = [i if i>=0 else len(arch.encoder_settings) + 1 + i for i in skip_connections]
+
         central_pair_idx = [arch.frame_window - 1, arch.frame_window]
         inference_pair_idx = [arch.frame_window - 1, arch.frame_window]
         inference_pair_sel_bw = [0]
@@ -448,11 +448,6 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             no_residual_layer.append(residual_filters==0)
         # define feature operations
         feature_convs, _, _, feature_filters, _ = parse_param_list(arch.feature_settings, "FeatureSequence", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, last_input_filters=out_filters)
-        if attention>0:
-            if attention_filters is None: # legacy behavior
-                attention_filters = feature_filters
-            attention_op = SpatialAttention2D(num_heads=attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=arch.frame_aware, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention")
-            pair_attention_skip_op = Combine(filters=feature_filters, kernel_size=arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairAttSkip")
         pair_combine_op = Combine(filters=feature_filters, kernel_size = arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairCombine")
         if len(arch.encoder_settings) in skip_connections:
             feature_skip_op = Combine(filters=feature_filters, l2_reg=arch.l2_reg, name="FeatureSkip")
@@ -544,64 +539,56 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # feature_pairs
         if arch.frame_window > 0 :
-            feature_prev, feature_next = [], []
             frame_prev, frame_next = [], []
             for i in range(1, n_frames):
-                feature_prev.append(features_list[i-1])
-                feature_next.append(features_list[i])
                 frame_prev.append(i-1)
                 frame_next.append(i)
             if long_term:
                 for c in range(0, arch.frame_window-1):
-                    feature_prev.append(features_list[c])
-                    feature_next.append(features_list[arch.frame_window])
                     frame_prev.append(c)
                     frame_next.append(arch.frame_window)
                 if arch.future_frames:
                     for c in range(arch.frame_window+2, n_frames):
-                        feature_prev.append(features_list[arch.frame_window])
-                        feature_next.append(features_list[c])
                         frame_prev.append(arch.frame_window)
                         frame_next.append(c)
-            feature_prev = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairPrevToBatch")(feature_prev)
-            feature_next = tf.keras.layers.Concatenate(axis = 0, name="FeaturePairNextToBatch")(feature_next)
             if arch.frame_aware:
                 frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = frame_prev, frame_next_idx = frame_next)(frame_index)
-            feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
-            if attention>0:
-                attention_result = attention_op([feature_prev + frame_dist_emb, feature_next + frame_dist_emb, feature_pairs_batch]) if arch.frame_aware else attention_op([feature_prev, feature_next, feature_pairs_batch])
-                feature_pairs_batch = pair_attention_skip_op([feature_pairs_batch, attention_result])
 
+
+
+        # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
+        if isinstance(arch, TemA) and arch.frame_window > 0:
+            inference_idx = list(set( [frame_prev[i] for i in inference_pair_idx] + [frame_next[i] for i in inference_pair_idx] ))
+            inference_idx.sort()
+            feature_blending_op = LocalSpatioTemporalAttentionPatch(num_heads=arch.temporal_attention, attention_filters=attention_filters, spatial_radius = arch.temporal_attention_spatial_radius, inference_idx=inference_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, skip_connection=True, return_list=True, frame_aware=arch.frame_aware, frame_max_distance=arch.frame_max_distance, name=f"FeatureSTAtt")
+            if arch.frame_aware:
+                frame_relative_index = frame_index[:, 0, 0, :] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]
+                features_list = feature_blending_op([features_list, frame_relative_index])
+            else:
+                features_list = feature_blending_op(features_list)
+            features_batch = SelectFeature2(inference_idx=inference_idx.index(arch.frame_window), name="SelectFeature")(features_list)
+
+            # feature pairs
+            feature_prev = SelectFeature2(train_idx = frame_prev, inference_idx = [inference_idx.index(frame_prev[i]) for i in inference_pair_idx], name="BlendedFeaturePairPrevToBatch")(features_list)
+            feature_next = SelectFeature2(train_idx = frame_next, inference_idx = [inference_idx.index(frame_next[i]) for i in inference_pair_idx], name="BlendedFeaturePairNextToBatch")(features_list)
+            feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
+            print(f"all inference idx: {inference_idx} featureidx: {inference_idx.index(arch.frame_window)} feature_prev_idx: {[inference_idx.index(frame_prev[i]) for i in inference_pair_idx]}, feature_next_idx: {[inference_idx.index(frame_next[i]) for i in inference_pair_idx]}")
+
+        elif isinstance(arch, Blend) and arch.frame_window > 0: # BLEND architecture (first architecture) : combine feature / feature pair with convolution part so that each frame / frame pair has access to information from all other feature pairs / features
+            feature_prev = tf.keras.layers.Concatenate(axis=0, name="FeaturePairPrevToBatch")([features_list[i] for i in frame_prev])
+            feature_next = tf.keras.layers.Concatenate(axis=0, name="FeaturePairNextToBatch")([features_list[i] for i in frame_next])
+            feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
+            if arch.attention > 0:
+                attention_op = SpatialAttention2D(num_heads=arch.attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=arch.frame_aware, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention")
+                pair_attention_skip_op = Combine(filters=feature_filters, kernel_size=arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairAttSkip")
+                attention_result = attention_op([feature_prev + frame_dist_emb, feature_next + frame_dist_emb,  feature_pairs_batch]) if arch.frame_aware else attention_op( [feature_prev, feature_next, feature_pairs_batch])
+                feature_pairs_batch = pair_attention_skip_op([feature_pairs_batch, attention_result])
             feature_pairs_list = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairs")(feature_pairs_batch)
             if arch.frame_aware:
                 feature_pairs_list_to_blend = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairsDistEmb")(feature_pairs_batch + frame_dist_emb)
             else:
                 feature_pairs_list_to_blend = feature_pairs_list
 
-        # next section is architecture dependent. blend features and feature pairs. generates blended_features_batch & blended_feature_pairs_batch
-        if isinstance(arch, TemA):
-            feature_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=arch.frame_window, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"FeatureTAtt")
-            nconv_op = SplitNConvToBatch2D(n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=True, name=f"FeatureWiseConv")
-            if arch.frame_window > 0:
-                feature_pair_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, inference_idx=inference_pair_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"FeaturePairTAtt")
-                nconv_pair_op = SplitNConvToBatch2D(n_conv=n_frame_pairs, inference_idx=inference_pair_idx, filters=feature_filters, kernel=arch.kernel_size_fd, compensate_gradient=True, name=f"FeaturePairWiseConv")
-                central_feature_att_op = TemporalAttention(intra_mode=False, num_heads=arch.temporal_attention, attention_filters=attention_filters, dropout=arch.dropout, l2_reg=arch.l2_reg, name=f"CentralFeatureCrossTAtt")
-                split_replace_op = SplitReplaceConcatBatch(n_splits=n_frames, replace_idx = arch.frame_window, name=f"CentralFeatureCrossTAttInclude")
-                central_feature_combine_op = Combine(filters=feature_filters, kernel_size=1, l2_reg=arch.l2_reg, name=f"CentralFeatureTAttCombine")
-            blended_features_batch = feature_att_op(features_list) # blend segmentation information
-            if arch.frame_window > 0:
-                blended_feature_pairs_batch = feature_pair_att_op(feature_pairs_list_to_blend) # blend tracking information
-                blended_feature_pairs_batch = nconv_pair_op(blended_feature_pairs_batch)
-                # cross blend segmentation & tracking information
-                central_feature_pair_list = [feature_pairs_list_to_blend[i] for i in central_pair_idx]
-                #print(f"inference idx: {arch.frame_window}/{len(features_list)} pair idx: {inference_pair_idx}/{len(feature_pairs_list_to_blend)}")
-                central_feature_att = central_feature_att_op( ([features_list[arch.frame_window]], central_feature_pair_list) ) # cross attention : central pair and feature pair involving central frame
-                central_feature = central_feature_combine_op([features_list[arch.frame_window], central_feature_att])
-                blended_features_batch = split_replace_op([central_feature, blended_features_batch])
-            blended_features_batch = nconv_op(blended_features_batch)
-
-        elif isinstance(arch, Blend): # BLEND architecture (first architecture) : combine feature / feature pair with convolution part so that each frame / frame pair has access to information from all other feature pairs / features
-            # define operations:
             combine_filters = int(feature_filters * n_frames * arch.blending_filter_factor)
             print(f"feature filters: {feature_filters} combine filters: {combine_filters}")
             combine_features_op = Combine(filters=combine_filters, kernel_size=arch.blend_combine_kernel_size, compensate_gradient=False, l2_reg=arch.l2_reg, name="CombineFeatures") if arch.frame_window > 0 else lambda features: features[0] # was compensate_gradient=True
@@ -626,11 +613,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             else:
                 blended_features_batch = combined_features
 
-        if len(arch.encoder_settings) in skip_connections and arch.frame_window > 0: # skip connection at feature level
-            feature_skip = SelectFeature(inference_idx=arch.frame_window, name ="SelectFeature")([features_batch, features_list])
-            features_batch = feature_skip_op([feature_skip, blended_features_batch])
-            feature_pair_skip = SelectFeature(inference_idx=inference_pair_idx, name ="SelectFeaturePair")([feature_pairs_batch, feature_pairs_list])
-            feature_pairs_batch = feature_pair_skip_op([feature_pair_skip, blended_feature_pairs_batch])
+            # skip connection
+            if len(arch.encoder_settings) in skip_connections and arch.frame_window > 0: # skip connection at feature level
+                feature_skip = SelectFeature(inference_idx=arch.frame_window, name ="SelectFeature")([features_batch, features_list])
+                features_batch = feature_skip_op([feature_skip, blended_features_batch])
+                if arch.frame_window > 0 :
+                    feature_pair_skip = SelectFeature(inference_idx=inference_pair_idx, name ="SelectFeaturePair")([feature_pairs_batch, feature_pairs_list])
+                    feature_pairs_batch = feature_pair_skip_op([feature_pair_skip, blended_feature_pairs_batch])
 
         # decoder part
         outputs=[]
@@ -668,7 +657,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                     output_name = "CDM"
                     output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
                 outputs.extend(output_per_dec.values())
-        return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if attention > 0 or arch.self_attention > 0 else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=arch.predict_cdm_derivatives, predict_edm_derivatives=arch.predict_edm_derivatives, category_number=arch.category_number, **kwargs)
+        return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if getattr(arch, "attention", 0) > 0 or arch.self_attention > 0 else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=arch.predict_cdm_derivatives, predict_edm_derivatives=arch.predict_edm_derivatives, category_number=arch.category_number, **kwargs)
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=1):
     name=f"{name}{layer_idx}"
