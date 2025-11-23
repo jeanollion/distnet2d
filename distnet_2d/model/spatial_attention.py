@@ -49,7 +49,7 @@ class SpatialAttention2D(tf.keras.layers.Layer):
         if self.attention_filters is None or self.attention_filters<=0:
             self.attention_filters = int(ceil(self.filters / self.num_heads))
         self.attention_layer=tf.keras.layers.MultiHeadAttention(self.num_heads, key_dim=self.attention_filters, attention_axes=[1, 2], dropout=self.dropout, name="MultiHeadAttention")
-        self.attention_layer._build_from_signature(query=input_shape, value=input_shape, key=input_shape)
+        #self.attention_layer._build_from_signature(query=input_shape, value=input_shape, key=input_shape)
 
         # positional encoding
         if "sine" in self.positional_encoding:

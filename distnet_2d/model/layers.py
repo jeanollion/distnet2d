@@ -137,6 +137,33 @@ class SelectFeature(InferenceLayer, tf.keras.layers.Layer):
             else:
                 return input_concat
 
+class SelectFeature2(InferenceLayer, tf.keras.layers.Layer):
+    def __init__(self, inference_idx:list, train_idx:list=None, name: str= "SelectFeature2"):
+        super().__init__(name=name)
+        self.train_idx=train_idx
+        self.inference_idx=inference_idx
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"train_idx":self.train_idx, "inference_idx":self.inference_idx})
+        return config
+
+    def call(self, input): # N x (B, Y, X, F)
+        if self.inference_mode: # only produce one output
+            if isinstance(self.inference_idx, (tuple, list)):
+                items = [input[idx] for idx in self.inference_idx]
+                return tf.concat(items, axis=0)
+            else:
+                return input[self.inference_idx]
+        else:
+            if self.train_idx is None:
+                return tf.concat(input, axis=0)
+            elif isinstance(self.train_idx, (tuple, list)):
+                items = [input[idx] for idx in self.train_idx]
+                return tf.concat(items, axis=0)
+            else:
+                return input[self.train_idx]
+
 class ChannelToBatch(tf.keras.layers.Layer):
     def __init__(self, compensate_gradient:bool = False, add_channel_axis:bool = True, name: str="ChannelToBatch"):
         self.compensate_gradient=compensate_gradient
@@ -290,7 +317,7 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
-        self.embedding = tf.keras.layers.Embedding(input_dim=self.input_dim, output_dim=self.output_dim, input_length=len(self.frame_next_idx))
+        self.embedding = tf.keras.layers.Embedding(input_dim=self.input_dim, output_dim=self.output_dim)
         super().build(input_shape)
 
     def call(self, frame_index): # (B, 1, 1, FW)
@@ -299,6 +326,81 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
         frame_distance_emb = tf.transpose(frame_distance_emb, perm=[1, 0, 2]) # (N, B, C)
         frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim]) # ( N x B, 1, 1, C )
         return frame_distance_emb
+
+
+def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
+    """
+    Compute sinusoidal encoding for temporal distances.
+    Similar to Transformer positional encoding but for temporal distance.
+
+    Args:
+        distances: [..., T] tensor of temporal distances from center
+        embedding_dim: dimension of encoding
+
+    Returns:
+        encoding: [..., T, embedding_dim]
+    """
+    distances = tf.cast(distances, tf.float32)
+    distances = tf.expand_dims(distances, -1)  # [..., T, 1]
+
+    # Position encoding dimensions
+    dim_idx = tf.range(embedding_dim, dtype=tf.float32)
+    dim_idx = dim_idx[None, None, :]  # [1, 1, embedding_dim]
+
+    # Compute frequencies
+    freq = 1.0 / tf.pow(10000.0, (2 * (dim_idx // 2)) / embedding_dim)
+
+    # Compute encoding
+    angle = distances * freq  # [..., T, embedding_dim]
+
+    # Apply sin to even indices, cos to odd
+    encoding = tf.where(
+        tf.equal(dim_idx % 2, 0),
+        tf.sin(angle),
+        tf.cos(angle)
+    )
+
+    return tf.cast(encoding, dtype=dtype)
+
+
+class RelativeTemporalEmbedding(tf.keras.layers.Layer):
+    """Combines learned embeddings with sinusoidal encoding."""
+
+    def __init__(self, max_distance, embedding_dim, l2_reg=None, **kwargs):
+        super().__init__(**kwargs)
+        self.max_distance = max_distance
+        self.embedding_dim = embedding_dim
+        self.vocab_size = 2 * max_distance + 1
+        self.l2_reg=l2_reg
+
+    def build(self, input_shape):
+        input_shape, central_frame = input_shape
+        # Learned component (half dimensions)
+        self.learned_embedding = tf.keras.layers.Embedding(
+            input_dim=self.vocab_size,
+            output_dim=self.embedding_dim // 2,
+            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            name="learned_temporal"
+        )
+        super().build(input_shape)
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"max_distance": self.max_distance, "embedding_dim":self.embedding_dim, "l2_reg":self.l2_reg})
+      return config
+
+    def call(self, distances):
+
+        # Learned part
+        indices = tf.clip_by_value(distances + self.max_distance, 0, self.vocab_size - 1)
+        learned = self.learned_embedding(indices)  # (T, embedding_dim//2)
+
+        # Sinusoidal part
+        sinusoidal = sinusoidal_temporal_encoding(distances, self.embedding_dim // 2, dtype=learned.dtype)
+
+        # Concatenate
+        return tf.concat([learned, sinusoidal], axis=-1)  # (T, embedding_dim)
+
 
 def get_grad_weight_fun(weight):
     @tf.custom_gradient

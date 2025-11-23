@@ -1,23 +1,29 @@
 from math import ceil
 import tensorflow as tf
 import numpy as np
-from distnet_2d.model.layers import InferenceLayer
+from distnet_2d.model.layers import InferenceLayer, RelativeTemporalEmbedding
 
 
-class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
+class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
+                 skip_connection:bool = False, frame_aware:bool = False, frame_max_distance:int=0,
                  intra_mode: bool = True, inference_idx: int = None, return_list: bool = False,
                  dropout: float = 0.1, l2_reg: float = 0., name="SpatioTemporalAttention"):
         super().__init__(name=name)
         self.num_heads = num_heads
         self.attention_filters = attention_filters
         self.spatial_radius = spatial_radius
+        self.skip_connection=skip_connection
         self.filters = None
         self.dropout = dropout
         self.l2_reg = l2_reg
         self.intra_mode = intra_mode
         self.temporal_dim = None
         self.inference_idx = inference_idx
+        self.frame_aware=frame_aware
+        self.frame_max_distance=frame_max_distance
+        if self.frame_max_distance:
+            assert self.frame_max_distance > 0
         if self.intra_mode:
             assert inference_idx is not None and (
                 min(inference_idx) >= 0 if isinstance(inference_idx, (list, tuple)) else inference_idx >= 0)
@@ -34,14 +40,23 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             "intra_mode": self.intra_mode,
             "inference_idx": self.inference_idx,
             "spatial_radius": self.spatial_radius,
+            "skip_connection": self.skip_connection, 
+            "frame_aware": self.frame_aware, 
+            "frame_max_distance": self.frame_max_distance
         })
         return config
 
     def build(self, input_shape):
         if self.intra_mode:
-            input_shapes = input_shape
+            if self.frame_aware:
+                input_shapes, t_index_shape = input_shape
+            else:
+                input_shapes = input_shape
         else:
-            query_shapes, input_shapes = input_shape
+            if self.frame_aware:
+                query_shapes, input_shapes, timepoints = input_shape
+            else:
+                query_shape, input_shapes = input_shape
         try:
             input_shapes = [s.as_list() for s in input_shapes]
         except:
@@ -78,9 +93,14 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             self.dropout_layer = tf.keras.layers.Dropout(self.dropout)
         self.temp_embedding = tf.keras.layers.Embedding(
             self.temporal_dim,
-            self.filters,
+            Ck,
             embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
             name="TempEnc"
+        ) if not self.frame_aware else RelativeTemporalEmbedding(
+            max(self.temporal_dim, self.frame_max_distance), 
+            Ck,
+            l2_reg = self.l2_reg,
+            name = "TempEnc"
         )
 
         # Per-head spatial embeddings
@@ -90,6 +110,8 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
             name="SpatialPosEnc"
         )
+        if self.skip_connection:
+            self.skipproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=True, name="skip")
 
         # Pre-compute spatial offsets for graph mode compatibility
         spatial_offsets = []
@@ -122,9 +144,15 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
 
     def call(self, x, training: bool = None):
         if self.intra_mode:
-            all_values = x
+            if self.frame_aware:
+                all_values, t_index = x
+            else:
+                all_values = x
         else:
-            query_list, all_values = x
+            if self.frame_aware:
+                query_list, all_values, t_index = x
+            else:
+                query_list, all_values = x
         C = self.filters
         T = self.temporal_dim
         shape = tf.shape(all_values[0]) if self.intra_mode else tf.shape(query_list[0])
@@ -134,21 +162,24 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         Ck = heads * d
 
         # Temporal embeddings
-        t_index = tf.range(T, dtype=tf.int32)
-        t_emb = self.temp_embedding(t_index)  # (T, C)
-
+        if not self.frame_aware:
+            t_index = tf.range(T, dtype=tf.int32)
+        t_emb = self.temp_embedding(t_index) # (T, Ck) or (B, T, Ck)
+        
         # Stack all values and add temporal embeddings for keys
         stacked_values = tf.stack(all_values, axis=1)  # (B, T, H, W, C)
-        t_emb_broadcast = tf.reshape(t_emb, (1, T, 1, 1, C))
-        stacked_keys_with_temp = stacked_values + t_emb_broadcast  # (B, T, H, W, C)
 
         # Project keys and values in one batch
         BT = B * T
-        stacked_keys_resh = tf.reshape(stacked_keys_with_temp, (BT, H, W, C))
         stacked_values_resh = tf.reshape(stacked_values, (BT, H, W, C))
 
-        K_all = tf.reshape(self.kproj(stacked_keys_resh), (B, T, H, W, Ck))
+        K_all = tf.reshape(self.kproj(stacked_values_resh), (B, T, H, W, Ck))
         V_all = tf.reshape(self.vproj(stacked_values_resh), (B, T, H, W, Ck))
+
+        if self.frame_aware:
+            K_all = K_all + tf.reshape(t_emb, (B, T, 1, 1, Ck))
+        else:
+            K_all = K_all + tf.reshape(t_emb, (1, T, 1, 1, Ck))
 
         # Get spatial embeddings
         spatial_indices = tf.range(self.patch_height * self.patch_width, dtype=tf.int32)
@@ -161,15 +192,18 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         # Prepare queries
         if self.intra_mode:
             if self.inference_mode:
-                idx_list = [self.inference_idx] if not isinstance(self.inference_idx,
-                                                                  (list, tuple)) else self.inference_idx
+                idx_list = [self.inference_idx] if not isinstance(self.inference_idx, (list, tuple)) else self.inference_idx
             else:
                 idx_list = list(range(T))
             # Gather queries from stacked values + temporal embeddings
             idx_tensor = tf.constant(idx_list, dtype=tf.int32)
             Qstacked = tf.gather(stacked_values, idx_tensor, axis=1)  # (B, Qcount, H, W, C)
-            q_t_emb = tf.gather(t_emb, idx_tensor)  # (Qcount, C)
-            Qstacked = Qstacked + tf.reshape(q_t_emb, (1, len(idx_list), 1, 1, C))
+            if self.frame_aware:
+                q_t_emb = tf.gather(t_emb, idx_tensor, axis=1)
+                q_t_emb = tf.reshape(q_t_emb, (B, len(idx_list), 1, 1, Ck))
+            else:
+                q_t_emb = tf.gather(t_emb, idx_tensor)  # (Qcount, Ck)
+                q_t_emb = tf.reshape(q_t_emb, (1, len(idx_list), 1, 1, Ck))
         else:
             Qstacked = tf.stack(query_list, axis=1)  # (B, Qcount, H, W, C)
 
@@ -178,6 +212,8 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         Qproj_all = self.qproj(Qresh)  # (B*Qcount, H, W, Ck)
         Qproj_all = tf.reshape(Qproj_all, (B, Qcount, H, W, Ck))
         Qproj_all = Qproj_all + query_spatial_emb  # (B, Qcount, H, W, Ck)
+        if self.intra_mode: # add temp embedding
+            Qproj_all = Qproj_all + q_t_emb
         Qproj_all = tf.reshape(Qproj_all, (B, Qcount, H, W, heads, d))
 
         cy_grid, cx_grid = self._compute_center_indices(H, W)
@@ -187,12 +223,12 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         t_idx = tf.tile(tf.range(T, dtype=tf.int32)[None, :, None, None], [B, 1, H, W])
 
         # Scaling factor
-        scale = tf.math.rsqrt(tf.cast(d, tf.float32))
+        scale = tf.math.rsqrt(tf.cast(d, Qproj_all.dtype))
 
         # PASS 1: Compute scores using TensorArray
         scores_array = tf.TensorArray(dtype=Qproj_all.dtype, size=self.num_spatial, dynamic_size=False)
 
-        for s_idx in tf.range(self.num_spatial):
+        for s_idx in range(self.num_spatial):
             dy = self.spatial_offsets[s_idx, 0]
             dx = self.spatial_offsets[s_idx, 1]
 
@@ -231,7 +267,7 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         # PASS 2: Accumulate weighted values
         out_acc = tf.zeros((B, Qcount, H, W, heads, d), dtype=Qproj_all.dtype)
 
-        for s_idx in tf.range(self.num_spatial):
+        for s_idx in range(self.num_spatial):
             dy = self.spatial_offsets[s_idx, 0]
             dx = self.spatial_offsets[s_idx, 1]
 
@@ -255,6 +291,374 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         # Output projection
         out_acc = tf.reshape(out_acc, (B * Qcount, H, W, Ck))
         out = self.outproj(out_acc)
+        if self.skip_connection:
+            out = tf.concat([out, Qresh], axis=-1)
+            out = self.skipproj(out)
+        out = tf.reshape(out, (B, Qcount, H, W, C))
+
+        # Unstack outputs
+        attention_output_list = tf.unstack(out, axis=1)
+
+        if self.return_list:
+            return attention_output_list
+        if self.inference_mode and not isinstance(self.inference_idx, (list, tuple)):
+            return attention_output_list[0]
+        else:
+            return tf.concat(attention_output_list, 0)
+
+
+class LocalSpatioTemporalAttentionPatch(InferenceLayer, tf.keras.layers.Layer):
+    """
+    Spatio-temporal attention using extract_patches for fast parallelization.
+    Uses einsum operations instead of MultiHeadAttention for better performance.
+
+    Key features:
+    - Extracts all spatial patches upfront using tf.image.extract_patches
+    - Uses einsum for efficient batched attention computation
+    - Positional encoding added AFTER projection (in attention space)
+    - 2-4x faster than loop version
+    - ~3x more memory than loop version
+    - Fully compatible with variable image dimensions (FCN)
+
+    Args:
+        num_heads: Number of attention heads
+        attention_filters: Number of filters per head (auto if 0)
+        spatial_radius: (radius_y, radius_x) defining neighborhood size
+        intra_mode: if True, queries from same sequence; else separate query list
+        inference_idx: index(es) for inference mode
+        return_list: whether to return list or concatenated tensor
+        dropout: dropout rate
+        l2_reg: L2 regularization for embeddings
+    """
+
+    def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
+                 skip_connection: bool = False, frame_aware: bool = False, frame_max_distance: int = 0,
+                 intra_mode: bool = True, inference_idx: int = None, return_list: bool = False,
+                 dropout: float = 0.1, l2_reg: float = 0., name="SpatioTemporalAttentionHighMem"):
+        super().__init__(name=name)
+        self.num_heads = num_heads
+        self.attention_filters = attention_filters
+        self.spatial_radius = spatial_radius
+        self.filters = None
+        self.dropout = dropout
+        self.l2_reg = l2_reg
+        self.intra_mode = intra_mode
+        self.temporal_dim = None
+        self.skip_connection = skip_connection
+        self.inference_idx = inference_idx
+        self.frame_aware = frame_aware
+        self.frame_max_distance = frame_max_distance
+        if self.intra_mode:
+            assert inference_idx is not None and (
+                min(inference_idx) >= 0 if isinstance(inference_idx, (list, tuple)) else inference_idx >= 0)
+        self.return_list = return_list
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "num_heads": self.num_heads,
+            "dropout": self.dropout,
+            "filters": self.filters,
+            "l2_reg": self.l2_reg,
+            "return_list": self.return_list,
+            "intra_mode": self.intra_mode,
+            "inference_idx": self.inference_idx,
+            "spatial_radius": self.spatial_radius,
+            "attention_filters": self.attention_filters,
+            "skip_connection": self.skip_connection,
+            "frame_aware": self.frame_aware,
+            "frame_max_distance": self.frame_max_distance
+        })
+        return config
+
+    def build(self, input_shape):
+        if self.intra_mode:
+            if self.frame_aware:
+                input_shapes, t_index_shape = input_shape
+            else:
+                input_shapes = input_shape
+        else:
+            if self.frame_aware:
+                query_shapes, input_shapes, timepoints = input_shape
+            else:
+                query_shape, input_shapes = input_shape
+        try:
+            input_shapes = [s.as_list() for s in input_shapes]
+        except:
+            pass
+        input_shape = input_shapes[0]
+        for s in input_shapes[1:]:
+            assert len(s) == len(input_shape) and all(i == j for i, j in zip(input_shape, s)), \
+                f"all tensors must have same input shape: {input_shape} != {s}"
+        if not self.intra_mode:
+            query_shape = query_shapes[0]
+            if len(query_shapes) > 1:
+                for s in query_shapes[1:]:
+                    assert len(s) == len(query_shape) and all(i == j for i, j in zip(query_shape, s)), \
+                        f"all query tensors must have same input shape: {query_shape} != {s}"
+            try:
+                query_shape = query_shape[0].as_list()
+            except:
+                pass
+
+        self.spatial_dims = input_shape[1:-1]
+        self.temporal_dim = len(input_shapes)
+        self.filters = input_shape[-1]
+
+        if self.attention_filters is None or self.attention_filters <= 0:
+            self.attention_filters = int(self.filters / self.num_heads)
+
+        self.radius_y, self.radius_x = self.spatial_radius
+        self.patch_height = 2 * self.radius_y + 1
+        self.patch_width = 2 * self.radius_x + 1
+        self.neighborhood_size = self.patch_height * self.patch_width * self.temporal_dim
+
+        Ck = self.num_heads * self.attention_filters
+
+        # Projection layers
+        self.qproj = tf.keras.layers.Conv2D(Ck, 1, padding='same', use_bias=False, name="qproj")
+        self.kproj = tf.keras.layers.Conv2D(Ck, 1, padding='same', use_bias=False, name="kproj")
+        self.vproj = tf.keras.layers.Conv2D(Ck, 1, padding='same', use_bias=False, name="vproj")
+        self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=False, name="outproj")
+
+        if self.dropout > 0:
+            self.dropout_layer = tf.keras.layers.Dropout(self.dropout)
+
+        # Temporal embeddings
+        self.temp_embedding = tf.keras.layers.Embedding(
+            self.temporal_dim,
+            Ck,
+            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            name="TempEnc"
+        )
+
+        # Spatial positional embeddings (in Ck space, added after projection)
+        self.spatial_pos_embedding = tf.keras.layers.Embedding(
+            self.patch_height * self.patch_width,
+            Ck,
+            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            name="SpatialPosEnc"
+        )
+        if self.skip_connection:
+            self.skipproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=True, name="skip")
+        super().build(input_shape)
+
+    def _get_query_spatial_indices(self, H, W):
+        """Get spatial positional indices for queries."""
+        y_coords = tf.range(H, dtype=tf.int32)
+        x_coords = tf.range(W, dtype=tf.int32)
+        y_patch_center = tf.clip_by_value(y_coords, self.radius_y, H - self.radius_y - 1)
+        x_patch_center = tf.clip_by_value(x_coords, self.radius_x, W - self.radius_x - 1)
+        y_relative = y_coords - y_patch_center + self.radius_y
+        x_relative = x_coords - x_patch_center + self.radius_x
+        y_grid, x_grid = tf.meshgrid(y_relative, x_relative, indexing='ij')
+        spatial_indices = y_grid * self.patch_width + x_grid
+        return spatial_indices
+
+    def _extract_patches_with_edge_handling(self, tensor):
+        """
+        Extract spatial patches with edge handling.
+
+        Args:
+            tensor: (B, H, W, C) or (B, T, H, W, C)
+
+        Returns:
+            patches: (B, H, W, patch_size, C) or (B, T, H, W, patch_size, C)
+        """
+        input_shape = tf.shape(tensor)
+        ndims = len(tensor.shape)
+
+        if ndims == 5:  # (B, T, H, W, C)
+            B, T = input_shape[0], input_shape[1]
+            H, W, C = input_shape[2], input_shape[3], input_shape[4]
+            # Merge B and T for patch extraction
+            tensor_merged = tf.reshape(tensor, [B * T, H, W, C])
+        else:  # (B, H, W, C)
+            B = input_shape[0]
+            H, W, C = input_shape[1], input_shape[2], input_shape[3]
+            tensor_merged = tensor
+
+        # Extract patches with VALID padding
+        patches_valid = tf.image.extract_patches(
+            images=tensor_merged,
+            sizes=[1, self.patch_height, self.patch_width, 1],
+            strides=[1, 1, 1, 1],
+            rates=[1, 1, 1, 1],
+            padding='VALID'
+        )
+
+        H_valid = H - 2 * self.radius_y
+        W_valid = W - 2 * self.radius_x
+        patch_size = self.patch_height * self.patch_width
+
+        if ndims == 5:
+            patches_valid = tf.reshape(patches_valid, [B, T, H_valid, W_valid, patch_size, C])
+        else:
+            patches_valid = tf.reshape(patches_valid, [B, H_valid, W_valid, patch_size, C])
+
+        # Create index mapping for edge handling
+        y_indices = tf.range(H, dtype=tf.int32)
+        y_indices = tf.clip_by_value(y_indices, self.radius_y, H - self.radius_y - 1)
+        y_indices = y_indices - self.radius_y
+
+        x_indices = tf.range(W, dtype=tf.int32)
+        x_indices = tf.clip_by_value(x_indices, self.radius_x, W - self.radius_x - 1)
+        x_indices = x_indices - self.radius_x
+
+        y_grid, x_grid = tf.meshgrid(y_indices, x_indices, indexing='ij')
+
+        if ndims == 5:
+            # Create indices for (B, T, H, W)
+            batch_indices = tf.range(B, dtype=tf.int32)
+            batch_indices = tf.reshape(batch_indices, [B, 1, 1, 1])
+            batch_indices = tf.tile(batch_indices, [1, T, H, W])
+
+            time_indices = tf.range(T, dtype=tf.int32)
+            time_indices = tf.reshape(time_indices, [1, T, 1, 1])
+            time_indices = tf.tile(time_indices, [B, 1, H, W])
+
+            y_grid_expanded = tf.tile(tf.reshape(y_grid, [1, 1, H, W]), [B, T, 1, 1])
+            x_grid_expanded = tf.tile(tf.reshape(x_grid, [1, 1, H, W]), [B, T, 1, 1])
+
+            indices = tf.stack([batch_indices, time_indices, y_grid_expanded, x_grid_expanded], axis=-1)
+        else:
+            # Create indices for (B, H, W)
+            batch_indices = tf.range(B, dtype=tf.int32)
+            batch_indices = tf.reshape(batch_indices, [B, 1, 1])
+            batch_indices = tf.tile(batch_indices, [1, H, W])
+
+            y_grid_expanded = tf.tile(tf.expand_dims(y_grid, 0), [B, 1, 1])
+            x_grid_expanded = tf.tile(tf.expand_dims(x_grid, 0), [B, 1, 1])
+
+            indices = tf.stack([batch_indices, y_grid_expanded, x_grid_expanded], axis=-1)
+
+        patches_full = tf.gather_nd(patches_valid, indices)
+        return patches_full
+
+    def call(self, x, training: bool = None):
+        if self.intra_mode:
+            if self.frame_aware:
+                all_values, t_index = x
+            else:
+                all_values = x
+        else:
+            if self.frame_aware:
+                query_list, all_values, t_index = x
+            else:
+                query_list, all_values = x
+
+        C = self.filters
+        T = self.temporal_dim
+        shape = tf.shape(all_values[0]) if self.intra_mode else tf.shape(query_list[0])
+        B, H, W = shape[0], shape[1], shape[2]
+        heads = self.num_heads
+        d = self.attention_filters
+        Ck = heads * d
+
+        stacked_values = tf.stack(all_values, axis=1)  # (B, T, H, W, C)
+
+        # Project keys and values
+        BT = B * T
+        stacked_values_resh = tf.reshape(stacked_values, (BT, H, W, C))
+
+        K_all = tf.reshape(self.kproj(stacked_values_resh), (B, T, H, W, Ck))
+        V_all = tf.reshape(self.vproj(stacked_values_resh), (B, T, H, W, Ck))
+
+        # Temporal embeddings
+        if not self.frame_aware:
+            t_index = tf.range(T, dtype=tf.int32)
+        t_emb = self.temp_embedding(t_index)  # (T, Ck)
+
+        if self.frame_aware:
+            K_all = K_all + tf.reshape(t_emb, (B, T, 1, 1, Ck))
+        else:
+            K_all = K_all + tf.reshape(t_emb, (1, T, 1, 1, Ck))
+
+        # Extract spatial patches for K and V
+        # K_all, V_all: (B, T, H, W, Ck)
+        K_patches = self._extract_patches_with_edge_handling(K_all)  # (B, T, H, W, patch_size, Ck)
+        V_patches = self._extract_patches_with_edge_handling(V_all)  # (B, T, H, W, patch_size, Ck)
+
+        # Add spatial positional embeddings to key patches
+        spatial_indices = tf.range(self.patch_height * self.patch_width, dtype=tf.int32)
+        key_spatial_emb = self.spatial_pos_embedding(spatial_indices)  # (patch_size, Ck)
+        key_spatial_emb = tf.reshape(key_spatial_emb, (1, 1, 1, 1, self.patch_height * self.patch_width, Ck))
+
+        K_patches = K_patches + key_spatial_emb  # (B, T, H, W, patch_size, Ck)
+
+        # Reshape patches: (B, T, H, W, patch_size, Ck) -> (B, H, W, T*patch_size, Ck)
+        K_patches = tf.transpose(K_patches, [0, 2, 3, 1, 4, 5])  # (B, H, W, T, patch_size, Ck)
+        V_patches = tf.transpose(V_patches, [0, 2, 3, 1, 4, 5])
+
+        K_patches = tf.reshape(K_patches, [B, H, W, T * self.patch_height * self.patch_width, Ck])
+        V_patches = tf.reshape(V_patches, [B, H, W, T * self.patch_height * self.patch_width, Ck])
+
+        # Reshape for multi-head attention
+        K_patches = tf.reshape(K_patches, [B, H, W, self.neighborhood_size, heads, d])
+        V_patches = tf.reshape(V_patches, [B, H, W, self.neighborhood_size, heads, d])
+
+        # Prepare queries
+        if self.intra_mode:
+            if self.inference_mode:
+                idx_list = [self.inference_idx] if not isinstance(self.inference_idx,  (list, tuple)) else self.inference_idx
+            else:
+                idx_list = list(range(T))
+            # Gather queries from stacked values + temporal embeddings
+            idx_tensor = tf.constant(idx_list, dtype=tf.int32)
+            Qstacked = tf.gather(stacked_values, idx_tensor, axis=1)  # (B, Qcount, H, W, C)
+            if self.frame_aware:
+                q_t_emb = tf.gather(t_emb, idx_tensor, axis=1)
+                q_t_emb = tf.reshape(q_t_emb, (B, len(idx_list), 1, 1, Ck))
+            else:
+                q_t_emb = tf.gather(t_emb, idx_tensor)  # (Qcount, Ck)
+                q_t_emb = tf.reshape(q_t_emb, (1, len(idx_list), 1, 1, Ck))
+        else:
+            Qstacked = tf.stack(query_list, axis=1)  # (B, Qcount, H, W, C)
+
+        Qcount = Qstacked.shape[1] if Qstacked.shape[1] is not None else tf.shape(Qstacked)[1]
+
+        # Project queries
+        Qresh = tf.reshape(Qstacked, (B * Qcount, H, W, C))
+        Qproj_all = self.qproj(Qresh)  # (B*Qcount, H, W, Ck)
+        Qproj_all = tf.reshape(Qproj_all, (B, Qcount, H, W, Ck))
+        if self.intra_mode:
+            Qproj_all = Qproj_all + q_t_emb
+
+        # Add query spatial positional embeddings
+        query_spatial_indices = self._get_query_spatial_indices(H, W)  # (H, W)
+        query_spatial_emb = self.spatial_pos_embedding(query_spatial_indices)  # (H, W, Ck)
+        query_spatial_emb = tf.reshape(query_spatial_emb, (1, 1, H, W, Ck))
+
+        Qproj_all = Qproj_all + query_spatial_emb  # (B, Qcount, H, W, Ck)
+        Qproj_all = tf.reshape(Qproj_all, (B, Qcount, H, W, heads, d))
+
+        # Compute attention scores using einsum
+        # Q: (B, Qcount, H, W, heads, d)
+        # K: (B, H, W, neighborhood_size, heads, d)
+        # Output: (B, Qcount, H, W, heads, neighborhood_size)
+
+        scale = tf.math.rsqrt(tf.cast(d, Qproj_all.dtype))
+        scores = tf.einsum('bqhwnd,bhwknd->bqhwnk', Qproj_all, K_patches) * scale
+
+        # Softmax
+        weights = tf.nn.softmax(scores, axis=-1)  # (B, Qcount, H, W, heads, neighborhood_size)
+
+        if self.dropout > 0 and training:
+            weights = self.dropout_layer(weights, training=training)
+
+        # Apply attention to values
+        # weights: (B, Qcount, H, W, heads, neighborhood_size)
+        # V: (B, H, W, neighborhood_size, heads, d)
+        # Output: (B, Qcount, H, W, heads, d)
+
+        out = tf.einsum('bqhwnk,bhwknd->bqhwnd', weights, V_patches)
+
+        # Reshape and project output
+        out = tf.reshape(out, (B * Qcount, H, W, Ck))
+        out = self.outproj(out)
+        if self.skip_connection:
+            out = tf.concat([out, Qresh], axis=-1)
+            out = self.skipproj(out)
         out = tf.reshape(out, (B, Qcount, H, W, C))
 
         # Unstack outputs
@@ -269,8 +673,9 @@ class SpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
 
 
 # faster but with high-memory footprint
-class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
+class LocalSpatioTemporalAttentionPatchKeras(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
+                 skip_connection: bool = False, frame_aware: bool = False, frame_max_distance: int = 0,
                  intra_mode: bool = True, inference_idx: int = None, return_list: bool = False,
                  dropout: float = 0.1, l2_reg: float = 0., name="SpatioTemporalAttention"):
         '''
@@ -297,7 +702,10 @@ class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
         self.l2_reg = l2_reg
         self.intra_mode = intra_mode
         self.temporal_dim = None
+        self.skip_connection = skip_connection
         self.inference_idx = inference_idx
+        self.frame_aware = frame_aware
+        self.frame_max_distance = frame_max_distance
         if self.intra_mode:
             assert inference_idx is not None and (
                 min(inference_idx) >= 0 if isinstance(inference_idx, (list, tuple)) else inference_idx >= 0)
@@ -313,15 +721,24 @@ class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
             "return_list": self.return_list,
             "intra_mode": self.intra_mode,
             "inference_idx": self.inference_idx,
-            "spatial_radius": self.spatial_radius
+            "spatial_radius": self.spatial_radius,
+            "skip_connection": self.skip_connection,
+            "frame_aware": self.frame_aware,
+            "frame_max_distance": self.frame_max_distance
         })
         return config
 
     def build(self, input_shape):
         if self.intra_mode:
-            input_shapes = input_shape
+            if self.frame_aware:
+                input_shapes, t_index_shape = input_shape
+            else:
+                input_shapes = input_shape
         else:
-            query_shapes, input_shapes = input_shape
+            if self.frame_aware:
+                query_shapes, input_shapes, timepoints = input_shape
+            else:
+                query_shape, input_shapes = input_shape
 
         try:
             input_shapes = [s.as_list() for s in input_shapes]
@@ -384,7 +801,8 @@ class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
             embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
             name="SpatialPosEnc"
         )
-
+        if self.skip_connection:
+            self.skipproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=True, name="skip")
         super().build(input_shape)
 
     def _get_query_spatial_indices(self, H, W):
@@ -501,9 +919,15 @@ class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
            H and W can be None (variable dimensions)
         '''
         if self.intra_mode:
-            all_values = x
+            if self.frame_aware:
+                all_values, t_index = x
+            else:
+                all_values = x
         else:
-            query_list, all_values = x
+            if self.frame_aware:
+                query_list, all_values, t_index = x
+            else:
+                query_list, all_values = x
 
         C = self.filters
         T = self.temporal_dim
@@ -511,7 +935,8 @@ class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
         B, H, W = shape[0], shape[1], shape[2]
 
         # Temporal embeddings
-        t_index = tf.range(T, dtype=tf.int32)
+        if not self.frame_aware:
+            t_index = tf.range(T, dtype=tf.int32)
         t_emb = self.temp_embedding(t_index)  # (T, C)
 
         # Add temporal embeddings to keys (but not values)
@@ -593,7 +1018,16 @@ class SpatioTemporalAttentionHighMem(InferenceLayer, tf.keras.layers.Layer):
             # Reshape back to spatial dimensions
             attention_output = tf.reshape(attention_output, [B, H, W, C])
             attention_output_list.append(attention_output)
-
+        if self.skip_connection:
+            out = tf.concat(attention_output_list, axis=0) # Q*B, H, W, C
+            queries = tf.concat(query_list, axis=0) # Q*B, H, W, C
+            out = tf.concat([out, queries], axis=-1)
+            out = self.skipproj(out)
+            if not self.return_list:
+                return out
+            else:
+                out = tf.reshape(out, (-1, B, H, W, C))
+                return tf.unstack(out, axis=0)
         if self.return_list:
             return attention_output_list
         if self.inference_mode and not isinstance(self.inference_idx, (list, tuple)):

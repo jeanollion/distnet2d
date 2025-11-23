@@ -1,85 +1,107 @@
-from distnet_2d.model.regional_spatial_attention import RegionalSpatialAttentionHighMem, RegionalSpatialAttention, \
-    RegionalSpatialAttentionHighMem2
-from distnet_2d.model.spatiotemporal_attention import SpatioTemporalAttention, SpatioTemporalAttentionHighMem
+from distnet_2d.model.regional_spatial_attention import LocalSpatialAttentionPatchKeras, LocalSpatialAttention, \
+    LocalSpatialAttentionPatch
+from distnet_2d.model.spatiotemporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatchKeras, \
+    LocalSpatioTemporalAttentionPatch
 import tensorflow as tf
 import numpy as np
 
 
-def copy_sta_weights_to_conv(src_layer, dst_layer):
-    """Copy weights from SpatioTemporalAttention to ConvSpatioTemporalAttention."""
-    if hasattr(src_layer, "temp_embedding"): # Copy temporal embeddings
+def copy_spatio_temporal_att_weights(src_layer, dst_layer, keras_att:bool):
+    """Copy weights from SpatioTemporalAttentionHighMem to SpatioTemporalAttention."""
+    if keras_att:
+        # zero out temporal embdedding for both layers to enable comparison
+        # (since they're added at different stages in the pipeline)
+        src_spatial_weights = src_layer.temp_embedding.get_weights()
+        dst_spatial_weights = dst_layer.temp_embedding.get_weights()
+
+        # Set to zeros
+        src_spatial_weights[0] = np.zeros_like(src_spatial_weights[0])
+        dst_spatial_weights[0] = np.zeros_like(dst_spatial_weights[0])
+
+        src_layer.temp_embedding.set_weights(src_spatial_weights)
+        dst_layer.temp_embedding.set_weights(dst_spatial_weights)
+    else:
         dst_layer.temp_embedding.set_weights(src_layer.temp_embedding.get_weights())
 
-    # Zero out spatial positional embeddings for both layers to enable comparison
-    # (since they're added at different stages in the pipeline)
-    src_spatial_weights = src_layer.spatial_pos_embedding.get_weights()
-    dst_spatial_weights = dst_layer.spatial_pos_embedding.get_weights()
+    if keras_att:
+        # Zero out spatial positional embeddings for both layers to enable comparison
+        # (since they're added at different stages in the pipeline)
+        src_spatial_weights = src_layer.spatial_pos_embedding.get_weights()
+        dst_spatial_weights = dst_layer.spatial_pos_embedding.get_weights()
 
-    # Set to zeros
-    src_spatial_weights[0] = np.zeros_like(src_spatial_weights[0])
-    dst_spatial_weights[0] = np.zeros_like(dst_spatial_weights[0])
+        # Set to zeros
+        src_spatial_weights[0] = np.zeros_like(src_spatial_weights[0])
+        dst_spatial_weights[0] = np.zeros_like(dst_spatial_weights[0])
 
-    src_layer.spatial_pos_embedding.set_weights(src_spatial_weights)
-    dst_layer.spatial_pos_embedding.set_weights(dst_spatial_weights)
+        src_layer.spatial_pos_embedding.set_weights(src_spatial_weights)
+        dst_layer.spatial_pos_embedding.set_weights(dst_spatial_weights)
 
-    # Copy MHA weights to conv projections
-    mha = src_layer.attention_layer
+    if keras_att:
+        # Copy MHA weights to conv projections
+        mha = src_layer.attention_layer
 
-    # Extract MHA kernels
-    # MultiHeadAttention uses key_dim per head, not attention_filters
-    # Total dim = num_heads * key_dim
-    W_q = mha._query_dense.kernel.numpy()  # (C_in, num_heads, key_dim)
-    W_k = mha._key_dense.kernel.numpy()  # (C_in, num_heads, key_dim)
-    W_v = mha._value_dense.kernel.numpy()  # (C_in, num_heads, key_dim)
-    W_o = mha._output_dense.kernel.numpy()  # (num_heads * key_dim, C_out)
+        # Extract MHA kernels
+        # MultiHeadAttention uses key_dim per head, not attention_filters
+        # Total dim = num_heads * key_dim
+        W_q = mha._query_dense.kernel.numpy()  # (C_in, num_heads, key_dim)
+        W_k = mha._key_dense.kernel.numpy()  # (C_in, num_heads, key_dim)
+        W_v = mha._value_dense.kernel.numpy()  # (C_in, num_heads, key_dim)
+        W_o = mha._output_dense.kernel.numpy()  # (num_heads * key_dim, C_out)
 
-    print(f"MHA weight shapes:")
-    print(f"  W_q: {W_q.shape}")
-    print(f"  W_k: {W_k.shape}")
-    print(f"  W_v: {W_v.shape}")
-    print(f"  W_o: {W_o.shape}")
+        print(f"MHA weight shapes:")
+        print(f"  W_q: {W_q.shape}")
+        print(f"  W_k: {W_k.shape}")
+        print(f"  W_v: {W_v.shape}")
+        print(f"  W_o: {W_o.shape}")
 
-    # Get dimensions
-    C_in = W_q.shape[0]
-    Ck = W_q.shape[1] * W_q.shape[2]  # num_heads * key_dim
+        # Get dimensions
+        C_in = W_q.shape[0]
+        Ck = W_q.shape[1] * W_q.shape[2]  # num_heads * key_dim
 
-    print(f"Conv layer expected shapes:")
-    print(f"  C_in: {C_in}")
-    print(f"  Ck (num_heads * key_dim): {Ck}")
-    print(f"  dst num_heads: {dst_layer.num_heads}")
-    print(f"  dst attention_filters: {dst_layer.attention_filters}")
-    print(f"  Expected Ck: {dst_layer.num_heads * dst_layer.attention_filters}")
+        print(f"Conv layer expected shapes:")
+        print(f"  C_in: {C_in}")
+        print(f"  Ck (num_heads * key_dim): {Ck}")
+        print(f"  dst num_heads: {dst_layer.num_heads}")
+        print(f"  dst attention_filters: {dst_layer.attention_filters}")
+        print(f"  Expected Ck: {dst_layer.num_heads * dst_layer.attention_filters}")
 
-    # Verify dimensions match
-    expected_Ck = dst_layer.num_heads * dst_layer.attention_filters
-    if Ck != expected_Ck:
-        raise ValueError(
-            f"Dimension mismatch: MHA has {Ck} features "
-            f"but Conv layer expects {expected_Ck} "
-            f"(num_heads={dst_layer.num_heads} * attention_filters={dst_layer.attention_filters})"
-        )
+        # Verify dimensions match
+        expected_Ck = dst_layer.num_heads * dst_layer.attention_filters
+        if Ck != expected_Ck:
+            raise ValueError(
+                f"Dimension mismatch: MHA has {Ck} features "
+                f"but Conv layer expects {expected_Ck} "
+                f"(num_heads={dst_layer.num_heads} * attention_filters={dst_layer.attention_filters})"
+            )
 
-    # Reshape to (1, 1, C_in, C_out) for Conv2D
-    W_q_conv = W_q.reshape(1, 1, C_in, Ck)
-    W_k_conv = W_k.reshape(1, 1, C_in, Ck)
-    W_v_conv = W_v.reshape(1, 1, C_in, Ck)
-    W_o_conv = W_o.reshape(1, 1, Ck, C_in)  # Output back to C_in
+        # Reshape to (1, 1, C_in, C_out) for Conv2D
+        W_q_conv = W_q.reshape(1, 1, C_in, Ck)
+        W_k_conv = W_k.reshape(1, 1, C_in, Ck)
+        W_v_conv = W_v.reshape(1, 1, C_in, Ck)
+        W_o_conv = W_o.reshape(1, 1, Ck, C_in)  # Output back to C_in
 
-    # Assign weights to conv layers
-    dst_layer.qproj.set_weights([W_q_conv])
-    dst_layer.kproj.set_weights([W_k_conv])
-    dst_layer.vproj.set_weights([W_v_conv])
-    dst_layer.outproj.set_weights([W_o_conv])
+        # Assign weights to conv layers
+        dst_layer.qproj.set_weights([W_q_conv])
+        dst_layer.kproj.set_weights([W_k_conv])
+        dst_layer.vproj.set_weights([W_v_conv])
+        dst_layer.outproj.set_weights([W_o_conv])
 
+        if src_layer.skip_connection:
+            dst_layer.skipproj.kernel.assign(src_layer.skipproj.kernel)
+            dst_layer.skipproj.bias.assign(src_layer.skipproj.bias)
+    else:
+        print("Copying weights for fair comparison...")
+        for src_w, dst_w in zip(src_layer.trainable_weights, dst_layer.trainable_weights):
+            dst_w.assign(src_w)
     print("✓ Weights copied successfully")
 
 
-def test_equivalence_patch_vs_efficient():
+def compare_spatiotemporal_versions(keras_att:bool):
     """
     Test equivalence between patch-based version and efficient conv version.
     """
     print("=" * 80)
-    print("TEST: Patch vs Efficient Conv Equivalence")
+    print(f"TEST: HighMem {'KERAS' if keras_att else ''} vs Loop Conv Equivalence")
     print("=" * 80 + "\n")
 
     # Parameters
@@ -97,17 +119,25 @@ def test_equivalence_patch_vs_efficient():
 
     # Create layers without specifying attention_filters
     print("Creating layers...")
-    patch_layer = SpatioTemporalAttentionHighMem(
+    patch_layer = LocalSpatioTemporalAttentionPatchKeras(
         num_heads=num_heads,
         attention_filters=attention_filters,  # Auto-calculate
         spatial_radius=(ry, rx),
+        skip_connection=True,
         inference_idx=1,
         dropout=0.0
-    )
-    efficient_layer = SpatioTemporalAttention(
+    ) if keras_att else LocalSpatioTemporalAttentionPatch(num_heads=num_heads,
+                                                          attention_filters=attention_filters,  # Auto-calculate
+                                                          spatial_radius=(ry, rx),
+                                                          skip_connection=True,
+                                                          inference_idx=1,
+                                                          dropout=0.0)
+
+    efficient_layer = LocalSpatioTemporalAttention(
         num_heads=num_heads,
         attention_filters=attention_filters,  # Auto-calculate
         spatial_radius=(ry, rx),
+        skip_connection=True,
         inference_idx=1,
         dropout=0.0
     )
@@ -130,7 +160,7 @@ def test_equivalence_patch_vs_efficient():
     # Copy weights (including zeroing out spatial embeddings)
     print("\nCopying embeddings and attention weights...")
     print("Setting spatial positional embeddings to zero for both layers...")
-    copy_sta_weights_to_conv(patch_layer, efficient_layer)
+    copy_spatio_temporal_att_weights(patch_layer, efficient_layer, keras_att)
 
     # Run forward pass
     print("\nRunning forward pass on both layers...")
@@ -140,6 +170,7 @@ def test_equivalence_patch_vs_efficient():
     # Compare
     out_patch_np = out_patch.numpy()
     out_efficient_np = out_efficient.numpy()
+    print(f"patch shape: {out_patch_np.shape} loop shape: {out_efficient_np.shape}")
     abs_diff = np.abs(out_patch_np - out_efficient_np)
     max_diff = np.max(abs_diff)
     mean_diff = np.mean(abs_diff)
@@ -534,6 +565,10 @@ def copy_regional_weights(src_layer, dst_layer, zero_spatial_embeddings=True, ke
         mha._key_dense.kernel.assign(W_k_mha)
         mha._value_dense.kernel.assign(W_v_mha)
         mha._output_dense.kernel.assign(W_o_mha)
+
+        if src_layer.skip_connection:
+            dst_layer.skipproj.kernel.assign(src_layer.skipproj.kernel)
+            dst_layer.skipproj.bias.assign(src_layer.skipproj.bias)
     else:
         print("Copying weights for fair comparison...")
         for loop_w, highmem_w in zip(src_layer.trainable_weights, dst_layer.trainable_weights):
@@ -571,19 +606,20 @@ def compare_regional_versions(keras_att:bool):
     # Create both versions
     print("\n" + "-" * 80)
     print("Creating layers...")
-    loop_layer = RegionalSpatialAttention(
+    loop_layer = LocalSpatialAttention(
         num_heads=num_heads,
         spatial_radius=radius,
+        skip_connection=not keras_att,
         dropout=0.0,
         name="LoopVersion"
     )
 
-    highmem_layer = RegionalSpatialAttentionHighMem(
+    highmem_layer = LocalSpatialAttentionPatchKeras(
         num_heads=num_heads,
         spatial_radius=radius,
         dropout=0.0,
         name="HighMemVersion"
-    ) if keras_att else RegionalSpatialAttentionHighMem2(num_heads=num_heads, spatial_radius=radius)
+    ) if keras_att else LocalSpatialAttentionPatch(num_heads=num_heads, spatial_radius=radius, skip_connection=True)
 
     # Build layers
     print("Building layers...")
@@ -593,7 +629,7 @@ def compare_regional_versions(keras_att:bool):
     # Copy weights
     print("\n" + "-" * 80)
     print("Copying weights from loop to HighMem version...")
-    copy_regional_weights(loop_layer, highmem_layer, zero_spatial_embeddings=True, keras_att=keras_att)
+    copy_regional_weights(loop_layer, highmem_layer, zero_spatial_embeddings=keras_att, keras_att=keras_att)
 
 
 
@@ -714,10 +750,11 @@ def compare_regional_versions(keras_att:bool):
 
 
 if __name__ == "__main__":
-    compare_regional_versions(False)
-    compare_regional_versions(True)
+    #compare_regional_versions(False)
+    #compare_regional_versions(True)
 
-    test_equivalence_patch_vs_efficient()
+    compare_spatiotemporal_versions(False)
+    compare_spatiotemporal_versions(True)
 
     print("\n")
     print("█" * 80)
