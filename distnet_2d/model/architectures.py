@@ -368,28 +368,28 @@ class TemA(ArchBase):
         self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
         self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
         # to be defined:
-        self.temporal_attention_spatial_radius = None
+        self.attention_spatial_radius = None
 
 class TemAD2(TemA, D2):
-    def __init__(self, temporal_attention_spatial_radius:int, **kwargs):
+    def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=5, **kwargs)
-        self.temporal_attention_spatial_radius = limit_radius(temporal_attention_spatial_radius, self.spatial_dimensions, 2**2)
-        if self.temporal_attention_spatial_radius != temporal_attention_spatial_radius:
-            print(f"tempAtt rad: {self.temporal_attention_spatial_radius}")
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2)
+        if self.attention_spatial_radius != attention_spatial_radius:
+            print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemAD3(TemA, D3):
-    def __init__(self, temporal_attention_spatial_radius:int, **kwargs):
+    def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=5, **kwargs)
-        self.temporal_attention_spatial_radius = limit_radius(temporal_attention_spatial_radius, self.spatial_dimensions, 2**3)
-        if self.temporal_attention_spatial_radius != temporal_attention_spatial_radius:
-            print(f"tempAtt rad: {self.temporal_attention_spatial_radius}")
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3)
+        if self.attention_spatial_radius != attention_spatial_radius:
+            print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemAD4(TemA, D4):
-    def __init__(self, temporal_attention_spatial_radius:int, **kwargs):
+    def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=5, **kwargs)
-        self.temporal_attention_spatial_radius = limit_radius(temporal_attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
-        if self.temporal_attention_spatial_radius != temporal_attention_spatial_radius:
-            print(f"tempAtt rad: {self.temporal_attention_spatial_radius}")
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
+        if self.attention_spatial_radius != attention_spatial_radius:
+            print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, downsampling):
     if spa_dimensions is None:

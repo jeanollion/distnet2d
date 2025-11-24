@@ -3,9 +3,15 @@ import numpy as np
 
 
 class LocalSpatialAttention(tf.keras.layers.Layer):
-    def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2), dropout: float = 0.1,
-                 skip_connection:bool=False,
-                 l2_reg: float = 0., name="RegionalSpatialAttention"):
+    """
+    Optimized spatial attention - fast and memory efficient.
+    Key optimization for speed: loop over spatial neighbors, rest of operation is vectorized
+    Key optimization for memory: online softmax (value accumulation, no score stored)
+    """
+
+    def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
+                 dropout: float = 0.1, skip_connection: bool = False, l2_reg: float = 0.,
+                 use_online_softmax: bool = False, name="LocalSpatialAttention"):
         super().__init__(name=name)
         self.num_heads = num_heads
         self.attention_filters = attention_filters
@@ -14,6 +20,7 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
         self.dropout = dropout
         self.l2_reg = l2_reg
         self.skip_connection = skip_connection
+        self.use_online_softmax = use_online_softmax
 
     def get_config(self):
         config = super().get_config().copy()
@@ -23,7 +30,8 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
             "filters": self.filters,
             "l2_reg": self.l2_reg,
             "spatial_radius": self.spatial_radius,
-            "skip_connection":self.skip_connection
+            "skip_connection": self.skip_connection,
+            "use_online_softmax": self.use_online_softmax
         })
         return config
 
@@ -38,28 +46,35 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
         for s in input_shapes[1:]:
             assert len(s) == len(input_shape) and all(i == j for i, j in zip(input_shape, s)), \
                 f"all tensors must have same input shape: {input_shape} != {s}"
+
         self.spatial_dims = input_shape[1:-1]
         self.filters = input_shape[-1]
         if self.attention_filters is None or self.attention_filters <= 0:
             self.attention_filters = int(self.filters / self.num_heads)
+
         self.radius_y, self.radius_x = self.spatial_radius
         self.patch_height = 2 * self.radius_y + 1
         self.patch_width = 2 * self.radius_x + 1
-        self.neighborhood_size = self.patch_height * self.patch_width
-        Ck = self.num_heads * self.attention_filters
-        self.qproj = tf.keras.layers.Conv2D(Ck, 1, padding='same', use_bias=False, name="qproj")
-        self.kproj = tf.keras.layers.Conv2D(Ck, 1, padding='same', use_bias=False, name="kproj")
-        self.vproj = tf.keras.layers.Conv2D(Ck, 1, padding='same', use_bias=False, name="vproj")
+        self.patch_size = self.patch_height * self.patch_width
+
+        HF = self.num_heads * self.attention_filters
+
+        # Projection layers
+        self.qproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="qproj")
+        self.kproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="kproj")
+        self.vproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="vproj")
         self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=False, name="outproj")
+
         if self.skip_connection:
             self.skipproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=True, name="skip")
+
         if self.dropout > 0:
             self.dropout_layer = tf.keras.layers.Dropout(self.dropout)
 
-        # Per-head spatial embeddings
+        # Spatial positional embeddings
         self.spatial_pos_embedding = tf.keras.layers.Embedding(
-            self.patch_height * self.patch_width,
-            Ck,
+            self.patch_size,
+            HF,
             embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
             name="SpatialPosEnc"
         )
@@ -70,26 +85,27 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
             for dx in range(-self.radius_x, self.radius_x + 1):
                 spatial_offsets.append([dy, dx])
         self.spatial_offsets = tf.constant(spatial_offsets, dtype=tf.int32)
-        self.num_spatial = len(spatial_offsets)
 
         super().build(input_shape)
 
-    def _get_query_spatial_indices(self, H, W):
-        y_coords = tf.range(H, dtype=tf.int32)
-        x_coords = tf.range(W, dtype=tf.int32)
-        y_patch_center = tf.clip_by_value(y_coords, self.radius_y, H - self.radius_y - 1)
-        x_patch_center = tf.clip_by_value(x_coords, self.radius_x, W - self.radius_x - 1)
+    def _get_query_spatial_indices(self, Y, X):
+        """Get spatial positional indices for queries."""
+        y_coords = tf.range(Y, dtype=tf.int32)
+        x_coords = tf.range(X, dtype=tf.int32)
+        y_patch_center = tf.clip_by_value(y_coords, self.radius_y, Y - self.radius_y - 1)
+        x_patch_center = tf.clip_by_value(x_coords, self.radius_x, X - self.radius_x - 1)
         y_relative = y_coords - y_patch_center + self.radius_y
         x_relative = x_coords - x_patch_center + self.radius_x
         y_grid, x_grid = tf.meshgrid(y_relative, x_relative, indexing='ij')
         spatial_indices = y_grid * self.patch_width + x_grid
         return spatial_indices
 
-    def _compute_center_indices(self, H, W):
-        y_coords = tf.range(H, dtype=tf.int32)
-        x_coords = tf.range(W, dtype=tf.int32)
-        y_patch_center = tf.clip_by_value(y_coords, self.radius_y, H - self.radius_y - 1)
-        x_patch_center = tf.clip_by_value(x_coords, self.radius_x, W - self.radius_x - 1)
+    def _compute_center_indices(self, Y, X):
+        """Compute patch center coordinates."""
+        y_coords = tf.range(Y, dtype=tf.int32)
+        x_coords = tf.range(X, dtype=tf.int32)
+        y_patch_center = tf.clip_by_value(y_coords, self.radius_y, Y - self.radius_y - 1)
+        x_patch_center = tf.clip_by_value(x_coords, self.radius_x, X - self.radius_x - 1)
         y_grid, x_grid = tf.meshgrid(y_patch_center, x_patch_center, indexing='ij')
         return y_grid, x_grid
 
@@ -109,99 +125,169 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
             key = x
             value = x
             query = x
+
         C = self.filters
         shape = tf.shape(key)
-        B, H, W = shape[0], shape[1], shape[2]
-        heads = self.num_heads
-        d = self.attention_filters
-        Ck = heads * d
+        B, Y, X = shape[0], shape[1], shape[2]
+        H = self.num_heads
+        F = self.attention_filters
+        HF = H * F
+        S = self.patch_size
+        dtype = key.dtype
 
-        # project
+        # Project
         K = self.kproj(key)
         Q = self.qproj(query)
         V = self.vproj(value)
 
         # Add query spatial positional encoding
-        query_spatial_indices = self._get_query_spatial_indices(H, W)  # (H, W)
-        query_spatial_emb = self.spatial_pos_embedding(query_spatial_indices)  # (H, W, Ck)
-        Q = Q + query_spatial_emb  # (B, H, W, Ck)
+        query_spatial_indices = self._get_query_spatial_indices(Y, X)  # (Y, X)
+        q_s_emb = self.spatial_pos_embedding(query_spatial_indices)  # (Y, X, HF)
+        Q = Q + q_s_emb  # (B, Y, X, HF)
 
         # Reshape Q for attention computation
-        Q = tf.reshape(Q, (B, H, W, heads, d))
+        Q = tf.reshape(Q, (B, Y, X, H, F))
 
-        # Get spatial embeddings
-        spatial_indices = tf.range(self.patch_height * self.patch_width, dtype=tf.int32)
-        key_spatial_emb = self.spatial_pos_embedding(spatial_indices)  # (patch_h*patch_w, Ck)
+        # Get spatial embeddings for keys
+        spatial_indices = tf.range(S, dtype=tf.int32)
+        k_s_emb = self.spatial_pos_embedding(spatial_indices)  # (S, HF)
 
-        cy_grid, cx_grid = self._compute_center_indices(H, W)
+        # Compute patch centers
+        cy_grid, cx_grid = self._compute_center_indices(Y, X)
 
         # Pre-compute batch indices (reused in both passes)
-        b_idx = tf.tile(tf.range(B, dtype=tf.int32)[:, None, None], [1, H, W])
+        b_idx = tf.tile(tf.range(B, dtype=tf.int32)[:, None, None], [1, Y, X])
 
         # Scaling factor
-        scale = tf.math.rsqrt(tf.cast(d, Q.dtype))
+        scale = tf.math.rsqrt(tf.cast(F, dtype))
 
-        # PASS 1: Compute all scores using TensorArray
-        scores_array = tf.TensorArray(dtype=Q.dtype, size=self.num_spatial, dynamic_size=False)
+        if self.use_online_softmax:
+            # Online softmax: accumulate exp-weighted values without storing scores
+            min_val = tf.constant(-65504.0 if dtype == tf.float16 else -1e9, dtype=dtype)
+            max_scores = tf.fill([B, Y, X, H, 1], min_val)
+            sum_exp = tf.zeros([B, Y, X, H, 1], dtype=dtype)
+            out_acc = tf.zeros([B, Y, X, H, F], dtype=dtype)
 
-        for s_idx in range(self.num_spatial):
-            dy = self.spatial_offsets[s_idx, 0]
-            dx = self.spatial_offsets[s_idx, 1]
+            # LOOP: Over spatial neighbors
+            for s_idx in range(S):
+                dy = self.spatial_offsets[s_idx, 0]
+                dx = self.spatial_offsets[s_idx, 1]
 
-            # Spatial embedding for this neighbor
-            spatial_idx = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
-            neighbor_spatial_emb = tf.reshape(key_spatial_emb[spatial_idx], (1, 1, 1, Ck))
+                # Spatial embedding for this neighbor
+                spatial_idx_scalar = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
+                neighbor_s_emb = tf.reshape(k_s_emb[spatial_idx_scalar], (1, 1, 1, HF))
 
-            # Neighbor coordinates with edge handling
-            ny = tf.clip_by_value(cy_grid + dy, 0, H - 1)
-            nx = tf.clip_by_value(cx_grid + dx, 0, W - 1)
-            ny_b = tf.tile(ny[None, :, :], [B, 1, 1])
-            nx_b = tf.tile(nx[None, :, :], [B, 1, 1])
-            idx = tf.stack([b_idx, ny_b, nx_b], axis=-1)
+                # Neighbor coordinates with edge handling
+                ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
+                nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
+                ny_b = tf.tile(ny[None, :, :], [B, 1, 1])
+                nx_b = tf.tile(nx[None, :, :], [B, 1, 1])
+                idx = tf.stack([b_idx, ny_b, nx_b], axis=-1)
 
-            # Gather keys
-            K_n = tf.gather_nd(K, idx) + neighbor_spatial_emb  # (B, H, W, Ck)
-            K_nh = tf.reshape(K_n, (B, H, W, heads, d))
+                # Gather keys and values
+                K_n = tf.gather_nd(K, idx) + neighbor_s_emb  # (B, Y, X, HF)
+                V_n = tf.gather_nd(V, idx)  # (B, Y, X, HF)
+                K_nh = tf.reshape(K_n, (B, Y, X, H, F))
+                V_nh = tf.reshape(V_n, (B, Y, X, H, F))
 
-            # Compute scores
-            scores = tf.einsum('bhwnd,bhwnd->bhwn', Q, K_nh) * scale  # (B, H, W, heads)
-            scores_array = scores_array.write(s_idx, scores)
+                # Compute scores: (B, Y, X, H, 1)
+                scores_s = tf.reduce_sum(Q * K_nh, axis=-1, keepdims=True) * scale
 
-        # Stack all scores: (B, H, W, heads, S)
-        scores = tf.transpose(scores_array.stack(), [1, 2, 3, 4, 0])  # (S, B, H, W, heads) -> (B, H, W, heads, S)
+                # Update running max
+                new_max = tf.maximum(max_scores, scores_s)
 
-        # Softmax over all neighbors
-        weights = tf.nn.softmax(scores, axis=-1)
-        if self.dropout > 0 and training:
-            weights = self.dropout_layer(weights, training=training)
+                # Rescale previous accumulations
+                exp_diff = tf.exp(max_scores - new_max)
+                sum_exp = sum_exp * exp_diff
+                out_acc = out_acc * exp_diff
 
-        # PASS 2: Accumulate weighted values
-        out_acc = tf.zeros((B, H, W, heads, d), dtype=Q.dtype)
+                # Add new contributions
+                exp_scores = tf.exp(scores_s - new_max)
+                sum_exp = sum_exp + exp_scores
 
-        for s_idx in range(self.num_spatial):
-            dy = self.spatial_offsets[s_idx, 0]
-            dx = self.spatial_offsets[s_idx, 1]
+                # Accumulate weighted values
+                out_acc = out_acc + exp_scores * V_nh
 
-            ny = tf.clip_by_value(cy_grid + dy, 0, H - 1)
-            nx = tf.clip_by_value(cx_grid + dx, 0, W - 1)
-            ny_b = tf.tile(ny[None, :, :], [B, 1, 1])
-            nx_b = tf.tile(nx[None, :, :], [B, 1, 1])
-            idx = tf.stack([b_idx, ny_b, nx_b], axis=-1)
+                max_scores = new_max
 
-            V_n = tf.gather_nd(V, idx)  # (B, H, W, Ck)
-            V_nh = tf.reshape(V_n, (B, H, W, heads, d))
+            # Final normalization
+            out_acc = out_acc / (sum_exp + 1e-8)
 
-            # weights for this spatial neighbor: (B, H, W, heads, 1)
-            w_s = tf.expand_dims(weights[..., s_idx], -1)
-            out_acc = out_acc + w_s * V_nh
+            # Apply dropout
+            if self.dropout > 0 and training:
+                out_acc = self.dropout_layer(out_acc, training=training)
+
+        else:
+            # TWO-PASS: Compute all scores first, then accumulate values
+            # PASS 1: Compute all scores
+            scores_array = tf.TensorArray(
+                dtype=dtype,
+                size=S,
+                element_shape=None,
+                clear_after_read=False
+            )
+
+            for s_idx in range(S):
+                dy = self.spatial_offsets[s_idx, 0]
+                dx = self.spatial_offsets[s_idx, 1]
+
+                # Spatial embedding for this neighbor
+                spatial_idx_scalar = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
+                neighbor_s_emb = tf.reshape(k_s_emb[spatial_idx_scalar], (1, 1, 1, HF))
+
+                # Neighbor coordinates with edge handling
+                ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
+                nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
+                ny_b = tf.tile(ny[None, :, :], [B, 1, 1])
+                nx_b = tf.tile(nx[None, :, :], [B, 1, 1])
+                idx = tf.stack([b_idx, ny_b, nx_b], axis=-1)
+
+                # Gather keys
+                K_n = tf.gather_nd(K, idx) + neighbor_s_emb  # (B, Y, X, HF)
+                K_nh = tf.reshape(K_n, (B, Y, X, H, F))
+
+                # Compute scores
+                scores = tf.reduce_sum(Q * K_nh, axis=-1) * scale  # (B, Y, X, H)
+                scores_array = scores_array.write(s_idx, scores)
+
+            # Stack all scores: (S, B, Y, X, H) -> (B, Y, X, H, S)
+            scores = tf.transpose(scores_array.stack(), [1, 2, 3, 4, 0])
+
+            # Softmax over all neighbors
+            weights = tf.nn.softmax(scores, axis=-1)
+            if self.dropout > 0 and training:
+                weights = self.dropout_layer(weights, training=training)
+
+            # PASS 2: Accumulate weighted values
+            out_acc = tf.zeros([B, Y, X, H, F], dtype=dtype)
+
+            for s_idx in range(S):
+                dy = self.spatial_offsets[s_idx, 0]
+                dx = self.spatial_offsets[s_idx, 1]
+
+                ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
+                nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
+                ny_b = tf.tile(ny[None, :, :], [B, 1, 1])
+                nx_b = tf.tile(nx[None, :, :], [B, 1, 1])
+                idx = tf.stack([b_idx, ny_b, nx_b], axis=-1)
+
+                V_n = tf.gather_nd(V, idx)  # (B, Y, X, HF)
+                V_nh = tf.reshape(V_n, (B, Y, X, H, F))
+
+                # weights for this spatial neighbor: (B, Y, X, H, 1)
+                w_s = tf.expand_dims(weights[..., s_idx], -1)
+                out_acc = out_acc + w_s * V_nh
 
         # Output projection
-        out_acc = tf.reshape(out_acc, (B, H, W, Ck))
+        out_acc = tf.reshape(out_acc, (B, Y, X, HF))
         out = self.outproj(out_acc)
+
         if self.skip_connection:
             out = tf.concat([out, query], axis=-1)
             out = self.skipproj(out)
+
         return out
+
 
 class LocalSpatialAttentionPatch(tf.keras.layers.Layer):
     """

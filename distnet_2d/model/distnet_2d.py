@@ -1,4 +1,5 @@
 import contextlib
+from collections import defaultdict
 
 from pyexpat import features
 
@@ -12,7 +13,7 @@ from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2D
     InferenceLayer, SelectFeature2
 import numpy as np
 from .spatial_attention import SpatialAttention2D
-from .spatiotemporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatch
+from .local_spatio_temporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatch
 from .temporal_attention import TemporalAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives
@@ -560,7 +561,11 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         if isinstance(arch, TemA) and arch.frame_window > 0:
             inference_idx = list(set( [frame_prev[i] for i in inference_pair_idx] + [frame_next[i] for i in inference_pair_idx] ))
             inference_idx.sort()
-            feature_blending_op = LocalSpatioTemporalAttentionPatch(num_heads=arch.temporal_attention, attention_filters=attention_filters, spatial_radius = arch.temporal_attention_spatial_radius, inference_idx=inference_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, skip_connection=True, return_list=True, frame_aware=arch.frame_aware, frame_max_distance=arch.frame_max_distance, name=f"FeatureSTAtt")
+            query_key_mapping = defaultdict(lambda: [])
+            for p, n in zip(frame_prev, frame_next):
+                query_key_mapping[p].append(n)
+                query_key_mapping[n].append(p)
+            feature_blending_op = LocalSpatioTemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, spatial_radius = arch.attention_spatial_radius, inference_query_idx=inference_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, skip_connection=True, return_list=True, frame_aware=arch.frame_aware, frame_max_distance=arch.frame_max_distance, name=f"FeatureSTAtt")
             if arch.frame_aware:
                 frame_relative_index = frame_index[:, 0, 0, :] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]
                 features_list = feature_blending_op([features_list, frame_relative_index])

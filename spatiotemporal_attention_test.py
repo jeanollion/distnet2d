@@ -1,6 +1,7 @@
-from distnet_2d.model.regional_spatial_attention import LocalSpatialAttentionPatchKeras, LocalSpatialAttention, \
+from distnet_2d.model.local_spatial_attention import LocalSpatialAttentionPatchKeras, LocalSpatialAttention, \
     LocalSpatialAttentionPatch
-from distnet_2d.model.spatiotemporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatchKeras, \
+from distnet_2d.model.local_spatio_temporal_attention import LocalSpatioTemporalAttention, \
+    LocalSpatioTemporalAttentionPatchKeras, \
     LocalSpatioTemporalAttentionPatch
 import tensorflow as tf
 import numpy as np
@@ -138,7 +139,7 @@ def compare_spatiotemporal_versions(keras_att:bool):
         attention_filters=attention_filters,  # Auto-calculate
         spatial_radius=(ry, rx),
         skip_connection=True,
-        inference_idx=1,
+        inference_query_idx=1,
         dropout=0.0
     )
 
@@ -750,11 +751,11 @@ def compare_regional_versions(keras_att:bool):
 
 
 if __name__ == "__main__":
-    #compare_regional_versions(False)
-    #compare_regional_versions(True)
+    compare_regional_versions(False)
+    compare_regional_versions(True)
 
-    compare_spatiotemporal_versions(False)
-    compare_spatiotemporal_versions(True)
+    #compare_spatiotemporal_versions(False)
+    #compare_spatiotemporal_versions(True)
 
     print("\n")
     print("█" * 80)
@@ -762,16 +763,16 @@ if __name__ == "__main__":
     print("█" * 80)
     print("\n")
 
-    test_spatial_positional_encoding()
+    #test_spatial_positional_encoding()
     print("\n\n")
 
-    test_key_value_neighborhood_indexing()
+    #test_key_value_neighborhood_indexing()
     print("\n\n")
 
-    test_query_key_correspondence()
+    #test_query_key_correspondence()
     print("\n\n")
 
-    test_graph_mode_compatibility()
+    #test_graph_mode_compatibility()
 
     print("\n")
     print("█" * 80)

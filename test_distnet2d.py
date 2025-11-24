@@ -38,7 +38,7 @@ if not seg:
         mixed_precision.set_global_policy('mixed_float16')
         dn = get_distnet_2d(
             arch=architectures.TemAD2(frame_window=3, spatial_dimensions=(64, 32), filters=128, self_attention=16, attention_filters=64,
-                                      temporal_attention=64, temporal_attention_spatial_radius=8,
+                                      temporal_attention=64, attention_spatial_radius=8,
                                       skip_connections=False, early_downsampling=True, category_number=0, inference_gap_number=1,
                                       predict_edm_derivatives=False, predict_cdm_derivatives=False))
 
