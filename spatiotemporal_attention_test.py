@@ -751,11 +751,11 @@ def compare_regional_versions(keras_att:bool):
 
 
 if __name__ == "__main__":
-    compare_regional_versions(False)
-    compare_regional_versions(True)
+    #compare_regional_versions(False)
+    #compare_regional_versions(True)
 
-    #compare_spatiotemporal_versions(False)
-    #compare_spatiotemporal_versions(True)
+    compare_spatiotemporal_versions(False)
+    compare_spatiotemporal_versions(True)
 
     print("\n")
     print("█" * 80)

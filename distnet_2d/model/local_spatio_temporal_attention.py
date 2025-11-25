@@ -14,7 +14,6 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
                  skip_connection: bool = False, frame_aware: bool = False, frame_max_distance: int = 0,
                  training_query_idx: list = None, inference_query_idx: int = None, query_key_mapping: dict = None,
-                 return_list: bool = False,
                  dropout: float = 0, l2_reg: float = 0.,
                  spatial_chunk_mode: str = 'col',  # 'row' or 'col'
                  name="SpatioTemporalAttentionOptimized"):
@@ -37,7 +36,6 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         self.spatial_chunk_mode = spatial_chunk_mode
         if self.frame_max_distance:
             assert self.frame_max_distance > 0
-        self.return_list = return_list
 
     def get_config(self):
         config = super().get_config().copy()
@@ -46,7 +44,6 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             "dropout": self.dropout,
             "filters": self.filters,
             "l2_reg": self.l2_reg,
-            "return_list": self.return_list,
             "inference_query_idx": self.inference_query_idx,
             "training_query_idx": self.training_query_idx,
             "spatial_radius": self.spatial_radius,
@@ -216,7 +213,7 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         frames = tf.stack(frame_list, axis=0)
         # Project all frames at once
         frames_batch = tf.reshape(frames, (T * B, Y, X, C))
-        Q_all_input = tf.concat([frame_list[i] for i in idx_list], axis=0)
+        Q_all_input = tf.concat([frame_list[i] for i in idx_list], axis=0) # nQ * B, Y, X, F
 
         # Fuse projections to reduce intermediate tensors
         K_all = self.kproj(frames_batch)
@@ -374,16 +371,11 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         # Output projection
         out_acc = tf.reshape(out_acc, (nQ * B, Y, X, HF))
         out = self.outproj(out_acc)
-
         if self.skip_connection:
             out = tf.concat([out, Q_all_input], axis=-1)
             out = self.skipproj(out)
 
-        if self.return_list:
-            out = tf.reshape(out, (nQ, B, Y, X, C))
-            return tf.unstack(out, axis=0)
-        else:
-            return out
+        return tf.reshape(out, (nQ, B, Y, X, C))
 
 
 class LocalSpatioTemporalAttentionPatch(InferenceLayer, tf.keras.layers.Layer):

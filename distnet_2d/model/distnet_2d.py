@@ -8,9 +8,9 @@ import tensorflow as tf
 from dataset_iterator.keras_metrics import EMANormalization
 from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
-    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, SelectFeature, StopGradient, Stack, HideVariableWrapper, \
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, HideVariableWrapper, \
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch, SplitNConvToBatch2D, \
-    InferenceLayer, SelectFeature2
+    InferenceLayer, InferenceAwareBatchSelector
 import numpy as np
 from .spatial_attention import SpatialAttention2D
 from .local_spatio_temporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatch
@@ -565,17 +565,20 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             for p, n in zip(frame_prev, frame_next):
                 query_key_mapping[p].append(n)
                 query_key_mapping[n].append(p)
-            feature_blending_op = LocalSpatioTemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, spatial_radius = arch.attention_spatial_radius, inference_query_idx=inference_idx, dropout=arch.dropout, l2_reg=arch.l2_reg, skip_connection=True, return_list=True, frame_aware=arch.frame_aware, frame_max_distance=arch.frame_max_distance, name=f"FeatureSTAtt")
+            feature_blending_op = LocalSpatioTemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
+                                                               spatial_radius = arch.attention_spatial_radius, inference_query_idx=inference_idx,
+                                                               #query_key_mapping=query_key_mapping, # TODO see impact:
+                                                               dropout=arch.dropout, l2_reg=arch.l2_reg, skip_connection=True, frame_aware=arch.frame_aware, frame_max_distance=arch.frame_max_distance, name=f"FeatureSTAtt")
             if arch.frame_aware:
                 frame_relative_index = frame_index[:, 0, 0, :] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]
-                features_list = feature_blending_op([features_list, frame_relative_index])
+                features = feature_blending_op([features_list, frame_relative_index])
             else:
-                features_list = feature_blending_op(features_list)
-            features_batch = SelectFeature2(inference_idx=inference_idx.index(arch.frame_window), name="SelectFeature")(features_list)
+                features = feature_blending_op(features_list)
+            features_batch = InferenceAwareBatchSelector(inference_idx=inference_idx.index(arch.frame_window), name="SelectFeature")(features)
 
             # feature pairs
-            feature_prev = SelectFeature2(train_idx = frame_prev, inference_idx = [inference_idx.index(frame_prev[i]) for i in inference_pair_idx], name="BlendedFeaturePairPrevToBatch")(features_list)
-            feature_next = SelectFeature2(train_idx = frame_next, inference_idx = [inference_idx.index(frame_next[i]) for i in inference_pair_idx], name="BlendedFeaturePairNextToBatch")(features_list)
+            feature_prev = InferenceAwareBatchSelector(train_idx = frame_prev, inference_idx = [inference_idx.index(frame_prev[i]) for i in inference_pair_idx], name="SelectFeaturePairPrev")(features)
+            feature_next = InferenceAwareBatchSelector(train_idx = frame_next, inference_idx = [inference_idx.index(frame_next[i]) for i in inference_pair_idx], name="SelectFeaturePairNext")(features)
             feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
             print(f"all inference idx: {inference_idx} featureidx: {inference_idx.index(arch.frame_window)} feature_prev_idx: {[inference_idx.index(frame_prev[i]) for i in inference_pair_idx]}, feature_next_idx: {[inference_idx.index(frame_next[i]) for i in inference_pair_idx]}")
 
@@ -620,10 +623,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
             # skip connection
             if len(arch.encoder_settings) in skip_connections and arch.frame_window > 0: # skip connection at feature level
-                feature_skip = SelectFeature(inference_idx=arch.frame_window, name ="SelectFeature")([features_batch, features_list])
+                feature_skip = InferenceAwareSelector(inference_idx=arch.frame_window, name ="SelectFeature")([features_batch, features_list])
                 features_batch = feature_skip_op([feature_skip, blended_features_batch])
                 if arch.frame_window > 0 :
-                    feature_pair_skip = SelectFeature(inference_idx=inference_pair_idx, name ="SelectFeaturePair")([feature_pairs_batch, feature_pairs_list])
+                    feature_pair_skip = InferenceAwareSelector(inference_idx=inference_pair_idx, name ="SelectFeaturePair")([feature_pairs_batch, feature_pairs_list])
                     feature_pairs_batch = feature_pair_skip_op([feature_pair_skip, blended_feature_pairs_batch])
 
         # decoder part
@@ -691,7 +694,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
                 res = stop_gradient(res, parent_name = name)
             n_splits, inference_idx = skip_parameters
             assert inference_idx<n_splits, f"invalid inference idx: {inference_idx} must be lower than n_splits: {n_splits}"
-            feature_skip = SelectFeature(inference_idx=inference_idx,  name=f"{name}_SelectFeature")
+            feature_skip = InferenceAwareSelector(inference_idx=inference_idx, name=f"{name}_SelectFeature")
             feature_split = SplitBatch(n_splits, compensate_gradient=False, name=f"{name}_SplitFeature")
             res = feature_skip([res, feature_split(res)])
         else:

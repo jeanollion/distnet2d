@@ -113,7 +113,7 @@ class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         # output = get_print_grad_fun(f"{self.name} after concat")(output)
         return output
 
-class SelectFeature(InferenceLayer, tf.keras.layers.Layer):
+class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, inference_idx, name: str= "SelectFeature"):
         super().__init__(name=name)
         self.inference_idx=inference_idx
@@ -137,7 +137,7 @@ class SelectFeature(InferenceLayer, tf.keras.layers.Layer):
             else:
                 return input_concat
 
-class SelectFeature2(InferenceLayer, tf.keras.layers.Layer):
+class InferenceAwareBatchSelector(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, inference_idx:list, train_idx:list=None, name: str= "SelectFeature2"):
         super().__init__(name=name)
         self.train_idx=train_idx
@@ -148,19 +148,20 @@ class SelectFeature2(InferenceLayer, tf.keras.layers.Layer):
         config.update({"train_idx":self.train_idx, "inference_idx":self.inference_idx})
         return config
 
-    def call(self, input): # N x (B, Y, X, F)
+    def call(self, input): # (N, B, Y, X, F)
+        shape = tf.shape(input)
         if self.inference_mode: # only produce one output
             if isinstance(self.inference_idx, (tuple, list)):
-                items = [input[idx] for idx in self.inference_idx]
-                return tf.concat(items, axis=0)
+                items = tf.gather(input, tf.constant(self.inference_idx, tf.int32), axis=0)
+                return tf.reshape(items, [-1, shape[2], shape[3], shape[4]])
             else:
                 return input[self.inference_idx]
         else:
             if self.train_idx is None:
-                return tf.concat(input, axis=0)
+                return tf.reshape(input, [-1, shape[2], shape[3], shape[4]])
             elif isinstance(self.train_idx, (tuple, list)):
-                items = [input[idx] for idx in self.train_idx]
-                return tf.concat(items, axis=0)
+                items = tf.gather(input, tf.constant(self.train_idx, tf.int32), axis=0)
+                return tf.reshape(items, [-1, shape[2], shape[3], shape[4]])
             else:
                 return input[self.train_idx]
 
