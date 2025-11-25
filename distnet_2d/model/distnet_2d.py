@@ -4,8 +4,6 @@ from collections import defaultdict
 from pyexpat import features
 
 import tensorflow as tf
-
-from dataset_iterator.keras_metrics import EMANormalization
 from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, HideVariableWrapper, \
@@ -44,7 +42,7 @@ class DiSTNetModel(tf.keras.Model):
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False,
-                 ema_kwargs:dict = None, # None -> no EMA. otherwise provide {alpha, step_number}
+                 ema_alpha:float = None, # None -> no EMA
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.edm_weight = edm_loss_weight
@@ -114,8 +112,13 @@ class DiSTNetModel(tf.keras.Model):
             self.dy_loss_metric = tf.keras.metrics.Mean(name="dY")
         if self.link_multiplicity_weight > 0:
             self.link_multiplicity_loss_metric = tf.keras.metrics.Mean(name="link_multiplicity")
-        n_losses = (self.edm_weight > 0) + (self.center_weight > 0) + (self.category_weight > 0 and self.category_number > 1) + 2 * (self.displacement_weight > 0) + (self.link_multiplicity_weight > 0)
-        self.loss_metric = EMANormalization(num_losses = n_losses, **ema_kwargs, name="loss") if ema_kwargs is not None else tf.keras.metrics.Mean(name="loss")
+        if ema_alpha is not None:
+            n_losses = (self.edm_weight > 0) + (self.center_weight > 0) + ( self.category_weight > 0 and self.category_number > 1) + 2 * (self.displacement_weight > 0) + (self.link_multiplicity_weight > 0)
+            self.ema_losses = tf.Variable(tf.zeros(shape=(n_losses,), dtype=tf.float32), trainable=False, aggregation=tf.VariableAggregation.MEAN, name="ema_losses")
+            self.ema_alpha =  ema_alpha
+        else :
+            self.ema_loss = None
+        self.loss_metric = tf.keras.metrics.Mean(name="loss")
         self.perform_test_step=perform_test_step
 
 
@@ -303,8 +306,14 @@ class DiSTNetModel(tf.keras.Model):
         if self.category_weight > 0 and self.category_number > 1:
             self.category_loss_metric.update_state(losses["category"], sample_weight=batch_dim)
             sub_losses.append(losses["category"])
-        if isinstance(self.loss_metric, EMANormalization):
-            self.loss_metric.update_state(sub_losses, sample_weight=batch_dim, val=not training)
+        if self.ema_losses is not None:
+            if training: # only update ema at training
+                init = tf.math.equal(tf.math.count_nonzero(self.ema_losses), 0)
+                sub_losses = tf.cast(sub_losses, tf.float32)
+                self.ema_losses.assign(tf.cond(init, lambda: sub_losses, lambda: self.ema_alpha * self.ema_losses + (1 - self.ema_alpha) * sub_losses))
+            normalized_loss = tf.reduce_mean(sub_losses / (self.ema_losses + tf.keras.backend.epsilon()))
+            self.loss_metric.update_state(normalized_loss, sample_weight=batch_dim)
+            losses["loss"] = normalized_loss
         else:
             self.loss_metric.update_state(losses["loss"], sample_weight=batch_dim)
         return self.compute_metrics(x, y, y_pred, None)
@@ -364,14 +373,11 @@ class DiSTNetModel(tf.keras.Model):
         if inference:
             self.set_inference(True)
             self.trainable=False
-            loss = self.loss_metric
-            self.loss_metric = tf.keras.metrics.Mean(name="loss")  # to avoid depend on custom layer at inference time (not working)
             self.compile()
         super().save(*args, **kwargs)
         if inference:
             self.set_inference(False)
             self.trainable=True
-            self.loss_metric = loss
             self.compile()
 
 def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are passed on to DiSTNet2D Model
