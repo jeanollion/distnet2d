@@ -15,9 +15,10 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
                  skip_connection: bool = False, frame_aware: bool = False, frame_max_distance: int = 0,
                  training_query_idx: list = None, inference_query_idx: int = None, query_key_mapping: dict = None,
                  return_list: bool = False,
-                 dropout: float = 0, l2_reg: float = 0., use_online_softmax: bool = True,
-                 spatial_chunk_mode: str = 'col',  # 'row', 'col', or 'none'
+                 dropout: float = 0, l2_reg: float = 0.,
+                 spatial_chunk_mode: str = 'col',  # 'row' or 'col'
                  name="SpatioTemporalAttentionOptimized"):
+
         super().__init__(name=name)
         self.num_heads = num_heads
         self.attention_filters = attention_filters
@@ -32,7 +33,7 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         self.frame_aware = frame_aware
         self.frame_max_distance = frame_max_distance
         self.query_key_mapping = query_key_mapping
-        self.use_online_softmax = use_online_softmax
+        assert spatial_chunk_mode in ["row", "col"], f"invalid spatial_chunk_mode: {spatial_chunk_mode} must be in [row, col]"
         self.spatial_chunk_mode = spatial_chunk_mode
         if self.frame_max_distance:
             assert self.frame_max_distance > 0
@@ -53,7 +54,6 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             "frame_aware": self.frame_aware,
             "frame_max_distance": self.frame_max_distance,
             "query_key_mapping": self.query_key_mapping,
-            "use_online_softmax": self.use_online_softmax,
             "spatial_chunk_mode": self.spatial_chunk_mode
         })
         return config
@@ -251,6 +251,7 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         spatial_indices = tf.range(S, dtype=tf.int32)
         k_s_emb = self.spatial_pos_embedding(spatial_indices)
         k_s_emb = tf.reshape(k_s_emb, (S, 1, 1, 1, 1, H, F))
+        k_s_emb = tf.tile(k_s_emb, [1, T, 1, 1, 1, 1, 1])
         query_spatial_indices = self._get_query_spatial_indices(Y, X)
         q_s_emb = self.spatial_pos_embedding(query_spatial_indices)
         q_s_emb = tf.reshape(q_s_emb, (1, 1, Y, X, H, F))
@@ -265,246 +266,110 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         # Get attention mask for queries: (nQ, T)
         if self.attention_mask is not None:
             query_mask = tf.gather(self.attention_mask, tf.constant(idx_list, dtype=tf.int32))
-            query_mask_broadcast = tf.reshape(query_mask, (nQ, 1, 1, 1, 1, T))
+            query_mask_broadcast = tf.reshape(query_mask, (nQ, 1, 1, 1, 1, 1, T))
+            chunk_size = tf.shape(self.spatial_offsets_structured[0])[0]
+            query_mask_broadcast = tf.tile(query_mask_broadcast, [1, 1, 1, 1, 1, chunk_size, 1])
+            query_mask_broadcast = tf.reshape(query_mask_broadcast, (nQ, 1, 1, 1, 1, -1))
 
-        cy_grid, cx_grid = self._compute_center_indices(Y, X, dtype=tf.int32)
+        cy_grid, cx_grid = self._compute_center_indices(Y, X)
 
         # Pre-compute base index grids (shared across all spatial iterations)
         t_idx_base = tf.range(T, dtype=tf.int32)
         b_idx_base = tf.range(B, dtype=tf.int32)
 
         # Create base grids once
-        t_idx_grid = tf.tile(t_idx_base[:, None, None, None], [1, B, Y, X])
-        b_idx_grid = tf.tile(b_idx_base[None, :, None, None], [T, 1, Y, X])
+        t_idx_grid = tf.tile(t_idx_base[None, :, None, None, None], [1, 1, B, Y, X])
+        b_idx_grid = tf.tile(b_idx_base[None, None, :, None, None], [1, T, 1, Y, X])
 
-        if self.use_online_softmax:
-            min_val = tf.constant(-65504.0 if dtype == tf.float16 else -1e9, dtype=dtype)
-            max_scores = tf.fill([nQ, B, Y, X, H, 1], min_val)
-            sum_exp = tf.zeros([nQ, B, Y, X, H, 1], dtype=dtype)
-            out_acc = tf.zeros([nQ, B, Y, X, H, F], dtype=dtype)
+        min_val = tf.constant(-65504.0 if dtype == tf.float16 else -1e9, dtype=dtype)
+        max_scores = tf.fill([nQ, B, Y, X, H, 1], min_val)
+        sum_exp = tf.zeros([nQ, B, Y, X, H, 1], dtype=dtype)
+        out_acc = tf.zeros([nQ, B, Y, X, H, F], dtype=dtype)
 
-            # CHUNKED LOOP by row or column
-            if self.spatial_chunk_mode in ['row', 'col']:
-                num_chunks = len(self.spatial_offsets_structured)
+        num_chunks = len(self.spatial_offsets_structured)
+        chunk_size = tf.shape(self.spatial_offsets_structured[0])[0]
+        for chunk_idx in range(num_chunks): # CHUNKED LOOP by row or column
+            # Get all offsets for this row/column
+            chunk_offsets = self.spatial_offsets_structured[chunk_idx]  # Shape: (chunk_size, 2)
 
-                for chunk_idx in range(num_chunks):
-                    # Get all offsets for this row/column
-                    chunk_offsets = self.spatial_offsets_structured[chunk_idx]  # Shape: (chunk_size, 2)
-                    chunk_size = tf.shape(chunk_offsets)[0]
+            # Extract dy and dx as vectors
+            dy_vec = chunk_offsets[:, 0]  # Shape: (chunk_size,)
+            dx_vec = chunk_offsets[:, 1]  # Shape: (chunk_size,)
 
-                    # Extract dy and dx as vectors
-                    dy_vec = chunk_offsets[:, 0]  # Shape: (chunk_size,)
-                    dx_vec = chunk_offsets[:, 1]  # Shape: (chunk_size,)
+            # Compute spatial indices for embeddings
+            spatial_idx_vec = (dy_vec + self.radius_y) * self.patch_width + (dx_vec + self.radius_x)
 
-                    # Compute spatial indices for embeddings
-                    spatial_idx_vec = (dy_vec + self.radius_y) * self.patch_width + (dx_vec + self.radius_x)
+            # Vectorized neighbor coordinate computation
+            # cy_grid, cx_grid shape: (Y, X)
+            # Expand to (chunk_size, Y, X) and add offsets
+            cy_expanded = cy_grid[None, :, :]  # (1, Y, X)
+            cx_expanded = cx_grid[None, :, :]  # (1, Y, X)
+            dy_expanded = dy_vec[:, None, None]  # (chunk_size, 1, 1)
+            dx_expanded = dx_vec[:, None, None]  # (chunk_size, 1, 1)
 
-                    # Vectorized neighbor coordinate computation
-                    # cy_grid, cx_grid shape: (Y, X)
-                    # Expand to (chunk_size, Y, X) and add offsets
-                    cy_expanded = cy_grid[None, :, :]  # (1, Y, X)
-                    cx_expanded = cx_grid[None, :, :]  # (1, Y, X)
-                    dy_expanded = dy_vec[:, None, None]  # (chunk_size, 1, 1)
-                    dx_expanded = dx_vec[:, None, None]  # (chunk_size, 1, 1)
+            ny_chunk = tf.clip_by_value(cy_expanded + dy_expanded, 0, Y - 1)  # (chunk_size, Y, X)
+            nx_chunk = tf.clip_by_value(cx_expanded + dx_expanded, 0, X - 1)  # (chunk_size, Y, X)
 
-                    ny_chunk = tf.clip_by_value(cy_expanded + dy_expanded, 0, Y - 1)  # (chunk_size, Y, X)
-                    nx_chunk = tf.clip_by_value(cx_expanded + dx_expanded, 0, X - 1)  # (chunk_size, Y, X)
+            # Expand to (chunk_size, T, B, Y, X)
+            ny_grid_chunk = ny_chunk[:, None, None, :, :]  # (chunk_size, 1, 1, Y, X)
+            nx_grid_chunk = nx_chunk[:, None, None, :, :]  # (chunk_size, 1, 1, Y, X)
 
-                    # Expand to (chunk_size, T, B, Y, X)
-                    ny_grid_chunk = ny_chunk[:, None, None, :, :]  # (chunk_size, 1, 1, Y, X)
-                    nx_grid_chunk = nx_chunk[:, None, None, :, :]  # (chunk_size, 1, 1, Y, X)
-                    t_idx_chunk = t_idx_grid[None, :, :, :, :]  # (1, T, B, Y, X)
-                    b_idx_chunk = b_idx_grid[None, :, :, :, :]  # (1, T, B, Y, X)
+            # Broadcast to full shape (chunk_size, T, B, Y, X)
+            ny_grid_chunk = tf.broadcast_to(ny_grid_chunk, [chunk_size, T, B, Y, X])
+            nx_grid_chunk = tf.broadcast_to(nx_grid_chunk, [chunk_size, T, B, Y, X])
+            t_idx_chunk = tf.broadcast_to(t_idx_grid, [chunk_size, T, B, Y, X])
+            b_idx_chunk = tf.broadcast_to(b_idx_grid, [chunk_size, T, B, Y, X])
 
-                    # Broadcast to full shape (chunk_size, T, B, Y, X)
-                    ny_grid_chunk = tf.broadcast_to(ny_grid_chunk, [chunk_size, T, B, Y, X])
-                    nx_grid_chunk = tf.broadcast_to(nx_grid_chunk, [chunk_size, T, B, Y, X])
-                    t_idx_chunk = tf.broadcast_to(t_idx_chunk, [chunk_size, T, B, Y, X])
-                    b_idx_chunk = tf.broadcast_to(b_idx_chunk, [chunk_size, T, B, Y, X])
+            # Stack indices: (chunk_size, T, B, Y, X, 4)
+            idx_chunk = tf.stack([t_idx_chunk, b_idx_chunk, ny_grid_chunk, nx_grid_chunk], axis=-1)
 
-                    # Stack indices: (chunk_size, T, B, Y, X, 4)
-                    idx_chunk = tf.stack([t_idx_chunk, b_idx_chunk, ny_grid_chunk, nx_grid_chunk], axis=-1)
+            # Reshape for single gather: (chunk_size * T * B * Y * X, 4)
+            idx_flat = tf.reshape(idx_chunk, [-1, 4])
 
-                    # Reshape for single gather: (chunk_size * T * B * Y * X, 4)
-                    idx_flat = tf.reshape(idx_chunk, [-1, 4])
+            # Single gather for K and V
+            K_flat = tf.gather_nd(K_all, idx_flat)  # (chunk_size * T * B * Y * X, H, F)
+            V_flat = tf.gather_nd(V_all, idx_flat)  # (chunk_size * T * B * Y * X, H, F)
 
-                    # Single gather for K and V
-                    K_flat = tf.gather_nd(K_all, idx_flat)  # (chunk_size * T * B * Y * X, H, F)
-                    V_flat = tf.gather_nd(V_all, idx_flat)  # (chunk_size * T * B * Y * X, H, F)
+            # Reshape back: (chunk_size, T, B, Y, X, H, F)
+            K_chunk = tf.reshape(K_flat, [chunk_size * T, B, Y, X, H, F])
+            V_chunk = tf.reshape(V_flat, [chunk_size * T, B, Y, X, H, F])
 
-                    # Reshape back: (chunk_size, T, B, Y, X, H, F)
-                    K_chunk = tf.reshape(K_flat, [chunk_size, T, B, Y, X, H, F])
-                    V_chunk = tf.reshape(V_flat, [chunk_size, T, B, Y, X, H, F])
+            # Add spatial embeddings - single gather
+            spatial_emb_chunk = tf.gather(k_s_emb, spatial_idx_vec, axis=0)  # (chunk_size, T, 1, 1, 1, H, F)
+            K_chunk = K_chunk + tf.reshape(spatial_emb_chunk, [chunk_size * T, 1, 1, 1, H, F])
 
-                    # Add spatial embeddings - single gather
-                    spatial_emb_chunk = tf.gather(k_s_emb, spatial_idx_vec, axis=0)  # (chunk_size, 1, 1, 1, 1, H, F)
-                    K_chunk = K_chunk + spatial_emb_chunk
+            # Compute scores: (nQ, B, Y, X, H, chunk_size, T)
+            scores_chunk = tf.einsum('qbyxnd,sbyxnd->qbyxns', Q_all, K_chunk) * scale
 
-                    # Compute scores: (nQ, B, Y, X, H, chunk_size, T)
-                    scores_chunk = tf.einsum('qbywnd,ctbywnd->qbywnct', Q_all, K_chunk) * scale
-
-                    if self.attention_mask is not None:
-                        mask_broadcast_chunk = query_mask_broadcast[:, :, :, :, :, None, :]
-                        scores_chunk = tf.where(mask_broadcast_chunk, scores_chunk, min_val)
-
-                    # Flatten to (nQ, B, Y, X, H, chunk_size * T)
-                    scores_flat = tf.reshape(scores_chunk, [nQ, B, Y, X, H, -1])
-
-                    # Update running max
-                    new_max = tf.maximum(max_scores, tf.reduce_max(scores_flat, axis=-1, keepdims=True))
-
-                    # Rescale previous accumulations
-                    exp_diff = tf.exp(max_scores - new_max)
-                    sum_exp = sum_exp * exp_diff
-                    out_acc = out_acc * exp_diff
-
-                    # Add new contributions
-                    exp_scores_flat = tf.exp(scores_flat - new_max)
-                    if self.attention_mask is not None:
-                        mask_flat = tf.reshape(mask_broadcast_chunk, [nQ, 1, 1, 1, 1, -1])
-                        exp_scores_flat = tf.where(mask_flat, exp_scores_flat, 0.0)
-
-                    sum_exp = sum_exp + tf.reduce_sum(exp_scores_flat, axis=-1, keepdims=True)
-
-                    # Reshape for value accumulation: (nQ, B, Y, X, H, chunk_size, T)
-                    exp_scores_chunk = tf.reshape(exp_scores_flat, [nQ, B, Y, X, H, chunk_size, T])
-
-                    # Accumulate weighted values
-                    contrib = tf.einsum('qbywnct,ctbywnd->qbywnd', exp_scores_chunk, V_chunk)
-                    out_acc = out_acc + contrib
-
-                    max_scores = new_max
-
-            else:
-                # Original single-neighbor loop
-                for s_idx in range(S):
-                    dy = self.spatial_offsets[s_idx, 0]
-                    dx = self.spatial_offsets[s_idx, 1]
-
-                    # Spatial embedding for this neighbor
-                    spatial_idx_scalar = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
-                    neighbor_s_emb = k_s_emb[spatial_idx_scalar]
-
-                    ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
-                    nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
-
-                    ny_grid = tf.tile(ny[None, None, :, :], [T, B, 1, 1])
-                    nx_grid = tf.tile(nx[None, None, :, :], [T, B, 1, 1])
-
-                    idx = tf.stack([t_idx_grid, b_idx_grid, ny_grid, nx_grid], axis=-1)
-
-                    K_nh = tf.gather_nd(K_all, idx)
-                    V_nh = tf.gather_nd(V_all, idx)
-
-                    K_nh = K_nh + neighbor_s_emb
-
-                    # Compute scores for all T
-                    scores_s = tf.einsum('qbhwnd,tbhwnd->qbhwnt', Q_all, K_nh) * scale
-
-                    if self.attention_mask is not None:
-                        scores_s = tf.where(query_mask_broadcast, scores_s, min_val)
-
-                    # Update running max
-                    new_max = tf.maximum(max_scores, tf.reduce_max(scores_s, axis=-1, keepdims=True))
-
-                    # Rescale previous accumulations
-                    exp_diff = tf.exp(max_scores - new_max)
-                    sum_exp = sum_exp * exp_diff
-                    out_acc = out_acc * exp_diff
-
-                    # Add new contributions
-                    exp_scores = tf.exp(scores_s - new_max)
-                    if self.attention_mask is not None:
-                        exp_scores = tf.where(query_mask_broadcast, exp_scores, 0.0)
-
-                    sum_exp = sum_exp + tf.reduce_sum(exp_scores, axis=-1, keepdims=True)
-
-                    # Accumulate weighted values
-                    contrib = tf.einsum('qbhwnt,tbhwnd->qbhwnd', exp_scores, V_nh)
-                    out_acc = out_acc + contrib
-
-                    max_scores = new_max
-
-            # Final normalization
-            out_acc = out_acc / (sum_exp + 1e-8)
-
-            if self.dropout > 0 and training:
-                out_acc = self.dropout_layer(out_acc, training=training)
-
-        else:
-            # TWO-PASS: Loop over SPATIAL neighbors
-            # PASS 1: Accumulate scores
-            scores_array = tf.TensorArray(
-                dtype=dtype,
-                size=S,
-                element_shape=None,
-                clear_after_read=False
-            )
-
-            for s_idx in range(S):
-                dy = self.spatial_offsets[s_idx, 0]
-                dx = self.spatial_offsets[s_idx, 1]
-
-                # Spatial embedding for this neighbor
-                spatial_idx_scalar = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
-                neighbor_s_emb = tf.reshape(k_s_emb[spatial_idx_scalar], (1, 1, 1, 1, HF))
-
-                # Neighbor coordinates with edge handling
-                ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
-                nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
-
-                ny_grid = tf.tile(ny[None, None, :, :], [T, B, 1, 1])
-                nx_grid = tf.tile(nx[None, None, :, :], [T, B, 1, 1])
-
-                idx = tf.stack([t_idx_grid, b_idx_grid, ny_grid, nx_grid], axis=-1)
-
-                K_n = tf.gather_nd(K_all, idx) + neighbor_s_emb
-                K_nh = tf.reshape(K_n, (T, B, Y, X, H, F))
-
-                scores = tf.einsum('qbhwnd,tbhwnd->qbhwnt', Q_all, K_nh) * scale
-                scores_array = scores_array.write(s_idx, scores)
-
-            # Stack all scores: (patch_size, nQ, B, Y, X, H, T)
-            scores_stack = scores_array.stack()
-            scores_stack = tf.transpose(scores_stack, [1, 2, 3, 4, 5, 0, 6])  # (Q, B, Y, X, H, S, T)
-            scores_flat = tf.reshape(scores_stack, (nQ, B, Y, X, H, -1))  # (Q, B, Y, X, H, S*T)
-
-            # Apply mask: (nQ, T) -> (Q, 1, 1, 1, 1, T) -> (Q, 1, 1, 1, 1, S*T)
             if self.attention_mask is not None:
-                query_mask_flat = tf.reshape(query_mask, (nQ, 1, 1, 1, 1, T))
-                query_mask_flat = tf.tile(query_mask_flat, [1, 1, 1, 1, 1, S])
-                query_mask_flat = tf.reshape(query_mask_flat, (nQ, 1, 1, 1, 1, S * T))
-                min_val = -65504.0 if dtype == tf.float16 else -1e9
-                scores_flat = tf.where(query_mask_flat, scores_flat, min_val)
+                scores_chunk = tf.where(query_mask_broadcast, scores_chunk, min_val)
 
-            weights = tf.nn.softmax(scores_flat, axis=-1)
+            # Update running max
+            new_max = tf.maximum(max_scores, tf.reduce_max(scores_chunk, axis=-1, keepdims=True))
 
-            if self.dropout > 0 and training:
-                weights = self.dropout_layer(weights, training=training)
+            # Rescale previous accumulations
+            exp_diff = tf.exp(max_scores - new_max)
+            sum_exp = sum_exp * exp_diff
+            out_acc = out_acc * exp_diff
 
-            weights = tf.reshape(weights, (nQ, B, Y, X, H, S, T))
+            # Add new contributions
+            exp_scores_flat = tf.exp(scores_chunk - new_max)
+            if self.attention_mask is not None:
+                exp_scores_flat = tf.where(query_mask_broadcast, exp_scores_flat, 0.0)
 
-            # PASS 2: Accumulate weighted values
-            out_acc = tf.zeros([nQ, B, Y, X, H, F], dtype=dtype)
+            sum_exp = sum_exp + tf.reduce_sum(exp_scores_flat, axis=-1, keepdims=True)
 
-            for s_idx in range(S):
-                dy = self.spatial_offsets[s_idx, 0]
-                dx = self.spatial_offsets[s_idx, 1]
+            # Accumulate weighted values
+            contrib = tf.einsum('qbyxns,sbyxnd->qbyxnd', exp_scores_flat, V_chunk)
+            out_acc = out_acc + contrib
 
-                ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
-                nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
+            max_scores = new_max
 
-                ny_grid = tf.tile(ny[None, None, :, :], [T, B, 1, 1])
-                nx_grid = tf.tile(nx[None, None, :, :], [T, B, 1, 1])
+        # Final normalization
+        out_acc = out_acc / (sum_exp + 1e-8)
 
-                idx = tf.stack([t_idx_grid, b_idx_grid, ny_grid, nx_grid], axis=-1)
-
-                V_n = tf.gather_nd(V_all, idx)
-                V_nh = tf.reshape(V_n, (T, B, Y, X, H, F))
-
-                w_s = weights[:, :, :, :, :, s_idx, :]
-                contrib = tf.einsum('qbhwnt,tbhwnd->qbhwnd', w_s, V_nh)
-                out_acc = out_acc + contrib
+        if self.dropout > 0 and training:
+            out_acc = self.dropout_layer(out_acc, training=training)
 
         # Output projection
         out_acc = tf.reshape(out_acc, (nQ * B, Y, X, HF))
