@@ -19,7 +19,8 @@ from .spatial_attention import SpatialAttention2D
 from .local_spatio_temporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatch
 from .temporal_attention import TemporalAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
-from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives
+from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives, \
+    TemperedFocalCrossEntropy
 from ..utils.agc import adaptive_clip_grad
 from .gradient_accumulator import GradientAccumulator
 import time
@@ -28,10 +29,10 @@ class DiSTNetModel(tf.keras.Model):
     def __init__(self, *args, spatial_dims,
                  edm_loss_weight:float=1,
                  edm_class_weights:list = None,  # weights to balance foreground/background classes
-                 center_loss_weight:float=1,
-                 displacement_loss_weight:float=1,
-                 link_multiplicity_loss_weight:float=1,
-                 category_loss_weight: float = 1,
+                 center_loss_weight:float=0.5,
+                 displacement_loss_weight:float=0.25, # increase to 0.5 ? no simultaneously with lm
+                 link_multiplicity_loss_weight:float=0.125, # increase to  0.25 ? no simultaneously with dis
+                 category_loss_weight: float = 0.5, # reduce ?
                  edm_loss=PseudoHuber(1), edm_derivative_loss:bool=False,
                  cdm_loss=PseudoHuber(1), cdm_derivative_loss:bool=False,
                  cdm_loss_radius:float = 0,
@@ -75,16 +76,16 @@ class DiSTNetModel(tf.keras.Model):
         if link_multiplicity_class_weights is not None:
             assert len(link_multiplicity_class_weights) == 3, "3 link multiplicity class weights should be provided: normal cell, dividing/merging cells, cell with no previous cell"
             self.link_multiplicity_class_weights = HideVariableWrapper( tf.Variable(np.asarray(link_multiplicity_class_weights, dtype="float32"), dtype=tf.float32, trainable=False,  name="link_multiplicity_class_weights"))
-            self.link_multiplicity_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), self.link_multiplicity_class_weights.value, remove_background=True)
+            self.link_multiplicity_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), self.link_multiplicity_class_weights.value, remove_background=True)
         else:
-            self.link_multiplicity_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
+            self.link_multiplicity_loss = balanced_category_loss(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
         if category_number > 1:
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
                 self.category_class_weights = HideVariableWrapper(tf.Variable(np.asarray(category_class_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="category_class_weights"))
-                self.category_loss = weighted_loss_by_category(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), self.category_class_weights.value, remove_background=True)
+                self.category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), self.category_class_weights.value, remove_background=True)
             else:
-                self.category_loss = balanced_category_loss(tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
+                self.category_loss = balanced_category_loss(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
         else:
             self.category_loss = None
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py

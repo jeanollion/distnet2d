@@ -28,6 +28,63 @@ class PseudoHuber(tf.keras.losses.Loss):
         return tf.multiply(self.delta_sq, tf.sqrt(1. + tf.square((y_true - y_pred)/self.delta)) - 1.)
 
 
+class TemperedFocalCrossEntropy(tf.keras.losses.Loss):
+    def __init__(self, temperature: float = 2.0, gamma: float = 1.0, **kwargs):
+        """
+        Tempered Focal Cross-Entropy for multi-class classification.
+        Combines gradient stability (tempering) with hard example mining (focal).
+
+        Args:
+            temperature: Tempering parameter (t > 1). Controls gradient bounding.
+                        t=1.0 → standard focal loss (unbounded gradients)
+                        t=2.0 → moderate bounding (recommended start)
+                        t=3.0+ → strong bounding (very stable, may slow learning)
+
+            gamma: Focusing parameter (γ ≥ 0). Controls hard example emphasis.
+                   γ=0.0 → tempered CE (no focal effect)
+                   γ=1.0 → mild focus on hard examples
+                   γ=2.0 → standard focal (recommended start)
+                   γ=5.0 → extreme focus (for very imbalanced data)
+        """
+        self.temperature = float(temperature)
+        self.gamma = float(gamma)
+        assert temperature >=1, f"temperature must be >=1 got {temperature}"
+        assert gamma >=0, f"gamma must be >=0 got {gamma}"
+        super().__init__(**kwargs)
+
+    def call(self, y_true, y_pred):
+        """
+        Args:
+            y_true: One-hot encoded labels, shape (batch_size, num_classes)
+            y_pred: Predicted probabilities, shape (batch_size, num_classes)
+        """
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+
+        t = self.temperature
+
+        # Tempered log: (p^(1-t) - 1) / (1-t)
+        # Bounds gradients: ∂L/∂p ∝ p^(-t) instead of p^(-1)
+        tempered_log = (tf.pow(y_pred, 1. - t) - 1.) / (1. - t)
+
+        # Focal weight: (1 - p)^gamma
+        # Down-weights easy examples (high confidence correct predictions)
+        focal_weight = tf.pow(1. - y_pred, self.gamma)
+
+        # Combined loss: alpha * focal_weight * y_true * tempered_log
+        # Sum over classes (categorical), mean over batch
+        loss = - focal_weight * y_true * tempered_log
+
+        return tf.reduce_sum(loss, axis=-1)  # Sum over classes
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'temperature': self.temperature,
+            'gamma': self.gamma
+        })
+        return config
+
 def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, pred_dy=None, pred_dx=None, pred_lap=None, mask=None, mask_interior=None, derivative_loss: bool = False, laplacian_loss: bool = False, weight_map=None):
     loss = loss_fun(true, tf.where(mask, pred, 0) if mask is not None else pred)
     if weight_map is not None:
