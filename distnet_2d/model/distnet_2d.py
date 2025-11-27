@@ -4,12 +4,17 @@ from collections import defaultdict
 from pyexpat import features
 
 import tensorflow as tf
+
+from .window_spatial_attention import WindowSpatialAttention
 from .architectures import ArchBase, Blend, TemA
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
-    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, HideVariableWrapper, \
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, \
+    HideVariableWrapper, \
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch, SplitNConvToBatch2D, \
-    InferenceLayer, InferenceAwareBatchSelector
+    InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding
 import numpy as np
+
+from .local_spatial_attention import LocalSpatialAttention
 from .spatial_attention import SpatialAttention2D
 from .local_spatio_temporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatch
 from .temporal_attention import TemporalAttention
@@ -493,22 +498,22 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             if l_idx==0:
                 for dSegName in output_per_decoder["Seg"].keys():
                     output_name = None if arch.frame_window > 0 or arch.predict_edm_derivatives else decoder_output_names["Seg"][dSegName]
-                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
+                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
                 for dCenterName in output_per_decoder["Center"].keys():
                     output_name = None if arch.frame_window > 0 or arch.predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
-                    decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
+                    decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
                 if arch.category_number > 1:
                     for dCatName in output_per_decoder["Cat"].keys():
                         output_name = None if arch.frame_window > 0 else decoder_output_names["Cat"][dCatName]
-                        decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
+                        decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
-                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
+                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=arch.blend_combine_kernel_size, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
         if arch.n_inputs == 1:
@@ -565,28 +570,59 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
         if isinstance(arch, TemA) and arch.frame_window > 0:
-            inference_idx = list(set( [frame_prev[i] for i in inference_pair_idx] + [frame_next[i] for i in inference_pair_idx] ))
-            inference_idx.sort()
-            query_key_mapping = defaultdict(lambda: [])
-            for p, n in zip(frame_prev, frame_next):
-                query_key_mapping[p].append(n)
-                query_key_mapping[n].append(p)
-            feature_blending_op = LocalSpatioTemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
-                                                               spatial_radius = arch.attention_spatial_radius, inference_query_idx=inference_idx,
-                                                               #query_key_mapping=query_key_mapping, # TODO see impact:
-                                                               dropout=arch.dropout, l2_reg=arch.l2_reg, skip_connection=True, frame_aware=arch.frame_aware, frame_max_distance=arch.frame_max_distance, name=f"FeatureSTAtt")
+            prev_idx = np.clip(np.arange(n_frames)-1, 0, n_frames - 1).tolist() if arch.frame_window > 1 else [0] # special case if fw = 1 -> simplify
+            next_idx = np.clip(np.arange(n_frames)+1, 0, n_frames-1).tolist() if arch.frame_window > 1 else [2] # special case if fw = 1 -> simplify
+            direct_neigh_prev = tf.keras.layers.Concatenate(axis=0, name="FeaturePrevToBatch")( [features_list[i] for i in prev_idx])
+            direct_neigh_next = tf.keras.layers.Concatenate(axis=0, name="FeatureNextToBatch")( [features_list[i] for i in next_idx])
+            # temporal embeddings
+            use_window_att = True
+            embedding_dim = attention_filters * arch.temporal_attention if use_window_att else feature_filters
+            fdist_emb = RelativeTemporalEmbedding(max_distance = arch.frame_max_distance, embedding_dim=embedding_dim, name = "NeighborTemporalDistance")
             if arch.frame_aware:
-                frame_relative_index = frame_index[:, 0, 0, :] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]
-                features = feature_blending_op([features_list, frame_relative_index])
+                bw_gap = tf.gather(frame_index[:, 0, 0], prev_idx, axis=1) - frame_index[:, 0, 0]
+                fw_gap = tf.gather(frame_index[:, 0, 0], next_idx, axis=1) - frame_index[:, 0, 0]
+                bw_emb = fdist_emb(bw_gap)  # (B, T, F)
+                fw_emb = fdist_emb(fw_gap) # (B, T, F)
             else:
-                features = feature_blending_op(features_list)
-            features_batch = InferenceAwareBatchSelector(inference_idx=inference_idx.index(arch.frame_window), name="SelectFeature")(features)
+                bw_gap = tf.cast(np.array(prev_idx) - np.arange(n_frames), tf.int32)
+                fw_gap = tf.cast(np.array(next_idx) - np.arange(n_frames), tf.int32)
+                bw_emb = tf.tile(fdist_emb(bw_gap)[None], [tf.shape(inputs[0])[0], 1, 1])  # (T, F) -> (B, T, F)
+                fw_emb = tf.tile(fdist_emb(fw_gap)[None], [tf.shape(inputs[0])[0], 1, 1])  # (T, F) -> (B, T, F)
+            bw_emb = tf.reshape(tf.transpose(bw_emb, [1, 0, 2]), [-1, 1, 1, embedding_dim]) # (T x B, 1, 1, F)
+            fw_emb = tf.reshape(tf.transpose(fw_emb, [1, 0, 2]), [-1, 1, 1, embedding_dim]) # (T x B, 1, 1, F)
 
+            if use_window_att:
+                bw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, name="AttBackward")
+                fw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, name="AttForward")
+                backward_features = bw_op([features_batch, direct_neigh_prev, direct_neigh_prev, bw_emb])
+                forward_features = fw_op([features_batch, direct_neigh_next, direct_neigh_prev, fw_emb])
+            else:
+                bw_op = Combine(filters=feature_filters, kernel_size=arch.blend_combine_kernel_size, l2_reg=arch.l2_reg, name="CombineBW")
+                fw_op = Combine(filters=feature_filters, kernel_size=arch.blend_combine_kernel_size, l2_reg=arch.l2_reg, name="CombineFW")
+                backward_features = bw_op([features_batch + bw_emb, direct_neigh_prev + bw_emb])
+                forward_features = fw_op([features_batch + fw_emb, direct_neigh_next + fw_emb])
+            bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")( [backward_features, forward_features])
+            #bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")( [backward_features, forward_features, features_batch])
+            if arch.frame_window > 1:
+                bwfw_features_list = SplitBatch(n_frames, compensate_gradient=False, name="SplitFeaturesBWFW")(bwfw_features_batch)
+                inference_idx = list(  set([frame_prev[i] for i in inference_pair_idx] + [frame_next[i] for i in inference_pair_idx]))
+                inference_idx.sort()
+                long_term_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
+                                                 inference_query_idx = inference_idx, frame_aware = arch.frame_aware, frame_max_distance = arch.frame_max_distance)
+                if arch.frame_aware:
+                    frame_relative_index = frame_index[:, 0, 0, :] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]
+                    features = long_term_op([bwfw_features_list, frame_relative_index])
+                else:
+                    features = long_term_op(bwfw_features_list)
+            else:
+                central_feature = tf.keras.layers.Conv2D(filters=feature_filters, kernel=1, padding="same", activation="relu", name="CentralFeatureConv")(bwfw_features_batch)
+                features = [features_list[0], central_feature, features_list[2]]
+
+            features_batch = InferenceAwareBatchSelector(inference_idx=inference_idx.index(arch.frame_window), name="SelectFeature")(features)
             # feature pairs
             feature_prev = InferenceAwareBatchSelector(train_idx = frame_prev, inference_idx = [inference_idx.index(frame_prev[i]) for i in inference_pair_idx], name="SelectFeaturePairPrev")(features)
             feature_next = InferenceAwareBatchSelector(train_idx = frame_next, inference_idx = [inference_idx.index(frame_next[i]) for i in inference_pair_idx], name="SelectFeaturePairNext")(features)
             feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
-            print(f"all inference idx: {inference_idx} featureidx: {inference_idx.index(arch.frame_window)} feature_prev_idx: {[inference_idx.index(frame_prev[i]) for i in inference_pair_idx]}, feature_next_idx: {[inference_idx.index(frame_next[i]) for i in inference_pair_idx]}")
 
         elif isinstance(arch, Blend) and arch.frame_window > 0: # BLEND architecture (first architecture) : combine feature / feature pair with convolution part so that each frame / frame pair has access to information from all other feature pairs / features
             feature_prev = tf.keras.layers.Concatenate(axis=0, name="FeaturePairPrevToBatch")([features_list[i] for i in frame_prev])

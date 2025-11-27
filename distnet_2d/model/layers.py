@@ -303,18 +303,19 @@ class BatchToChannel(InferenceLayer, tf.keras.layers.Layer):
         return tf.reshape(input, target_shape2) # (B, Y, X, N x F)
 
 class FrameDistanceEmbedding(tf.keras.layers.Layer):
-    def __init__(self, input_dim:int, output_dim:int, frame_prev_idx:list, frame_next_idx:list , name:str="FrameDistanceEmbedding"):
+    def __init__(self, input_dim:int, output_dim:int, frame_prev_idx:list, frame_next_idx:list, offset:int = 0 , name:str="FrameDistanceEmbedding"):
         self.input_dim=input_dim
         self.output_dim=output_dim
         self.frame_next_idx=frame_next_idx
         self.frame_prev_idx=frame_prev_idx
+        self.offset=offset
         assert len(frame_prev_idx) == len(frame_next_idx)
         self.embedding=None
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"input_dim": self.input_dim, "output_dim":self.output_dim, "frame_prev_idx":self.frame_prev_idx, "frame_next_idx":self.frame_next_idx})
+      config.update({"input_dim": self.input_dim, "output_dim":self.output_dim, "frame_prev_idx":self.frame_prev_idx, "frame_next_idx":self.frame_next_idx, "offset":self.offset})
       return config
 
     def build(self, input_shape):
@@ -322,7 +323,8 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
         super().build(input_shape)
 
     def call(self, frame_index): # (B, 1, 1, FW)
-        frame_distance = tf.cast( tf.gather(frame_index[:, 0, 0], self.frame_next_idx, axis=-1) - tf.gather(frame_index[:, 0, 0], self.frame_prev_idx, axis=-1), tf.int32 ) # (B, N)
+        offset = tf.cast(self.offset, tf.int32)
+        frame_distance = tf.cast( tf.gather(frame_index[:, 0, 0], self.frame_next_idx, axis=-1) - tf.gather(frame_index[:, 0, 0], self.frame_prev_idx, axis=-1), tf.int32 ) + offset # (B, N)
         frame_distance_emb = self.embedding(frame_distance) # (B, N, C)
         frame_distance_emb = tf.transpose(frame_distance_emb, perm=[1, 0, 2]) # (N, B, C)
         frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim]) # ( N x B, 1, 1, C )
@@ -367,41 +369,40 @@ def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
 class RelativeTemporalEmbedding(tf.keras.layers.Layer):
     """Combines learned embeddings with sinusoidal encoding."""
 
-    def __init__(self, max_distance, embedding_dim, l2_reg=None, **kwargs):
+    def __init__(self, max_distance, embedding_dim, hybrid:bool=True, l2_reg=None, **kwargs):
         super().__init__(**kwargs)
         self.max_distance = max_distance
         self.embedding_dim = embedding_dim
         self.vocab_size = 2 * max_distance + 1
         self.l2_reg=l2_reg
+        self.hybrid=hybrid
 
     def build(self, input_shape):
         input_shape, central_frame = input_shape
         # Learned component (half dimensions)
         self.learned_embedding = tf.keras.layers.Embedding(
             input_dim=self.vocab_size,
-            output_dim=self.embedding_dim // 2,
-            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            output_dim=self.embedding_dim // 2 if self.hybrid else self.embedding_dim,
+            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg is not None and self.l2_reg > 0 else None,
             name="learned_temporal"
         )
         super().build(input_shape)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"max_distance": self.max_distance, "embedding_dim":self.embedding_dim, "l2_reg":self.l2_reg})
+      config.update({"max_distance": self.max_distance, "embedding_dim":self.embedding_dim, "l2_reg":self.l2_reg, "hybrid":self.hybrid})
       return config
 
-    def call(self, distances):
-
+    def call(self, distances): # (B, T) or (T)
         # Learned part
         indices = tf.clip_by_value(distances + self.max_distance, 0, self.vocab_size - 1)
         learned = self.learned_embedding(indices)  # (T, embedding_dim//2)
 
-        # Sinusoidal part
-        sinusoidal = sinusoidal_temporal_encoding(distances, self.embedding_dim // 2, dtype=learned.dtype)
-
-        # Concatenate
-        return tf.concat([learned, sinusoidal], axis=-1)  # (T, embedding_dim)
-
+        if self.hybrid: # Sinusoidal part
+            sinusoidal = sinusoidal_temporal_encoding(distances, self.embedding_dim - self.embedding_dim // 2, dtype=learned.dtype)
+            return tf.concat([learned, sinusoidal], axis=-1)  # (T, embedding_dim)
+        else:
+            return learned
 
 def get_grad_weight_fun(weight):
     @tf.custom_gradient

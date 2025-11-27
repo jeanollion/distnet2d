@@ -3,6 +3,12 @@ import tensorflow as tf
 import numpy as np
 from distnet_2d.model.layers import InferenceLayer, RelativeTemporalEmbedding
 
+from math import ceil
+import tensorflow as tf
+import numpy as np
+from distnet_2d.model.layers import InferenceLayer, RelativeTemporalEmbedding
+
+
 class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
     """
     Optimized spatio-temporal attention - fast and memory efficient.
@@ -13,7 +19,7 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
 
     def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
                  skip_connection: bool = False, frame_aware: bool = False, frame_max_distance: int = 0,
-                 training_query_idx: list = None, inference_query_idx: int = None, query_key_mapping: dict = None,
+                 training_query_idx: list = None, inference_query_idx: int = None,
                  dropout: float = 0, l2_reg: float = 0.,
                  spatial_chunk_mode: str = 'col',  # 'row' or 'col'
                  name="SpatioTemporalAttentionOptimized"):
@@ -30,12 +36,11 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         self.training_query_idx = training_query_idx
         self.inference_query_idx = inference_query_idx
         self.frame_aware = frame_aware
+        if self.frame_aware:
+            assert frame_max_distance > 0, "in frame_aware mode frame max distance must be provided"
         self.frame_max_distance = frame_max_distance
-        self.query_key_mapping = query_key_mapping
         assert spatial_chunk_mode in ["row", "col"], f"invalid spatial_chunk_mode: {spatial_chunk_mode} must be in [row, col]"
         self.spatial_chunk_mode = spatial_chunk_mode
-        if self.frame_max_distance:
-            assert self.frame_max_distance > 0
 
     def get_config(self):
         config = super().get_config().copy()
@@ -50,7 +55,6 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             "skip_connection": self.skip_connection,
             "frame_aware": self.frame_aware,
             "frame_max_distance": self.frame_max_distance,
-            "query_key_mapping": self.query_key_mapping,
             "spatial_chunk_mode": self.spatial_chunk_mode
         })
         return config
@@ -125,19 +129,6 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         if self.skip_connection:
             self.skipproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=True, name="skip")
 
-        # Initialize query-key mapping and create mask
-        if self.query_key_mapping is not None:
-            # Create attention mask: (max_Q, T) with 1.0 = attend, 0.0 = mask
-            max_Q = max(max(self.training_query_idx), max(self.inference_query_idx)) + 1
-            mask_np = np.ones([max_Q, self.temporal_dim], dtype=np.int32)
-            for q_idx, k_list in self.query_key_mapping.items():
-                for t in range(self.temporal_dim):
-                    if t not in k_list:
-                        mask_np[q_idx, t] = 0
-            self.attention_mask = tf.cast(mask_np, dtype=tf.bool)
-        else:
-            self.attention_mask = None
-
         # Pre-compute spatial offsets for gather_nd
         spatial_offsets = []
         for dy in range(-self.radius_y, self.radius_y + 1):
@@ -188,13 +179,12 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         y_grid, x_grid = tf.meshgrid(y_patch_center, x_patch_center, indexing='ij')
         return y_grid, x_grid
 
-    #@tf.function
     def call(self, input, training: bool = None):
         if self.frame_aware:
             frame_list, t_index = input
         else:
             frame_list = input
-            t_index = None
+            t_index = tf.range(self.temporal_dim, dtype=tf.int32)
 
         C = self.filters
         T = self.temporal_dim
@@ -213,7 +203,7 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         frames = tf.stack(frame_list, axis=0)
         # Project all frames at once
         frames_batch = tf.reshape(frames, (T * B, Y, X, C))
-        Q_all_input = tf.concat([frame_list[i] for i in idx_list], axis=0) # nQ * B, Y, X, F
+        Q_all_input = tf.concat([frame_list[i] for i in idx_list], axis=0)  # nQ * B, Y, X, F
 
         # Fuse projections to reduce intermediate tensors
         K_all = self.kproj(frames_batch)
@@ -225,9 +215,6 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         V_all = tf.reshape(V_all, (T, B, Y, X, H, F))
         Q_all = tf.reshape(Q_all, (nQ, B, Y, X, H, F))
 
-        # Temporal embeddings
-        if not self.frame_aware:
-            t_index = tf.range(T, dtype=tf.int32)
         t_emb = self.temp_embedding(t_index)
 
         if self.frame_aware:
@@ -254,19 +241,11 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         q_s_emb = tf.reshape(q_s_emb, (1, 1, Y, X, H, F))
 
         # Add embeddings to projected K & Q
-        K_all = K_all + k_t_emb # spatial embedding is added later for the neighborhood
+        K_all = K_all + k_t_emb  # spatial embedding is added later for the neighborhood
         Q_all = Q_all + q_s_emb + q_t_emb
 
         # Scaling factor for softmax
         scale = tf.math.rsqrt(tf.cast(F, dtype))
-
-        # Get attention mask for queries: (nQ, T)
-        if self.attention_mask is not None:
-            query_mask = tf.gather(self.attention_mask, tf.constant(idx_list, dtype=tf.int32))
-            query_mask_broadcast = tf.reshape(query_mask, (nQ, 1, 1, 1, 1, 1, T))
-            chunk_size = tf.shape(self.spatial_offsets_structured[0])[0]
-            query_mask_broadcast = tf.tile(query_mask_broadcast, [1, 1, 1, 1, 1, chunk_size, 1])
-            query_mask_broadcast = tf.reshape(query_mask_broadcast, (nQ, 1, 1, 1, 1, -1))
 
         cy_grid, cx_grid = self._compute_center_indices(Y, X)
 
@@ -285,7 +264,8 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
 
         num_chunks = len(self.spatial_offsets_structured)
         chunk_size = tf.shape(self.spatial_offsets_structured[0])[0]
-        for chunk_idx in range(num_chunks): # CHUNKED LOOP by row or column
+
+        for chunk_idx in range(num_chunks):  # CHUNKED LOOP by row or column
             # Get all offsets for this row/column
             chunk_offsets = self.spatial_offsets_structured[chunk_idx]  # Shape: (chunk_size, 2)
 
@@ -327,19 +307,16 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             K_flat = tf.gather_nd(K_all, idx_flat)  # (chunk_size * T * B * Y * X, H, F)
             V_flat = tf.gather_nd(V_all, idx_flat)  # (chunk_size * T * B * Y * X, H, F)
 
+            spatial_emb_chunk = tf.gather(k_s_emb, spatial_idx_vec, axis=0)  # (chunk_size, T, 1, 1, 1, H, F)
+
             # Reshape back: (chunk_size, T, B, Y, X, H, F)
             K_chunk = tf.reshape(K_flat, [chunk_size * T, B, Y, X, H, F])
             V_chunk = tf.reshape(V_flat, [chunk_size * T, B, Y, X, H, F])
 
-            # Add spatial embeddings - single gather
-            spatial_emb_chunk = tf.gather(k_s_emb, spatial_idx_vec, axis=0)  # (chunk_size, T, 1, 1, 1, H, F)
             K_chunk = K_chunk + tf.reshape(spatial_emb_chunk, [chunk_size * T, 1, 1, 1, H, F])
 
-            # Compute scores: (nQ, B, Y, X, H, chunk_size, T)
-            scores_chunk = tf.einsum('qbyxnd,sbyxnd->qbyxns', Q_all, K_chunk) * scale
-
-            if self.attention_mask is not None:
-                scores_chunk = tf.where(query_mask_broadcast, scores_chunk, min_val)
+            # Compute scores
+            scores_chunk = tf.einsum('qbyxhf,sbyxhf->qbyxhs', Q_all, K_chunk) * scale
 
             # Update running max
             new_max = tf.maximum(max_scores, tf.reduce_max(scores_chunk, axis=-1, keepdims=True))
@@ -351,13 +328,10 @@ class LocalSpatioTemporalAttention(InferenceLayer, tf.keras.layers.Layer):
 
             # Add new contributions
             exp_scores_flat = tf.exp(scores_chunk - new_max)
-            if self.attention_mask is not None:
-                exp_scores_flat = tf.where(query_mask_broadcast, exp_scores_flat, 0.0)
-
             sum_exp = sum_exp + tf.reduce_sum(exp_scores_flat, axis=-1, keepdims=True)
 
             # Accumulate weighted values
-            contrib = tf.einsum('qbyxns,sbyxnd->qbyxnd', exp_scores_flat, V_chunk)
+            contrib = tf.einsum('qbyxhs,sbyxhf->qbyxhf', exp_scores_flat, V_chunk)
             out_acc = out_acc + contrib
 
             max_scores = new_max
@@ -731,16 +705,7 @@ class LocalSpatioTemporalAttentionPatch(InferenceLayer, tf.keras.layers.Layer):
             out = tf.concat([out, Qresh], axis=-1)
             out = self.skipproj(out)
         out = tf.reshape(out, (B, Qcount, H, W, C))
-
-        # Unstack outputs
-        attention_output_list = tf.unstack(out, axis=1)
-
-        if self.return_list:
-            return attention_output_list
-        if self.inference_mode and not isinstance(self.inference_idx, (list, tuple)):
-            return attention_output_list[0]
-        else:
-            return tf.concat(attention_output_list, 0)
+        return tf.transpose(out, [1, 0, 2, 3, 4])
 
 
 # faster but with high-memory footprint
@@ -1093,14 +1058,6 @@ class LocalSpatioTemporalAttentionPatchKeras(InferenceLayer, tf.keras.layers.Lay
             queries = tf.concat(query_list, axis=0) # Q*B, H, W, C
             out = tf.concat([out, queries], axis=-1)
             out = self.skipproj(out)
-            if not self.return_list:
-                return out
-            else:
-                out = tf.reshape(out, (-1, B, H, W, C))
-                return tf.unstack(out, axis=0)
-        if self.return_list:
-            return attention_output_list
-        if self.inference_mode and not isinstance(self.inference_idx, (list, tuple)):
-            return attention_output_list[0]
+            return tf.reshape(out, (-1, B, H, W, C))
         else:
-            return tf.concat(attention_output_list, 0)
+            return tf.stack(attention_output_list)

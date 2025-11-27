@@ -95,15 +95,15 @@ class ArchDepth(ArchBase):
 
 
 class D2(ArchDepth):
-    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
         print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**2} x {self.spatial_dimensions[1] / 2**2}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2)
         ker1_2, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, 2)
-        ker2, dil2 = get_kernels_and_dilation(5, 2, self.spatial_dimensions, 2 * 2)
-        ker2_2, dil2_2 = get_kernels_and_dilation(5, 3, self.spatial_dimensions, 2 * 2)
-        ker2_3, dil2_3 = get_kernels_and_dilation(5, 4, self.spatial_dimensions, 2 * 2)
+        ker2, dil2 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, 2 * 2)
+        ker2_2, dil2_2 = get_kernels_and_dilation(5, min(3, max_dilation), self.spatial_dimensions, 2 * 2)
+        ker2_3, dil2_3 = get_kernels_and_dilation(5, min(4,max_dilation), self.spatial_dimensions, 2 * 2)
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 * 2)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 2)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1, self.spatial_dimensions, 2 * 2)
@@ -159,15 +159,15 @@ class D2(ArchDepth):
 
 
 class D3(ArchDepth):
-    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
         print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**3} x {self.spatial_dimensions[1] / 2**3}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
         ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2)
         ker2, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2 * 2)
-        ker3, dil3 = get_kernels_and_dilation(5, 2, self.spatial_dimensions, 2 ** 3)
-        ker3_2, dil3_2 = get_kernels_and_dilation(5, 3, self.spatial_dimensions, 2 ** 3)
-        ker3_3, dil3_3 = get_kernels_and_dilation(5, 4, self.spatial_dimensions, 2 ** 3)
+        ker3, dil3 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, 2 ** 3)
+        ker3_2, dil3_2 = get_kernels_and_dilation(5, min(3, max_dilation), self.spatial_dimensions, 2 ** 3)
+        ker3_3, dil3_3 = get_kernels_and_dilation(5, min(4, max_dilation), self.spatial_dimensions, 2 ** 3)
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 ** 3)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 3)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, 2 * 3)
@@ -230,7 +230,7 @@ class D3(ArchDepth):
 
 
 class D4(ArchDepth):
-    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
         print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**4} x {self.spatial_dimensions[1] / 2**4}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
@@ -238,11 +238,11 @@ class D4(ArchDepth):
         ker2, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, 2 ** 2)
         ker2_1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2 ** 2)
         ker3, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, 2 ** 3)
-        ker3_2, dil3_2 = get_kernels_and_dilation(5, 2, self.spatial_dimensions, 2 ** 3)
+        ker3_2, dil3_2 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, 2 ** 3)
         ker3_3, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2 ** 3)
-        ker4, dil4 = get_kernels_and_dilation(5, 2, self.spatial_dimensions, 2 ** 4)
-        ker4_2, dil4_2 = get_kernels_and_dilation(5, 3, self.spatial_dimensions, 2 ** 4)
-        ker4_3, dil4_3 = get_kernels_and_dilation(5, 4, self.spatial_dimensions, 2 ** 4)
+        ker4, dil4 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, 2 ** 4)
+        ker4_2, dil4_2 = get_kernels_and_dilation(5, min(3,max_dilation), self.spatial_dimensions, 2 ** 4)
+        ker4_3, dil4_3 = get_kernels_and_dilation(5, min(4, max_dilation), self.spatial_dimensions, 2 ** 4)
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 ** 4)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 4)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, 2 * 4)
@@ -372,21 +372,21 @@ class TemA(ArchBase):
 
 class TemAD2(TemA, D2):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=5, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemAD3(TemA, D3):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=5, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemAD4(TemA, D4):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=5, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")
@@ -422,8 +422,8 @@ def limit_radius(target_radius, spa_dimensions, downsampling):
         return target_radius
     spa_dimensions = ensure_multiplicity(2, spa_dimensions)
     rad = ensure_multiplicity(2, target_radius)
-    spa_dimensions = [d / downsampling if d is not None and d > 0 else None for d in spa_dimensions]
-    rad = [min(int((s-1)/2), r) for r, s in zip(rad, spa_dimensions)]
+    spa_dimensions = [d // downsampling if d is not None and d > 0 else None for d in spa_dimensions]
+    rad = [min(s, r) for r, s in zip(rad, spa_dimensions)]
     if rad[0] == rad[1]:
         rad = rad[0]
     print(f"rad: {target_radius} -> {rad} for dim: {spa_dimensions}")

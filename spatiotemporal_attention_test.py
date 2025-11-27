@@ -107,7 +107,7 @@ def compare_spatiotemporal_versions(keras_att:bool):
 
     # Parameters
     B, H, W, C = 2, 8, 8, 16
-    T = 3
+    T = 5
     num_heads = 4
     attention_filters = 5
     ry, rx = 1, 1
@@ -194,9 +194,10 @@ def compare_spatiotemporal_versions(keras_att:bool):
         for i in range(min(3, out_patch_np.shape[0])):
             for j in range(min(3, out_patch_np.shape[1])):
                 for k in range(min(3, out_patch_np.shape[2])):
-                    diff = abs_diff[i, j, k, 0]
-                    print(f"  [{i},{j},{k},0]: patch={out_patch_np[i, j, k, 0]:.6f}, "
-                          f"conv={out_efficient_np[i, j, k, 0]:.6f}, diff={diff:.2e}")
+                    for l in range(min(3, out_patch_np.shape[3])):
+                        diff = abs_diff[i, j, k, l, 0]
+                        print(f"  [{i},{j},{k},0]: patch={out_patch_np[i, j, k, l, 0]:.6f}, "
+                          f"conv={out_efficient_np[i, j, k, l, 0]:.6f}, diff={diff:.2e}")
         return False
 
 
@@ -751,11 +752,11 @@ def compare_regional_versions(keras_att:bool):
 
 
 if __name__ == "__main__":
-    #compare_regional_versions(False)
-    #compare_regional_versions(True)
+    compare_regional_versions(False)
+    compare_regional_versions(True)
 
-    compare_spatiotemporal_versions(False)
-    compare_spatiotemporal_versions(True)
+    #compare_spatiotemporal_versions(False)
+    #compare_spatiotemporal_versions(True)
 
     print("\n")
     print("█" * 80)

@@ -5,13 +5,14 @@ import numpy as np
 class LocalSpatialAttention(tf.keras.layers.Layer):
     """
     Optimized spatial attention - fast and memory efficient.
-    Key optimization for speed: loop over spatial neighbors, rest of operation is vectorized
+    Key optimization for speed: chunked loop over spatial neighbors (by row or col), rest vectorized
     Key optimization for memory: online softmax (value accumulation, no score stored)
     """
 
     def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
                  dropout: float = 0.1, skip_connection: bool = False, l2_reg: float = 0.,
-                 use_online_softmax: bool = False, name="LocalSpatialAttention"):
+                 spatial_chunk_mode: str = 'col',  # 'row' or 'col'
+                 name="LocalSpatialAttention"):
         super().__init__(name=name)
         self.num_heads = num_heads
         self.attention_filters = attention_filters
@@ -20,7 +21,9 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
         self.dropout = dropout
         self.l2_reg = l2_reg
         self.skip_connection = skip_connection
-        self.use_online_softmax = use_online_softmax
+        assert spatial_chunk_mode in ["row",
+                                      "col"], f"invalid spatial_chunk_mode: {spatial_chunk_mode} must be in [row, col]"
+        self.spatial_chunk_mode = spatial_chunk_mode
 
     def get_config(self):
         config = super().get_config().copy()
@@ -31,7 +34,7 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
             "l2_reg": self.l2_reg,
             "spatial_radius": self.spatial_radius,
             "skip_connection": self.skip_connection,
-            "use_online_softmax": self.use_online_softmax
+            "spatial_chunk_mode": self.spatial_chunk_mode
         })
         return config
 
@@ -86,6 +89,24 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
                 spatial_offsets.append([dy, dx])
         self.spatial_offsets = tf.constant(spatial_offsets, dtype=tf.int32)
 
+        # Pre-compute row/column structured offsets
+        if self.spatial_chunk_mode == 'row':
+            # Group by rows: [[row0_offsets], [row1_offsets], ...]
+            self.spatial_offsets_structured = []
+            for dy in range(-self.radius_y, self.radius_y + 1):
+                row_offsets = []
+                for dx in range(-self.radius_x, self.radius_x + 1):
+                    row_offsets.append([dy, dx])
+                self.spatial_offsets_structured.append(tf.constant(row_offsets, dtype=tf.int32))
+        elif self.spatial_chunk_mode == 'col':
+            # Group by columns: [[col0_offsets], [col1_offsets], ...]
+            self.spatial_offsets_structured = []
+            for dx in range(-self.radius_x, self.radius_x + 1):
+                col_offsets = []
+                for dy in range(-self.radius_y, self.radius_y + 1):
+                    col_offsets.append([dy, dx])
+                self.spatial_offsets_structured.append(tf.constant(col_offsets, dtype=tf.int32))
+
         super().build(input_shape)
 
     def _get_query_spatial_indices(self, Y, X):
@@ -116,11 +137,282 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
                 value = x[0]
                 query = x[0]
             elif len(x) == 2:
-                key = x[0]
-                query = x[1]
-                value = key
+                query, value = x
+                key = value
             else:
-                key, query, value = x
+                query, value, key = x
+        else:
+            key = x
+            value = x
+            query = x
+
+        C = self.filters
+        shape = tf.shape(key)
+        B, Y, X = shape[0], shape[1], shape[2]
+        H = self.num_heads
+        F = self.attention_filters
+        HF = H * F
+        S = self.patch_size
+        dtype = key.dtype
+
+        # Project
+        K = self.kproj(key)
+        Q = self.qproj(query)
+        V = self.vproj(value)
+
+        # Add query spatial positional encoding
+        query_spatial_indices = self._get_query_spatial_indices(Y, X)  # (Y, X)
+        q_s_emb = self.spatial_pos_embedding(query_spatial_indices)  # (Y, X, HF)
+        Q = Q + q_s_emb  # (B, Y, X, HF)
+
+        # Get spatial embeddings for keys
+        spatial_indices = tf.range(S, dtype=tf.int32)
+        k_s_emb = self.spatial_pos_embedding(spatial_indices)  # (S, HF)
+
+        # Compute patch centers
+        cy_grid, cx_grid = self._compute_center_indices(Y, X)
+
+        # Pre-compute batch indices (reused in all chunks)
+        b_idx_base = tf.range(B, dtype=tf.int32)
+        b_idx_grid = tf.tile(b_idx_base[:, None, None], [1, Y, X])
+
+        # Scaling factor
+        scale = tf.math.rsqrt(tf.cast(F, dtype))
+
+        # Online softmax: accumulate exp-weighted values without storing scores
+        min_val = tf.constant(-65504.0 if dtype == tf.float16 else -1e9, dtype=dtype)
+        max_scores = tf.fill([B * Y * X, H, 1], min_val)
+        sum_exp = tf.zeros([B * Y * X, H, 1], dtype=dtype)
+        out_acc = tf.zeros([B * Y * X, H, F], dtype=dtype)
+
+        num_chunks = len(self.spatial_offsets_structured)
+
+        # Flatten Q for efficient computation: (B * Y * X, H, F)
+        Q_flat = tf.reshape(Q, [B * Y * X, H, F])
+
+        # CHUNKED LOOP: Over spatial neighbors (by row or column)
+        for chunk_idx in range(num_chunks):
+            # Get all offsets for this row/column
+            chunk_offsets = self.spatial_offsets_structured[chunk_idx]  # Shape: (chunk_size, 2)
+            chunk_size = tf.shape(chunk_offsets)[0]
+
+            # Extract dy and dx as vectors
+            dy_vec = chunk_offsets[:, 0]  # Shape: (chunk_size,)
+            dx_vec = chunk_offsets[:, 1]  # Shape: (chunk_size,)
+
+            # Compute spatial indices for embeddings
+            spatial_idx_vec = (dy_vec + self.radius_y) * self.patch_width + (dx_vec + self.radius_x)
+
+            # Vectorized neighbor coordinate computation
+            cy_expanded = cy_grid[None, :, :]  # (1, Y, X)
+            cx_expanded = cx_grid[None, :, :]  # (1, Y, X)
+            dy_expanded = dy_vec[:, None, None]  # (chunk_size, 1, 1)
+            dx_expanded = dx_vec[:, None, None]  # (chunk_size, 1, 1)
+
+            ny_chunk = tf.clip_by_value(cy_expanded + dy_expanded, 0, Y - 1)  # (chunk_size, Y, X)
+            nx_chunk = tf.clip_by_value(cx_expanded + dx_expanded, 0, X - 1)  # (chunk_size, Y, X)
+
+            # Expand to (chunk_size, B, Y, X)
+            ny_grid_chunk = ny_chunk[:, None, :, :]  # (chunk_size, 1, Y, X)
+            nx_grid_chunk = nx_chunk[:, None, :, :]  # (chunk_size, 1, Y, X)
+
+            # Broadcast to full shape
+            ny_grid_chunk = tf.broadcast_to(ny_grid_chunk, [chunk_size, B, Y, X])
+            nx_grid_chunk = tf.broadcast_to(nx_grid_chunk, [chunk_size, B, Y, X])
+            b_idx_chunk = tf.broadcast_to(b_idx_grid[None, :, :, :], [chunk_size, B, Y, X])
+
+            # Stack indices: (chunk_size, B, Y, X, 3)
+            idx_chunk = tf.stack([b_idx_chunk, ny_grid_chunk, nx_grid_chunk], axis=-1)
+
+            # Reshape for single gather: (chunk_size * B * Y * X, 3)
+            idx_flat = tf.reshape(idx_chunk, [-1, 3])
+
+            # Single gather for K and V: (chunk_size * B * Y * X, HF)
+            K_flat = tf.gather_nd(K, idx_flat)
+            V_flat = tf.gather_nd(V, idx_flat)
+            K_flat = tf.reshape(K_flat, [chunk_size, B * Y * X, H, F])  # (chunk_size, B*Y*X, H, F)
+            V_flat = tf.reshape(V_flat, [chunk_size, B * Y * X, H, F])  # (chunk_size, B*Y*X, H, F)
+
+            # Add spatial embeddings - work with flat tensors
+            spatial_emb_flat = tf.gather(k_s_emb, spatial_idx_vec, axis=0)  # (chunk_size, HF)
+            spatial_emb_flat = tf.reshape(spatial_emb_flat, [chunk_size, 1, H, F])
+            K_flat = K_flat + spatial_emb_flat
+
+            # Compute scores: (B * Y * X, H, chunk_size)
+            scores_chunk = tf.einsum('bhf,sbhf->bhs', Q_flat, K_flat) * scale
+
+            # Update running max
+            new_max = tf.maximum(max_scores, tf.reduce_max(scores_chunk, axis=-1, keepdims=True))
+
+            # Rescale previous accumulations
+            exp_diff = tf.exp(max_scores - new_max)
+            sum_exp = sum_exp * exp_diff
+            out_acc = out_acc * exp_diff
+
+            # Add new contributions
+            exp_scores = tf.exp(scores_chunk - new_max)  # (B, Y, X, H, chunk_size)
+            sum_exp = sum_exp + tf.reduce_sum(exp_scores, axis=-1, keepdims=True)
+
+            contrib = tf.einsum('bhs,sbhf->bhf', exp_scores, V_flat)
+            out_acc = out_acc + contrib
+
+            max_scores = new_max
+
+        # Final normalization
+        out_acc = out_acc / (sum_exp + 1e-8)
+
+        # Apply dropout
+        if self.dropout > 0 and training:
+            out_acc = self.dropout_layer(out_acc, training=training)
+
+        # Output projection
+        out_acc = tf.reshape(out_acc, (B, Y, X, HF))
+        out = self.outproj(out_acc)
+
+        if self.skip_connection:
+            out = tf.concat([out, query], axis=-1)
+            out = self.skipproj(out)
+
+        return out
+
+class LocalSpatialAttentionChunk(tf.keras.layers.Layer):
+    """
+    Optimized spatial attention - fast and memory efficient.
+    Key optimization for speed: chunked loop over spatial neighbors (by row or col), rest vectorized
+    Key optimization for memory: online softmax (value accumulation, no score stored)
+    """
+
+    def __init__(self, num_heads: int, attention_filters: int = 0, spatial_radius: tuple = (2, 2),
+                 dropout: float = 0.1, skip_connection: bool = False, l2_reg: float = 0.,
+                 spatial_chunk_mode: str = 'col',  # 'row' or 'col'
+                 name="LocalSpatialAttention"):
+        super().__init__(name=name)
+        self.num_heads = num_heads
+        self.attention_filters = attention_filters
+        self.spatial_radius = spatial_radius
+        self.filters = None
+        self.dropout = dropout
+        self.l2_reg = l2_reg
+        self.skip_connection = skip_connection
+        assert spatial_chunk_mode in ["row", "col"], f"invalid spatial_chunk_mode: {spatial_chunk_mode} must be in [row, col]"
+        self.spatial_chunk_mode = spatial_chunk_mode
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "num_heads": self.num_heads,
+            "dropout": self.dropout,
+            "filters": self.filters,
+            "l2_reg": self.l2_reg,
+            "spatial_radius": self.spatial_radius,
+            "skip_connection": self.skip_connection,
+            "spatial_chunk_mode": self.spatial_chunk_mode
+        })
+        return config
+
+    def build(self, input_shapes):
+        if not isinstance(input_shapes, (tuple, list)) or len(input_shapes) > 3:
+            input_shapes = [input_shapes]  # self-attention -> single input
+        try:
+            input_shapes = [s.as_list() for s in input_shapes]
+        except:
+            pass
+        input_shape = input_shapes[0]
+        for s in input_shapes[1:]:
+            assert len(s) == len(input_shape) and all(i == j for i, j in zip(input_shape, s)), \
+                f"all tensors must have same input shape: {input_shape} != {s}"
+
+        self.spatial_dims = input_shape[1:-1]
+        self.filters = input_shape[-1]
+        if self.attention_filters is None or self.attention_filters <= 0:
+            self.attention_filters = int(self.filters / self.num_heads)
+
+        self.radius_y, self.radius_x = self.spatial_radius
+        self.patch_height = 2 * self.radius_y + 1
+        self.patch_width = 2 * self.radius_x + 1
+        self.patch_size = self.patch_height * self.patch_width
+
+        HF = self.num_heads * self.attention_filters
+
+        # Projection layers
+        self.qproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="qproj")
+        self.kproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="kproj")
+        self.vproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="vproj")
+        self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=False, name="outproj")
+
+        if self.skip_connection:
+            self.skipproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=True, name="skip")
+
+        if self.dropout > 0:
+            self.dropout_layer = tf.keras.layers.Dropout(self.dropout)
+
+        # Spatial positional embeddings
+        self.spatial_pos_embedding = tf.keras.layers.Embedding(
+            self.patch_size,
+            HF,
+            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            name="SpatialPosEnc"
+        )
+
+        # Pre-compute spatial offsets for graph mode compatibility
+        spatial_offsets = []
+        for dy in range(-self.radius_y, self.radius_y + 1):
+            for dx in range(-self.radius_x, self.radius_x + 1):
+                spatial_offsets.append([dy, dx])
+        self.spatial_offsets = tf.constant(spatial_offsets, dtype=tf.int32)
+
+        # Pre-compute row/column structured offsets
+        if self.spatial_chunk_mode == 'row':
+            # Group by rows: [[row0_offsets], [row1_offsets], ...]
+            self.spatial_offsets_structured = []
+            for dy in range(-self.radius_y, self.radius_y + 1):
+                row_offsets = []
+                for dx in range(-self.radius_x, self.radius_x + 1):
+                    row_offsets.append([dy, dx])
+                self.spatial_offsets_structured.append(tf.constant(row_offsets, dtype=tf.int32))
+        elif self.spatial_chunk_mode == 'col':
+            # Group by columns: [[col0_offsets], [col1_offsets], ...]
+            self.spatial_offsets_structured = []
+            for dx in range(-self.radius_x, self.radius_x + 1):
+                col_offsets = []
+                for dy in range(-self.radius_y, self.radius_y + 1):
+                    col_offsets.append([dy, dx])
+                self.spatial_offsets_structured.append(tf.constant(col_offsets, dtype=tf.int32))
+
+        super().build(input_shape)
+
+    def _get_query_spatial_indices(self, Y, X):
+        """Get spatial positional indices for queries."""
+        y_coords = tf.range(Y, dtype=tf.int32)
+        x_coords = tf.range(X, dtype=tf.int32)
+        y_patch_center = tf.clip_by_value(y_coords, self.radius_y, Y - self.radius_y - 1)
+        x_patch_center = tf.clip_by_value(x_coords, self.radius_x, X - self.radius_x - 1)
+        y_relative = y_coords - y_patch_center + self.radius_y
+        x_relative = x_coords - x_patch_center + self.radius_x
+        y_grid, x_grid = tf.meshgrid(y_relative, x_relative, indexing='ij')
+        spatial_indices = y_grid * self.patch_width + x_grid
+        return spatial_indices
+
+    def _compute_center_indices(self, Y, X):
+        """Compute patch center coordinates."""
+        y_coords = tf.range(Y, dtype=tf.int32)
+        x_coords = tf.range(X, dtype=tf.int32)
+        y_patch_center = tf.clip_by_value(y_coords, self.radius_y, Y - self.radius_y - 1)
+        x_patch_center = tf.clip_by_value(x_coords, self.radius_x, X - self.radius_x - 1)
+        y_grid, x_grid = tf.meshgrid(y_patch_center, x_patch_center, indexing='ij')
+        return y_grid, x_grid
+
+    def call(self, x, training: bool = None):
+        if isinstance(x, (list, tuple)):
+            if len(x) == 1:
+                key = x[0]
+                value = x[0]
+                query = x[0]
+            elif len(x) == 2:
+                query, value = x
+                key = value
+            else:
+                query, value, key = x
         else:
             key = x
             value = x
@@ -151,132 +443,106 @@ class LocalSpatialAttention(tf.keras.layers.Layer):
         # Get spatial embeddings for keys
         spatial_indices = tf.range(S, dtype=tf.int32)
         k_s_emb = self.spatial_pos_embedding(spatial_indices)  # (S, HF)
+        k_s_emb = tf.reshape(k_s_emb, (S, 1, 1, 1, H, F))
+
+        # Reshape K and V for gathering
+        K = tf.reshape(K, (B, Y, X, H, F))
+        V = tf.reshape(V, (B, Y, X, H, F))
 
         # Compute patch centers
         cy_grid, cx_grid = self._compute_center_indices(Y, X)
 
-        # Pre-compute batch indices (reused in both passes)
-        b_idx = tf.tile(tf.range(B, dtype=tf.int32)[:, None, None], [1, Y, X])
+        # Pre-compute batch indices (reused in all chunks)
+        b_idx_base = tf.range(B, dtype=tf.int32)
+        b_idx_grid = tf.tile(b_idx_base[:, None, None], [1, Y, X])
 
         # Scaling factor
         scale = tf.math.rsqrt(tf.cast(F, dtype))
 
-        if self.use_online_softmax:
-            # Online softmax: accumulate exp-weighted values without storing scores
-            min_val = tf.constant(-65504.0 if dtype == tf.float16 else -1e9, dtype=dtype)
-            max_scores = tf.fill([B, Y, X, H, 1], min_val)
-            sum_exp = tf.zeros([B, Y, X, H, 1], dtype=dtype)
-            out_acc = tf.zeros([B, Y, X, H, F], dtype=dtype)
+        # Online softmax: accumulate exp-weighted values without storing scores
+        min_val = tf.constant(-65504.0 if dtype == tf.float16 else -1e9, dtype=dtype)
+        max_scores = tf.fill([B, Y, X, H, 1], min_val)
+        sum_exp = tf.zeros([B, Y, X, H, 1], dtype=dtype)
+        out_acc = tf.zeros([B, Y, X, H, F], dtype=dtype)
 
-            # LOOP: Over spatial neighbors
-            for s_idx in range(S):
-                dy = self.spatial_offsets[s_idx, 0]
-                dx = self.spatial_offsets[s_idx, 1]
+        num_chunks = len(self.spatial_offsets_structured)
 
-                # Spatial embedding for this neighbor
-                spatial_idx_scalar = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
-                neighbor_s_emb = tf.reshape(k_s_emb[spatial_idx_scalar], (1, 1, 1, HF))
+        # CHUNKED LOOP: Over spatial neighbors (by row or column)
+        for chunk_idx in range(num_chunks):
+            # Get all offsets for this row/column
+            chunk_offsets = self.spatial_offsets_structured[chunk_idx]  # Shape: (chunk_size, 2)
+            chunk_size = tf.shape(chunk_offsets)[0]
 
-                # Neighbor coordinates with edge handling
-                ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
-                nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
-                ny_b = tf.tile(ny[None, :, :], [B, 1, 1])
-                nx_b = tf.tile(nx[None, :, :], [B, 1, 1])
-                idx = tf.stack([b_idx, ny_b, nx_b], axis=-1)
+            # Extract dy and dx as vectors
+            dy_vec = chunk_offsets[:, 0]  # Shape: (chunk_size,)
+            dx_vec = chunk_offsets[:, 1]  # Shape: (chunk_size,)
 
-                # Gather keys and values
-                K_n = tf.gather_nd(K, idx) + neighbor_s_emb  # (B, Y, X, HF)
-                V_n = tf.gather_nd(V, idx)  # (B, Y, X, HF)
-                K_nh = tf.reshape(K_n, (B, Y, X, H, F))
-                V_nh = tf.reshape(V_n, (B, Y, X, H, F))
+            # Compute spatial indices for embeddings
+            spatial_idx_vec = (dy_vec + self.radius_y) * self.patch_width + (dx_vec + self.radius_x)
 
-                # Compute scores: (B, Y, X, H, 1)
-                scores_s = tf.reduce_sum(Q * K_nh, axis=-1, keepdims=True) * scale
+            # Vectorized neighbor coordinate computation
+            cy_expanded = cy_grid[None, :, :]  # (1, Y, X)
+            cx_expanded = cx_grid[None, :, :]  # (1, Y, X)
+            dy_expanded = dy_vec[:, None, None]  # (chunk_size, 1, 1)
+            dx_expanded = dx_vec[:, None, None]  # (chunk_size, 1, 1)
 
-                # Update running max
-                new_max = tf.maximum(max_scores, scores_s)
+            ny_chunk = tf.clip_by_value(cy_expanded + dy_expanded, 0, Y - 1)  # (chunk_size, Y, X)
+            nx_chunk = tf.clip_by_value(cx_expanded + dx_expanded, 0, X - 1)  # (chunk_size, Y, X)
 
-                # Rescale previous accumulations
-                exp_diff = tf.exp(max_scores - new_max)
-                sum_exp = sum_exp * exp_diff
-                out_acc = out_acc * exp_diff
+            # Expand to (chunk_size, B, Y, X)
+            ny_grid_chunk = ny_chunk[:, None, :, :]  # (chunk_size, 1, Y, X)
+            nx_grid_chunk = nx_chunk[:, None, :, :]  # (chunk_size, 1, Y, X)
 
-                # Add new contributions
-                exp_scores = tf.exp(scores_s - new_max)
-                sum_exp = sum_exp + exp_scores
+            # Broadcast to full shape
+            ny_grid_chunk = tf.broadcast_to(ny_grid_chunk, [chunk_size, B, Y, X])
+            nx_grid_chunk = tf.broadcast_to(nx_grid_chunk, [chunk_size, B, Y, X])
+            b_idx_chunk = tf.broadcast_to(b_idx_grid[None, :, :, :], [chunk_size, B, Y, X])
 
-                # Accumulate weighted values
-                out_acc = out_acc + exp_scores * V_nh
+            # Stack indices: (chunk_size, B, Y, X, 3)
+            idx_chunk = tf.stack([b_idx_chunk, ny_grid_chunk, nx_grid_chunk], axis=-1)
 
-                max_scores = new_max
+            # Reshape for single gather: (chunk_size * B * Y * X, 3)
+            idx_flat = tf.reshape(idx_chunk, [-1, 3])
 
-            # Final normalization
-            out_acc = out_acc / (sum_exp + 1e-8)
+            # Single gather for K and V
+            K_flat = tf.gather_nd(K, idx_flat)  # (chunk_size * B * Y * X, H, F)
+            V_flat = tf.gather_nd(V, idx_flat)  # (chunk_size * B * Y * X, H, F)
 
-            # Apply dropout
-            if self.dropout > 0 and training:
-                out_acc = self.dropout_layer(out_acc, training=training)
+            # Reshape back: (chunk_size, B, Y, X, H, F)
+            K_chunk = tf.reshape(K_flat, [chunk_size, B, Y, X, H, F])
+            V_chunk = tf.reshape(V_flat, [chunk_size, B, Y, X, H, F])
 
-        else:
-            # TWO-PASS: Compute all scores first, then accumulate values
-            # PASS 1: Compute all scores
-            scores_array = tf.TensorArray(
-                dtype=dtype,
-                size=S,
-                element_shape=None,
-                clear_after_read=False
-            )
+            # Add spatial embeddings
+            spatial_emb_chunk = tf.gather(k_s_emb, spatial_idx_vec, axis=0)  # (chunk_size, 1, 1, 1, H, F)
+            K_chunk = K_chunk + spatial_emb_chunk
 
-            for s_idx in range(S):
-                dy = self.spatial_offsets[s_idx, 0]
-                dx = self.spatial_offsets[s_idx, 1]
+            # Compute scores: (B, Y, X, H, chunk_size)
+            scores_chunk = tf.einsum('byxhf,sbyxhf->byxhs', Q, K_chunk) * scale
 
-                # Spatial embedding for this neighbor
-                spatial_idx_scalar = (dy + self.radius_y) * self.patch_width + (dx + self.radius_x)
-                neighbor_s_emb = tf.reshape(k_s_emb[spatial_idx_scalar], (1, 1, 1, HF))
+            # Update running max
+            new_max = tf.maximum(max_scores, tf.reduce_max(scores_chunk, axis=-1, keepdims=True))
 
-                # Neighbor coordinates with edge handling
-                ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
-                nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
-                ny_b = tf.tile(ny[None, :, :], [B, 1, 1])
-                nx_b = tf.tile(nx[None, :, :], [B, 1, 1])
-                idx = tf.stack([b_idx, ny_b, nx_b], axis=-1)
+            # Rescale previous accumulations
+            exp_diff = tf.exp(max_scores - new_max)
+            sum_exp = sum_exp * exp_diff
+            out_acc = out_acc * exp_diff
 
-                # Gather keys
-                K_n = tf.gather_nd(K, idx) + neighbor_s_emb  # (B, Y, X, HF)
-                K_nh = tf.reshape(K_n, (B, Y, X, H, F))
+            # Add new contributions
+            exp_scores = tf.exp(scores_chunk - new_max)
+            sum_exp = sum_exp + tf.reduce_sum(exp_scores, axis=-1, keepdims=True)
 
-                # Compute scores
-                scores = tf.reduce_sum(Q * K_nh, axis=-1) * scale  # (B, Y, X, H)
-                scores_array = scores_array.write(s_idx, scores)
+            # Accumulate weighted values
+            contrib = tf.einsum('byxhs,sbyxhf->byxhf', exp_scores, V_chunk)
+            out_acc = out_acc + contrib
 
-            # Stack all scores: (S, B, Y, X, H) -> (B, Y, X, H, S)
-            scores = tf.transpose(scores_array.stack(), [1, 2, 3, 4, 0])
+            max_scores = new_max
 
-            # Softmax over all neighbors
-            weights = tf.nn.softmax(scores, axis=-1)
-            if self.dropout > 0 and training:
-                weights = self.dropout_layer(weights, training=training)
+        # Final normalization
+        out_acc = out_acc / (sum_exp + 1e-8)
 
-            # PASS 2: Accumulate weighted values
-            out_acc = tf.zeros([B, Y, X, H, F], dtype=dtype)
-
-            for s_idx in range(S):
-                dy = self.spatial_offsets[s_idx, 0]
-                dx = self.spatial_offsets[s_idx, 1]
-
-                ny = tf.clip_by_value(cy_grid + dy, 0, Y - 1)
-                nx = tf.clip_by_value(cx_grid + dx, 0, X - 1)
-                ny_b = tf.tile(ny[None, :, :], [B, 1, 1])
-                nx_b = tf.tile(nx[None, :, :], [B, 1, 1])
-                idx = tf.stack([b_idx, ny_b, nx_b], axis=-1)
-
-                V_n = tf.gather_nd(V, idx)  # (B, Y, X, HF)
-                V_nh = tf.reshape(V_n, (B, Y, X, H, F))
-
-                # weights for this spatial neighbor: (B, Y, X, H, 1)
-                w_s = tf.expand_dims(weights[..., s_idx], -1)
-                out_acc = out_acc + w_s * V_nh
+        # Apply dropout
+        if self.dropout > 0 and training:
+            out_acc = self.dropout_layer(out_acc, training=training)
 
         # Output projection
         out_acc = tf.reshape(out_acc, (B, Y, X, HF))
@@ -468,11 +734,10 @@ class LocalSpatialAttentionPatch(tf.keras.layers.Layer):
                 value = x[0]
                 query = x[0]
             elif len(x) == 2:
-                key = x[0]
-                query = x[1]
-                value = key
+                query, value = x
+                key = value
             else:
-                key, query, value = x
+                query, value, key = x
         else:
             key = x
             value = x
@@ -725,11 +990,10 @@ class LocalSpatialAttentionPatchKeras(tf.keras.layers.Layer):
                 value = x[0]
                 query = x[0]
             elif len(x) == 2:
-                key = x[0]
-                query = x[1]
-                value = key
+                query, value = x
+                key = value
             else:
-                key, query, value = x
+                query, value, key = x
         else:
             key = x
             value = x
