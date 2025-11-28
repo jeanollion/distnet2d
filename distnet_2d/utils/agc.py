@@ -38,24 +38,42 @@ def unitwise_norm(x):
         raise ValueError(f"Got a parameter with shape not in [1, 2, 4, 5]! {x}")
     return compute_norm(x, axis, keepdims)
 
-def adaptive_clip_grad(parameters, gradients, clip_factor=0.01, eps=1e-3, grad_eps = 1e-6, grad_scale=1., exclude_keywords=None):
+
+def adaptive_clip_grad(parameters, gradients, clip_factor=0.01, eps=1e-3, grad_eps=1e-3, grad_scale=1., exclude_keywords=None, monitor:bool = False):
     new_grads = []
+    if monitor:
+        total_clipped = 0.
+        total_grads = 0.
     for (params, grads) in zip(parameters, gradients):
         if params is None or grads is None:
             new_grads.append(grads)
         elif exclude_gradient(params.name, exclude_keywords):
-            if grad_scale!=1.:
+            if grad_scale != 1.:
                 grads = tf.math.multiply(grads, grad_scale)
             new_grads.append(grads)
         else:
-            if grad_scale!=1.:
+            # Scale gradients first if needed
+            if grad_scale != 1.:
                 grads = tf.math.multiply(grads, grad_scale)
+            grads = tf.where(
+                tf.math.is_finite(grads),
+                grads,
+                tf.zeros_like(grads)
+            )
             p_norm = unitwise_norm(params)
             max_norm = tf.math.maximum(p_norm, eps) * clip_factor
             grad_norm = unitwise_norm(grads)
             clipped_grad = grads * (max_norm / tf.math.maximum(grad_norm, grad_eps))
-            new_grad = tf.where(grad_norm < max_norm, grads, clipped_grad)
+            to_clip = grad_norm > max_norm
+            new_grad = tf.where(to_clip, clipped_grad, grads)
             new_grads.append(new_grad)
+            if monitor:
+                total_clipped += tf.reduce_sum(tf.cast(to_clip, tf.float32))
+                total_grads += tf.cast(tf.size(to_clip), tf.float32)
+
+    if monitor:
+        clip_ratio = 100. * total_clipped / total_grads
+        tf.print(f"AGC clipping ratio: {clip_ratio}%")
     return new_grads
 
 def exclude_gradient(name, exclude_keywords):

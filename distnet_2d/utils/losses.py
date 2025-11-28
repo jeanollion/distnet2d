@@ -29,7 +29,7 @@ class PseudoHuber(tf.keras.losses.Loss):
 
 
 class TemperedFocalCrossEntropy(tf.keras.losses.Loss):
-    def __init__(self, temperature: float = 2.0, gamma: float = 1.0, **kwargs):
+    def __init__(self, temperature: float = 2.0, gamma: float = 2.0, **kwargs):
         """
         Tempered Focal Cross-Entropy for multi-class classification.
         Combines gradient stability (tempering) with hard example mining (focal).

@@ -369,7 +369,7 @@ def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
 class RelativeTemporalEmbedding(tf.keras.layers.Layer):
     """Combines learned embeddings with sinusoidal encoding."""
 
-    def __init__(self, max_distance, embedding_dim, hybrid:bool=True, l2_reg=None, **kwargs):
+    def __init__(self, max_distance, embedding_dim, hybrid:bool=False, l2_reg=1e-5, **kwargs):
         super().__init__(**kwargs)
         self.max_distance = max_distance
         self.embedding_dim = embedding_dim
@@ -616,12 +616,12 @@ class ResConv2D(tf.keras.layers.Layer):
             x = self.bn1(x, training = training)
         x = self.activation_layer(x) #* self.gamma
         x = self.conv2(x)
-        if self.output_dtype is not None:
-            x = tf.cast(x, dtype=self.output_dtype)
         if self.batch_norm:
             x = self.bn2(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
+        if self.output_dtype is not None:
+            x = tf.cast(x, dtype=self.output_dtype)
         if self.weighted_sum:
             return self.activation_layer(self.ws([input, x]))
         else:
@@ -678,12 +678,12 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
 
     def call(self, input, training=None):
         x = self.conv(input)
-        if self.output_dtype is not None:
-            x = tf.cast(x, dtype=self.output_dtype)
         if self.batch_norm:
             x = self.bn(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
+        if self.output_dtype is not None:
+            x = tf.cast(x, dtype=self.output_dtype)
         return self.activation_layer(x)
 
 
@@ -764,12 +764,12 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
 
     def call(self, input, training=None):
         x = self.conv(input)
-        if self.output_dtype is not None:
-            x = tf.cast(x, dtype=self.output_dtype)
         if self.batch_norm:
             x = self.bn(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
+        if self.output_dtype is not None:
+            x = tf.cast(x, dtype=self.output_dtype)
         return self.activation_layer(x)
 
 

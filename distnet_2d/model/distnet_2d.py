@@ -29,10 +29,10 @@ class DiSTNetModel(tf.keras.Model):
     def __init__(self, *args, spatial_dims,
                  edm_loss_weight:float=1,
                  edm_class_weights:list = None,  # weights to balance foreground/background classes
-                 center_loss_weight:float=0.5,
-                 displacement_loss_weight:float=0.25, # increase to 0.5 ? no simultaneously with lm
-                 link_multiplicity_loss_weight:float=0.125, # increase to  0.25 ? no simultaneously with dis
-                 category_loss_weight: float = 0.5, # reduce ?
+                 center_loss_weight:float=1,
+                 displacement_loss_weight:float=1, # increase to 0.5 ? no simultaneously with lm
+                 link_multiplicity_loss_weight:float=1, # increase to  0.25 ? no simultaneously with dis
+                 category_loss_weight: float = 1, # reduce ?
                  edm_loss=PseudoHuber(1), edm_derivative_loss:bool=False,
                  cdm_loss=PseudoHuber(1), cdm_derivative_loss:bool=False,
                  cdm_loss_radius:float = 0,
@@ -46,7 +46,7 @@ class DiSTNetModel(tf.keras.Model):
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
                  category_number:int=0, category_class_weights = None, category_max_class_weight=10,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
-                 accum_steps=1, use_agc=False, agc_clip_factor=0.1, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
+                 accum_steps=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False,
                  ema_alpha:float = None, # None -> no EMA
                  **kwargs):
@@ -92,7 +92,7 @@ class DiSTNetModel(tf.keras.Model):
         self.long_term = long_term
         self.use_grad_acc = accum_steps>1
         self.accum_steps = float(accum_steps)
-        if self.use_grad_acc or use_agc:
+        if self.use_grad_acc:
             self.gradient_accumulator = GradientAccumulator(accum_steps, self)
         self.use_agc = use_agc
         self.agc_clip_factor = agc_clip_factor
@@ -170,7 +170,7 @@ class DiSTNetModel(tf.keras.Model):
         cat_idx = lm_idx + 1
 
         with self.maybe_gradient_tape(training) as tape:
-            y_pred = self(x, training=True)  # Forward pass
+            y_pred = self(x, training=training)  # Forward pass
             if self.predict_edm_derivatives:
                 edm, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=3, axis=-1)
             else:
@@ -577,39 +577,40 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             direct_neigh_next = tf.keras.layers.Concatenate(axis=0, name="FeatureNextToBatch")( [features_list[i] for i in next_idx])
             # temporal embeddings
             use_window_att = True
-            embedding_dim = attention_filters * arch.temporal_attention if use_window_att else feature_filters
-            fdist_emb = RelativeTemporalEmbedding(max_distance = arch.frame_max_distance, embedding_dim=embedding_dim, name = "NeighborTemporalDistance")
+            fdist_emb = RelativeTemporalEmbedding(max_distance = arch.frame_max_distance, embedding_dim=feature_filters, name = "NeighborTemporalDistance")
             if arch.frame_aware:
                 bw_gap = tf.gather(frame_index[:, 0, 0], prev_idx, axis=1) - frame_index[:, 0, 0]
                 fw_gap = tf.gather(frame_index[:, 0, 0], next_idx, axis=1) - frame_index[:, 0, 0]
-                bw_emb = fdist_emb(bw_gap)  # (B, T, F)
-                fw_emb = fdist_emb(fw_gap) # (B, T, F)
+                bw_gap_emb = fdist_emb(bw_gap)  # (B, T, F)
+                fw_gap_emb = fdist_emb(fw_gap) # (B, T, F)
             else:
                 bw_gap = tf.cast(np.array(prev_idx) - np.arange(n_frames), tf.int32)
                 fw_gap = tf.cast(np.array(next_idx) - np.arange(n_frames), tf.int32)
-                bw_emb = tf.tile(fdist_emb(bw_gap)[None], [tf.shape(inputs[0])[0], 1, 1])  # (T, F) -> (B, T, F)
-                fw_emb = tf.tile(fdist_emb(fw_gap)[None], [tf.shape(inputs[0])[0], 1, 1])  # (T, F) -> (B, T, F)
-            bw_emb = tf.reshape(tf.transpose(bw_emb, [1, 0, 2]), [-1, 1, 1, embedding_dim]) # (T x B, 1, 1, F)
-            fw_emb = tf.reshape(tf.transpose(fw_emb, [1, 0, 2]), [-1, 1, 1, embedding_dim]) # (T x B, 1, 1, F)
+                bw_gap_emb = tf.tile(fdist_emb(bw_gap)[None], [tf.shape(inputs[0])[0], 1, 1])  # (T, F) -> (B, T, F)
+                fw_gap_emb = tf.tile(fdist_emb(fw_gap)[None], [tf.shape(inputs[0])[0], 1, 1])  # (T, F) -> (B, T, F)
+            bw_gap_emb = tf.reshape(tf.transpose(bw_gap_emb, [1, 0, 2]), [-1, 1, 1, feature_filters]) # (T x B, 1, 1, F)
+            fw_gap_emb = tf.reshape(tf.transpose(fw_gap_emb, [1, 0, 2]), [-1, 1, 1, feature_filters]) # (T x B, 1, 1, F)
 
             if use_window_att:
-                bw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, name="AttBackward")
-                fw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, name="AttForward")
-                backward_features = bw_op([features_batch, direct_neigh_prev, direct_neigh_prev, bw_emb])
-                forward_features = fw_op([features_batch, direct_neigh_next, direct_neigh_prev, fw_emb])
+                bw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="AttBackward")
+                fw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="AttForward")
+                backward_features = bw_op([features_batch, direct_neigh_prev, direct_neigh_prev, bw_gap_emb])
+                forward_features = fw_op([features_batch, direct_neigh_next, direct_neigh_prev, fw_gap_emb])
+                bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")(  [backward_features, forward_features])
             else:
                 bw_op = Combine(filters=feature_filters, kernel_size=arch.blend_combine_kernel_size, l2_reg=arch.l2_reg, name="CombineBW")
                 fw_op = Combine(filters=feature_filters, kernel_size=arch.blend_combine_kernel_size, l2_reg=arch.l2_reg, name="CombineFW")
-                backward_features = bw_op([features_batch + bw_emb, direct_neigh_prev + bw_emb])
-                forward_features = fw_op([features_batch + fw_emb, direct_neigh_next + fw_emb])
-            bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")( [backward_features, forward_features])
-            #bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")( [backward_features, forward_features, features_batch])
+                backward_features = bw_op([features_batch + bw_gap_emb, direct_neigh_prev + bw_gap_emb])
+                forward_features = fw_op([features_batch + fw_gap_emb, direct_neigh_next + fw_gap_emb])
+                bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")( [backward_features, forward_features, features_batch])
             if arch.frame_window > 1:
                 bwfw_features_list = SplitBatch(n_frames, compensate_gradient=False, name="SplitFeaturesBWFW")(bwfw_features_batch)
                 inference_idx = list(  set([frame_prev[i] for i in inference_pair_idx] + [frame_next[i] for i in inference_pair_idx]))
                 inference_idx.sort()
                 long_term_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
-                                                 inference_query_idx = inference_idx, frame_aware = arch.frame_aware, frame_max_distance = arch.frame_max_distance)
+                                                 inference_query_idx = inference_idx,
+                                                 frame_aware = arch.frame_aware, frame_max_distance = arch.frame_max_distance,
+                                                 layer_normalization = True, skip_connection=True )
                 if arch.frame_aware:
                     frame_relative_index = frame_index[:, 0, 0, :] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]
                     features = long_term_op([bwfw_features_list, frame_relative_index])
@@ -796,7 +797,7 @@ def decoder_op(
             if weight_scaled:
                 convs = [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
             elif batch_norm or dropout_rate>0:
-                convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}"if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
+                convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==n_conv-1 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}"if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
             else:
                 convs = [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
         def op(input):

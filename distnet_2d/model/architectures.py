@@ -95,7 +95,7 @@ class ArchDepth(ArchBase):
 
 
 class D2(ArchDepth):
-    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, last_bn:bool=False, **kwargs):
         super().__init__(**kwargs)
         print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**2} x {self.spatial_dimensions[1] / 2**2}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
@@ -154,12 +154,12 @@ class D2(ArchDepth):
             {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": 4, "up_kernel_size": 4,
              "weight_scaled_up": False, "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 32, "op": "res2d", "conv_kernel_size":ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
-             "weight_scaled_up": False, "weight_scaled": False, "batch_norm": False, "dropout_rate": 0}
+             "weight_scaled_up": False, "weight_scaled": False, "batch_norm": last_bn, "dropout_rate": 0}
         ]
 
 
 class D3(ArchDepth):
-    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, last_bn:bool=False, **kwargs):
         super().__init__(**kwargs)
         print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**3} x {self.spatial_dimensions[1] / 2**3}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
@@ -223,14 +223,14 @@ class D3(ArchDepth):
             {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": 4, "up_kernel_size": 4,
              "weight_scaled_up": False, "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 32, "op": "res2d", "conv_kernel_size" : ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
-             "weight_scaled_up": False, "weight_scaled": False, "batch_norm": False, "dropout_rate": 0},
+             "weight_scaled_up": False, "weight_scaled": False, "batch_norm": last_bn, "dropout_rate": 0},
             {"filters": 64, "op": "res2d", "conv_kernel_size" : ker2, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
              "weight_scaled_up": False, "weight_scaled": False, "batch_norm": False, "dropout_rate": 0}
         ]
 
 
 class D4(ArchDepth):
-    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
+    def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, last_bn:bool=False, **kwargs):
         super().__init__(**kwargs)
         print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**4} x {self.spatial_dimensions[1] / 2**4}")
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
@@ -306,7 +306,7 @@ class D4(ArchDepth):
             {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": 4, "up_kernel_size": 4,
              "weight_scaled_up": False, "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 16, "op": "res2d", "conv_kernel_size": ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
-             "weight_scaled_up": False, "weight_scaled": False, "batch_norm": False, "dropout_rate": 0},
+             "weight_scaled_up": False, "weight_scaled": False, "batch_norm": last_bn, "dropout_rate": 0},
             {"filters": 32, "op": "res2d", "conv_kernel_size": ker2_1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
              "weight_scaled_up": False, "weight_scaled": False, "batch_norm": False, "dropout_rate": 0},
             {"filters": 64, "op": "res2d", "conv_kernel_size": ker3_3, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
@@ -372,21 +372,21 @@ class TemA(ArchBase):
 
 class TemAD2(TemA, D2):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemAD3(TemA, D3):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemAD4(TemA, D4):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")

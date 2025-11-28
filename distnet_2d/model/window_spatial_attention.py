@@ -18,10 +18,9 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
     """
 
     def __init__(self, num_heads: int, attention_filters: int = 0, window_size:tuple = 7,
-                 dropout: float = 0.1, skip_connection: bool = False,
+                 dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
                  overlap_reduction: str = 'geometrical', # 'mean', 'attention_weighted', 'geometrical'
-                 additional_positional_embedding:bool = False,
-                 l2_reg: float = 0., name="WindowSpatialAttention"):
+                 l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention"):
         super().__init__(name=name)
         self.num_heads = num_heads
         self.attention_filters = attention_filters
@@ -33,9 +32,10 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         self.filters = None
         self.dropout = dropout
         self.l2_reg = l2_reg
+        self.position_encoding_l2_reg=position_encoding_l2_reg
         self.skip_connection = skip_connection
+        self.layer_normalization=layer_normalization
         self.overlap_reduction = overlap_reduction
-        self.additional_positional_embedding=additional_positional_embedding
         assert overlap_reduction in ['mean', 'attention_weighted', 'geometrical'], \
             f"overlap_reduction must be 'mean' or 'attention_weighted', got {overlap_reduction}"
 
@@ -48,13 +48,15 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             "dropout": self.dropout,
             "filters": self.filters,
             "l2_reg": self.l2_reg,
+            "position_encoding_l2_reg":self.position_encoding_l2_reg,
             "skip_connection": self.skip_connection,
+            "layer_normalization": self.layer_normalization,
             "overlap_reduction": self.overlap_reduction
         })
         return config
 
     def build(self, input_shapes):
-        if not isinstance(input_shapes, (tuple, list)) or len(input_shapes) > 4:
+        if not isinstance(input_shapes, (tuple, list)) or len(input_shapes) > 4:  # single tensor : self attention
             input_shapes = [input_shapes]
         try:
             input_shapes = [s.as_list() for s in input_shapes]
@@ -65,7 +67,14 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         except:
             pass
         input_shape = input_shapes[0]
-
+        if self.layer_normalization:
+            self.ln_q = tf.keras.layers.LayerNormalization()
+            self.ln_k = self.ln_q
+            if len(input_shapes) == 4 : # embedding is provided -> distinct layer norm for values
+                self.ln_v = tf.keras.layers.LayerNormalization()
+                print(f"wat: distinct layer norm for values")
+            else:
+                self.ln_v = self.ln_q
 
         self.spatial_dims = input_shape[1:-1]
         self.filters = input_shape[-1]
@@ -75,13 +84,10 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         HF = self.num_heads * self.attention_filters
 
         # Separate Q, K, V projections
-        self.qproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="qproj")
-        self.kproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="kproj")
-        self.vproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="vproj")
-        self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=False, name="outproj")
-
-        if self.skip_connection:
-            self.skipproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=True, name="skip")
+        self.qproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="qproj", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.kproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="kproj", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.vproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="vproj", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=False, name="outproj", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
 
         if self.dropout > 0:
             self.dropout_layer = tf.keras.layers.Dropout(self.dropout)
@@ -93,7 +99,9 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         self.relative_position_bias_table = self.add_weight(
             name="rpb",
             shape=(bias_size, self.num_heads),
-            initializer=tf.initializers.TruncatedNormal(stddev=0.02),
+            initializer=tf.initializers.Zeros(),
+            constraint=tf.keras.constraints.MaxNorm(max_value=5.0, axis=0),
+            regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg>0 else None,
             trainable=True
         )
 
@@ -109,6 +117,9 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         relative_position_index = (relative_coords[:, :, 0] * (2 * WSX - 1) + relative_coords[:, :, 1])
 
         self.relative_position_index = tf.constant(relative_position_index, dtype=tf.int32)
+
+        if self.overlap_reduction == "geometrical":
+            self.geometrical_confidence = self._geometrical_confidence()
 
         super().build(input_shape)
 
@@ -451,26 +462,22 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         # Softmax
         attn_probs = tf.nn.softmax(attn, axis=-1)
 
+        if self.dropout > 0 and training:
+            attn_probs = self.dropout_layer(attn_probs, training=training)
+
         if self.overlap_reduction == "attention_weighted":
             # Maximum attention value indicates how "peaked" the distribution is
             max_attn = tf.reduce_max(attn_probs, axis=-1)  # (B_win, H, N)
             confidence = tf.reduce_mean(max_attn, axis=1)  # (B_win, N)
             confidence_spatial = tf.reshape(confidence, [B_win, WSY, WSX, 1])
+            confidence_spatial = confidence_spatial / tf.reduce_sum(confidence_spatial)
             confidence_spatial = tf.maximum(confidence_spatial, tf.cast(1e-2, confidence_spatial.dtype))
             confidence_spatial = tf.stop_gradient(confidence_spatial)
         else:
             confidence_spatial = None
 
-        if self.dropout > 0 and training:
-            attn_probs = self.dropout_layer(attn_probs, training=training)
-
-        # Apply to values: (B_win, H, N, F)
         out = tf.matmul(attn_probs, v)
-
-        # Transpose back: (B_win, N, H, F)
         out = tf.transpose(out, [0, 2, 1, 3])
-
-        # Reshape to spatial: (B_win, WSY, WSX, HF)
         out = tf.reshape(out, [B_win, WSY, WSX, HF])
 
         return out, confidence_spatial
@@ -478,24 +485,37 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
     def call(self, x, training: bool = None):
         if isinstance(x, (list, tuple)):
             if len(x) == 1:
-                key = value = query = x[0]
-                emb = None
+                source_query = x[0]
+                x = self.ln_q(x[0]) if self.layer_normalization else x[0]
+                key = value = query = x
             elif len(x) == 2:
-                query, value = x
-                key = value
-                emb = None
+                source_query, key = x
+                query = source_query
+                if self.layer_normalization:
+                    query = self.ln_q(query)
+                    key = self.ln_k(key)
+                value = key
             elif len(x) == 3:
-                query, key, value = x
-                emb = None
+                source_query, key, value = x
+                query = source_query
+                if self.layer_normalization:
+                    query = self.ln_q(query)
+                    key = self.ln_k(key)
+                    value = self.ln_v(value)
             elif len(x) == 4:
-                query, key, value, emb = x
+                source_query, key, value, emb = x
+                query = source_query + emb
+                key = key + emb
+                if self.layer_normalization:
+                    query = self.ln_q(query)
+                    key = self.ln_k(key)
+                    value = self.ln_v(value)
             else:
-                raise ValueError("Invalid input length should be lower than 4")
+                raise ValueError("Invalid input length should be lower than 3")
         else:
+            if self.layer_normalization:
+                x = self.ln(x)
             key = value = query = x
-            emb = None
-
-        query_orig = query
 
         B, Y, X, C = tf.unstack(tf.shape(query))
 
@@ -506,9 +526,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         Q = self.qproj(query)
         K = self.kproj(key)
         V = self.vproj(value)
-        if emb is not None:
-            Q = Q + emb
-            K = K + emb
+
         # Extract windows
         Q_windows = self._extract_windows_vectorized(Q, y_starts, x_starts)
         K_windows = self._extract_windows_vectorized(K, y_starts, x_starts)
@@ -524,7 +542,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             output = self._scatter_windows_with_averaging( out_windows, attention_confidence, y_starts, x_starts, Y, X )
         elif self.overlap_reduction == "geometrical":
             num_win = tf.shape(y_starts)[0] * tf.shape(x_starts)[0]
-            geometrical_confidence = tf.tile(tf.cast(self._geometrical_confidence(), out_windows.dtype), [B * num_win, 1, 1, 1] )
+            geometrical_confidence = tf.tile(tf.cast(self.geometrical_confidence, out_windows.dtype), [B * num_win, 1, 1, 1] )
             output = self._scatter_windows_with_averaging(out_windows, geometrical_confidence, y_starts, x_starts, Y, X)
         else:  # 'mean'
             output = self._scatter_windows_mean( out_windows, y_starts, x_starts, Y, X )
@@ -533,8 +551,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         output = self.outproj(output)
 
         if self.skip_connection:
-            output = tf.concat([output, query_orig], axis=-1)
-            output = self.skipproj(output)
+            output = output + source_query
 
         return output
 

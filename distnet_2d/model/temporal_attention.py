@@ -7,7 +7,12 @@ from distnet_2d.model.layers import InferenceLayer, RelativeTemporalEmbedding
 
 
 class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, num_heads:int, attention_filters:int=0, training_query_idx:list=None, inference_query_idx:list=None, frame_aware: bool = False, frame_max_distance:int=0, dropout:float=0.1, l2_reg:float=0., name="TemporalAttention"):
+    def __init__(self,
+                 num_heads:int, attention_filters:int=0,
+                 training_query_idx:list=None, inference_query_idx:list=None,
+                 frame_aware: bool = False, frame_max_distance:int=0,
+                 dropout:float=0.1, l2_reg:float=0, embedding_l2_reg:float=1e-5, layer_normalization:bool = False,
+                 skip_connection:bool = True,  name="TemporalAttention"):
         '''
             filters : number of output channels
             if positional_encoding: filters must correspond to input channel number
@@ -18,8 +23,11 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         self.num_heads=num_heads
         self.attention_filters = attention_filters
         self.filters = None
+        self.skip_connection = skip_connection
         self.dropout=dropout
         self.l2_reg=l2_reg
+        self.embedding_l2_reg=embedding_l2_reg
+        self.layer_normalization=layer_normalization
         self.temporal_dim=None
         self.training_query_idx = training_query_idx
         self.inference_query_idx = inference_query_idx
@@ -28,9 +36,10 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             assert frame_max_distance > 0, "in frame_aware mode frame max distance must be provided"
         self.frame_max_distance = frame_max_distance
 
+
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"num_heads": self.num_heads, "dropout":self.dropout, "filters":self.filters, "l2_reg":self.l2_reg, "frame_aware":self.frame_aware, "frame_max_distance":self.frame_max_distance, "training_query_idx":self.training_query_idx, "inference_query_idx":self.inference_query_idx})
+      config.update({"num_heads": self.num_heads, "dropout":self.dropout, "filters":self.filters, "skip_connection":self.skip_connection, "layer_normalization":self.layer_normalization, "l2_reg":self.l2_reg, "embedding_l2_reg":self.embedding_l2_reg, "frame_aware":self.frame_aware, "frame_max_distance":self.frame_max_distance, "training_query_idx":self.training_query_idx, "inference_query_idx":self.inference_query_idx})
       return config
 
     def build(self, input_shape):
@@ -63,19 +72,27 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         if self.attention_filters is None or self.attention_filters<=0:
             self.attention_filters = int(ceil(self.filters / self.num_heads))
 
-        self.attention_layer=tf.keras.layers.MultiHeadAttention(self.num_heads, key_dim=self.attention_filters, dropout=self.dropout, name="MultiHeadAttention")
+        self.attention_layer=tf.keras.layers.MultiHeadAttention(
+            self.num_heads,
+            key_dim=self.attention_filters,
+            dropout=self.dropout,
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            name="MultiHeadAttention")
 
         self.temp_embedding = tf.keras.layers.Embedding(
             self.temporal_dim,
             self.filters,
-            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            embeddings_regularizer=tf.keras.regularizers.l2(self.embedding_l2_reg) if self.embedding_l2_reg > 0 else None,
             name="TempEnc"
         ) if not self.frame_aware else RelativeTemporalEmbedding(
             max(self.temporal_dim, self.frame_max_distance),
             self.filters,
-            l2_reg=self.l2_reg,
+            l2_reg=self.embedding_l2_reg,
             name="TempEnc"
         )
+        if self.layer_normalization:
+            self.ln_qk = tf.keras.layers.LayerNormalization() # qk are input + emb
+            self.ln_v = tf.keras.layers.LayerNormalization() # v is only input
         super().build(input_shape)
 
     def call(self, x, training:bool=None):
@@ -97,12 +114,15 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         t_emb = tf.reshape(t_emb, (1, 1, 1, T, C)) if not self.frame_aware else tf.reshape(t_emb, (B, 1, 1, T, C))
 
         frame_stacked = tf.stack(frame_list, axis=3)  # (B, Y, X, T, C)
-        key = frame_stacked + t_emb
+        frame_stacked_emb = frame_stacked + t_emb
+        if self.layer_normalization:
+            frame_stacked_emb = self.ln_qk(frame_stacked_emb)
+            frame_stacked = self.ln_v(frame_stacked)
+        key = frame_stacked_emb
         value = frame_stacked
-
         idx_list = self.training_query_idx if not self.inference_mode else self.inference_query_idx
+        query_list = [frame_stacked_emb[..., i, :] for i in idx_list]
 
-        query_list = [frame_list[i] + t_emb[:, :, :, i] for i in idx_list]
         # Flatten spatial dimensions for efficiency: (B*H*W, T, C)
         key_flat = tf.reshape(key, [-1, T, C])
         value_flat = tf.reshape(value, [-1, T, C])
@@ -115,4 +135,6 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             training=training
         ) for query_flat in query_list_flat]
         attention_output_list = [tf.reshape(attention_output, shape) for attention_output in attention_output_list]
+        if self.skip_connection:
+            attention_output_list = [ frame_list[i] + attention_output for i, attention_output in zip(idx_list, attention_output_list) ]
         return tf.stack(attention_output_list, 0)
