@@ -1,8 +1,5 @@
 import tensorflow as tf
 
-import tensorflow as tf
-
-
 class WindowSpatialAttention(tf.keras.layers.Layer):
     """
     Swin-style window attention with forced overlap and averaging.
@@ -17,8 +14,8 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
     - Supports non-square windows (window_size can be tuple)
     """
 
-    def __init__(self, num_heads: int, attention_filters: int = 0, window_size:tuple = 7,
-                 dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
+    def __init__(self, num_heads: int, attention_filters: int, window_size:tuple,
+                 use_bias:bool = True, dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
                  overlap_reduction: str = 'geometrical', # 'mean', 'attention_weighted', 'geometrical'
                  l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention"):
         super().__init__(name=name)
@@ -30,6 +27,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         else:
             self.window_size = tuple(window_size)
         self.filters = None
+        self.use_bias=use_bias
         self.dropout = dropout
         self.l2_reg = l2_reg
         self.position_encoding_l2_reg=position_encoding_l2_reg
@@ -45,6 +43,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             "num_heads": self.num_heads,
             "attention_filters": self.attention_filters,
             "window_size": self.window_size,
+            "use_bias":self.use_bias,
             "dropout": self.dropout,
             "filters": self.filters,
             "l2_reg": self.l2_reg,
@@ -69,11 +68,11 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         input_shape = input_shapes[0]
         if self.layer_normalization:
             self.ln_q = tf.keras.layers.LayerNormalization()
-            self.ln_k = self.ln_q
             if len(input_shapes) == 4 : # embedding is provided -> distinct layer norm for values
                 self.ln_v = tf.keras.layers.LayerNormalization()
-                print(f"wat: distinct layer norm for values")
+                self.ln_k = tf.keras.layers.LayerNormalization()
             else:
+                self.ln_k = self.ln_q
                 self.ln_v = self.ln_q
 
         self.spatial_dims = input_shape[1:-1]
@@ -84,10 +83,22 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         HF = self.num_heads * self.attention_filters
 
         # Separate Q, K, V projections
-        self.qproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="qproj", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
-        self.kproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="kproj", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
-        self.vproj = tf.keras.layers.Conv2D(HF, 1, padding='same', use_bias=False, name="vproj", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
-        self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same', use_bias=False, name="outproj", kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.qproj = tf.keras.layers.Conv2D(HF, 1, padding='same',
+                                            use_bias=self.use_bias, name="qproj",
+                                            bias_initializer=tf.keras.initializers.Zeros(),
+                                            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.kproj = tf.keras.layers.Conv2D(HF, 1, padding='same',
+                                            use_bias=self.use_bias, name="kproj",
+                                            bias_initializer=tf.keras.initializers.Zeros(),
+                                            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.vproj = tf.keras.layers.Conv2D(HF, 1, padding='same',
+                                            use_bias=self.use_bias, name="vproj",
+                                            bias_initializer=tf.keras.initializers.Zeros(),
+                                            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
+        self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same',
+                                              use_bias=self.use_bias, name="outproj",
+                                              bias_initializer=tf.keras.initializers.Zeros(),
+                                              kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
 
         if self.dropout > 0:
             self.dropout_layer = tf.keras.layers.Dropout(self.dropout)
@@ -503,9 +514,17 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
                     key = self.ln_k(key)
                     value = self.ln_v(value)
             elif len(x) == 4:
-                source_query, key, value, emb = x
-                query = source_query + emb
-                key = key + emb
+                source_query, key, value, (emb_q, emb_k) = x
+                if isinstance(emb_q, tuple):
+                    emb_mul, emb_add = emb_q
+                    query = source_query * emb_mul + emb_add
+                else:
+                    query = source_query + emb_q
+                if isinstance(emb_k, tuple):
+                    emb_mul, emb_add = emb_k
+                    key = key * emb_mul + emb_add
+                else:
+                    key = key + emb_k
                 if self.layer_normalization:
                     query = self.ln_q(query)
                     key = self.ln_k(key)

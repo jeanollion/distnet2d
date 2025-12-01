@@ -47,8 +47,7 @@ class DiSTNetModel(tf.keras.Model):
                  category_number:int=0, category_class_weights = None, category_max_class_weight=10,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  accum_steps=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
-                 perform_test_step:bool=False,
-                 ema_alpha:float = None, # None -> no EMA
+                 perform_test_step:bool=False, scale_losses:bool = True,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.edm_weight = edm_loss_weight
@@ -118,15 +117,25 @@ class DiSTNetModel(tf.keras.Model):
             self.dy_loss_metric = tf.keras.metrics.Mean(name="dY")
         if self.link_multiplicity_weight > 0:
             self.link_multiplicity_loss_metric = tf.keras.metrics.Mean(name="link_multiplicity")
-        if ema_alpha is not None:
-            n_losses = (self.edm_weight > 0) + (self.center_weight > 0) + ( self.category_weight > 0 and self.category_number > 1) + 2 * (self.displacement_weight > 0) + (self.link_multiplicity_weight > 0)
-            self.ema_losses = tf.Variable(tf.zeros(shape=(n_losses,), dtype=tf.float32), trainable=False, aggregation=tf.VariableAggregation.MEAN, name="ema_losses")
-            self.ema_alpha =  ema_alpha
-        else :
-            self.ema_loss = None
+        self.loss_scales = tf.Variable(tf.ones(shape=(len(self.get_sub_losses_names()),), dtype=tf.float32), trainable=False, name="loss_scales") if scale_losses else False
         self.loss_metric = tf.keras.metrics.Mean(name="loss")
         self.perform_test_step=perform_test_step
 
+
+    def get_sub_losses_names(self):
+        losses = []
+        if self.edm_weight > 0:
+            losses.append("EDM")
+        if self.center_weight > 0:
+            losses.append("CDM")
+        if self.category_weight > 0 and self.category_number > 1:
+            losses.append("category")
+        if self.displacement_weight > 0:
+            losses.append("dX")
+            losses.append("dY")
+        if self.link_multiplicity_weight > 0:
+            losses.append("link_multiplicity")
+        return losses
 
     @staticmethod
     @contextlib.contextmanager
@@ -312,12 +321,8 @@ class DiSTNetModel(tf.keras.Model):
         if self.category_weight > 0 and self.category_number > 1:
             self.category_loss_metric.update_state(losses["category"], sample_weight=batch_dim)
             sub_losses.append(losses["category"])
-        if self.ema_losses is not None:
-            if training: # only update ema at training
-                init = tf.math.equal(tf.math.count_nonzero(self.ema_losses), 0)
-                sub_losses = tf.cast(sub_losses, tf.float32)
-                self.ema_losses.assign(tf.cond(init, lambda: sub_losses, lambda: self.ema_alpha * self.ema_losses + (1 - self.ema_alpha) * sub_losses))
-            normalized_loss = tf.reduce_mean(sub_losses / (self.ema_losses + tf.keras.backend.epsilon()))
+        if self.loss_scales is not None:
+            normalized_loss = tf.reduce_mean(sub_losses / (self.loss_scales + tf.keras.backend.epsilon()))
             self.loss_metric.update_state(normalized_loss, sample_weight=batch_dim)
             losses["loss"] = normalized_loss
         else:
@@ -576,33 +581,42 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             direct_neigh_prev = tf.keras.layers.Concatenate(axis=0, name="FeaturePrevToBatch")( [features_list[i] for i in prev_idx])
             direct_neigh_next = tf.keras.layers.Concatenate(axis=0, name="FeatureNextToBatch")( [features_list[i] for i in next_idx])
             # temporal embeddings
-            use_window_att = True
-            fdist_emb = RelativeTemporalEmbedding(max_distance = arch.frame_max_distance, embedding_dim=feature_filters, name = "NeighborTemporalDistance")
-            if arch.frame_aware:
-                bw_gap = tf.gather(frame_index[:, 0, 0], prev_idx, axis=1) - frame_index[:, 0, 0]
-                fw_gap = tf.gather(frame_index[:, 0, 0], next_idx, axis=1) - frame_index[:, 0, 0]
-                bw_gap_emb = fdist_emb(bw_gap)  # (B, T, F)
-                fw_gap_emb = fdist_emb(fw_gap) # (B, T, F)
-            else:
-                bw_gap = tf.cast(np.array(prev_idx) - np.arange(n_frames), tf.int32)
-                fw_gap = tf.cast(np.array(next_idx) - np.arange(n_frames), tf.int32)
-                bw_gap_emb = tf.tile(fdist_emb(bw_gap)[None], [tf.shape(inputs[0])[0], 1, 1])  # (T, F) -> (B, T, F)
-                fw_gap_emb = tf.tile(fdist_emb(fw_gap)[None], [tf.shape(inputs[0])[0], 1, 1])  # (T, F) -> (B, T, F)
-            bw_gap_emb = tf.reshape(tf.transpose(bw_gap_emb, [1, 0, 2]), [-1, 1, 1, feature_filters]) # (T x B, 1, 1, F)
-            fw_gap_emb = tf.reshape(tf.transpose(fw_gap_emb, [1, 0, 2]), [-1, 1, 1, feature_filters]) # (T x B, 1, 1, F)
+            multiplicative_embedding = True
+            fdist_emb_q = RelativeTemporalEmbedding(embedding_dim=feature_filters, multiplicative=multiplicative_embedding, name = "NeighborTemporalDistanceKeys")
+            fdist_emb_k = RelativeTemporalEmbedding(embedding_dim=feature_filters, multiplicative=multiplicative_embedding, name = "NeighborTemporalDistanceQueries")
 
-            if use_window_att:
-                bw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="AttBackward")
-                fw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="AttForward")
-                backward_features = bw_op([features_batch, direct_neigh_prev, direct_neigh_prev, bw_gap_emb])
-                forward_features = fw_op([features_batch, direct_neigh_next, direct_neigh_prev, fw_gap_emb])
-                bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")(  [backward_features, forward_features])
-            else:
-                bw_op = Combine(filters=feature_filters, kernel_size=arch.blend_combine_kernel_size, l2_reg=arch.l2_reg, name="CombineBW")
-                fw_op = Combine(filters=feature_filters, kernel_size=arch.blend_combine_kernel_size, l2_reg=arch.l2_reg, name="CombineFW")
-                backward_features = bw_op([features_batch + bw_gap_emb, direct_neigh_prev + bw_gap_emb])
-                forward_features = fw_op([features_batch + fw_gap_emb, direct_neigh_next + fw_gap_emb])
-                bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")( [backward_features, forward_features, features_batch])
+            def get_dist_emb(layer):
+                if arch.frame_aware:
+                    bw_gap = tf.gather(frame_index[:, 0, 0], prev_idx, axis=1) - frame_index[:, 0, 0]
+                    fw_gap = tf.gather(frame_index[:, 0, 0], next_idx, axis=1) - frame_index[:, 0, 0]
+                    bw_gap_emb = layer(bw_gap)  # (B, T, F)
+                    fw_gap_emb = layer(fw_gap) # (B, T, F)
+                else:
+                    bw_gap = tf.cast(np.array(prev_idx) - np.arange(n_frames), tf.int32)
+                    fw_gap = tf.cast(np.array(next_idx) - np.arange(n_frames), tf.int32)
+                    bw_gap_emb = layer(bw_gap)  # (1, T, F)
+                    fw_gap_emb = layer(fw_gap)  # (1, T, F)
+                    tile_fun = lambda t : tf.tile(t, [tf.shape(inputs[0])[0], 1, 1]) # (1, T, F) -> (B, T, F)
+                    if multiplicative_embedding:
+                        bw_gap_emb = tile_fun(bw_gap_emb[0]), tile_fun(bw_gap_emb[1])
+                        fw_gap_emb = tile_fun(fw_gap_emb[0]), tile_fun(fw_gap_emb[1])
+                    else:
+                        bw_gap_emb, fw_gap_emb = tile_fun(bw_gap_emb), tile_fun(fw_gap_emb)
+                reshape_fun = lambda t: tf.reshape(tf.transpose(t, [1, 0, 2]), [-1, 1, 1, feature_filters]) # (T x B, 1, 1, F)
+                if multiplicative_embedding:
+                    bw_gap_emb = reshape_fun(bw_gap_emb[0]), reshape_fun(bw_gap_emb[1])
+                    fw_gap_emb = reshape_fun(fw_gap_emb[0]), reshape_fun(fw_gap_emb[1])
+                else:
+                    bw_gap_emb, fw_gap_emb = reshape_fun(bw_gap_emb), reshape_fun(fw_gap_emb)
+                return bw_gap_emb, fw_gap_emb
+
+            bw_gap_emb_k, fw_gap_emb_k = get_dist_emb(fdist_emb_k)
+            bw_gap_emb_q, fw_gap_emb_q = get_dist_emb(fdist_emb_q)
+            # TODO test if better to have two separate layers for forward and backward
+            bwfw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="NeighborAttention")
+            backward_features = bwfw_op([features_batch, direct_neigh_prev, direct_neigh_prev, (bw_gap_emb_q, bw_gap_emb_k)])
+            forward_features = bwfw_op([features_batch, direct_neigh_next, direct_neigh_prev, (fw_gap_emb_q, fw_gap_emb_k)])
+            bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")(  [backward_features, forward_features])
             if arch.frame_window > 1:
                 bwfw_features_list = SplitBatch(n_frames, compensate_gradient=False, name="SplitFeaturesBWFW")(bwfw_features_batch)
                 inference_idx = list(  set([frame_prev[i] for i in inference_pair_idx] + [frame_next[i] for i in inference_pair_idx]))
@@ -610,6 +624,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 long_term_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                                  inference_query_idx = inference_idx,
                                                  frame_aware = arch.frame_aware, frame_max_distance = arch.frame_max_distance,
+                                                 multiplicative_embedding=multiplicative_embedding,
                                                  layer_normalization = True, skip_connection=True )
                 if arch.frame_aware:
                     frame_relative_index = frame_index[:, 0, 0, :] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]

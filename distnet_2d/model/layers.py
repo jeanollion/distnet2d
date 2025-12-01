@@ -367,42 +367,83 @@ def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
 
 
 class RelativeTemporalEmbedding(tf.keras.layers.Layer):
-    """Combines learned embeddings with sinusoidal encoding."""
 
-    def __init__(self, max_distance, embedding_dim, hybrid:bool=False, l2_reg=1e-5, **kwargs):
+    def __init__(self, embedding_dim:int, hidden_dim:int=256, multiplicative:bool=True, l2_reg=1e-5,
+                 **kwargs):
         super().__init__(**kwargs)
-        self.max_distance = max_distance
         self.embedding_dim = embedding_dim
-        self.vocab_size = 2 * max_distance + 1
-        self.l2_reg=l2_reg
-        self.hybrid=hybrid
+        self.hidden_dim = hidden_dim
+        self.multiplicative = multiplicative
+        self.l2_reg = l2_reg
 
     def build(self, input_shape):
-        input_shape, central_frame = input_shape
-        # Learned component (half dimensions)
-        self.learned_embedding = tf.keras.layers.Embedding(
-            input_dim=self.vocab_size,
-            output_dim=self.embedding_dim // 2 if self.hybrid else self.embedding_dim,
-            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg is not None and self.l2_reg > 0 else None,
-            name="learned_temporal"
-        )
+        self.expand_axis = [0, -1] if len(input_shape)==1 else [-1]
+        self.add_embedding = tf.keras.Sequential([
+            tf.keras.layers.Dense(
+                units=self.hidden_dim,
+                activation='tanh',
+                kernel_initializer='glorot_uniform',
+                bias_initializer=tf.keras.initializers.Zeros(),
+                kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            ),
+            tf.keras.layers.Dense(
+                units=self.embedding_dim,
+                activation=None,
+                kernel_initializer=tf.keras.initializers.Zeros(),
+                bias_initializer=tf.keras.initializers.Zeros(),
+                kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+            ),
+        ], name="additive_embedding")
+
+        if self.multiplicative:
+            self.mult_embedding = tf.keras.Sequential([
+                tf.keras.layers.Dense(
+                    self.hidden_dim,
+                    activation='tanh',
+                    bias_initializer=tf.keras.initializers.Zeros(),
+                    kernel_initializer='glorot_uniform',
+                    kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+                    name='mult_hidden'
+                ),
+                tf.keras.layers.Dense(
+                    self.embedding_dim,
+                    activation='tanh',
+                    bias_initializer=tf.keras.initializers.Zeros(),
+                    kernel_initializer=tf.keras.initializers.Zeros(),
+                    kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
+                    name='mult_gate'
+                ),
+                tf.keras.layers.Lambda(lambda x : x + 1)
+            ], name='multiplicative_embedding')
+
         super().build(input_shape)
 
     def get_config(self):
-      config = super().get_config().copy()
-      config.update({"max_distance": self.max_distance, "embedding_dim":self.embedding_dim, "l2_reg":self.l2_reg, "hybrid":self.hybrid})
-      return config
+        config = super().get_config().copy()
+        config.update({
+            "hidden_dim": self.hidden_dim,
+            "embedding_dim": self.embedding_dim,
+            "l2_reg": self.l2_reg,
+            "multiplicative": self.multiplicative
+        })
+        return config
 
-    def call(self, distances): # (B, T) or (T)
-        # Learned part
-        indices = tf.clip_by_value(distances + self.max_distance, 0, self.vocab_size - 1)
-        learned = self.learned_embedding(indices)  # (T, embedding_dim//2)
+    def call(self, distances):
+        """
+        Args:
+            distances: (B, T) or (T) - temporal distances (can be negative for backward)
 
-        if self.hybrid: # Sinusoidal part
-            sinusoidal = sinusoidal_temporal_encoding(distances, self.embedding_dim - self.embedding_dim // 2, dtype=learned.dtype)
-            return tf.concat([learned, sinusoidal], axis=-1)  # (T, embedding_dim)
+        Returns:
+            if multiplicative: returns multiplicative and additive embedding (B, T, D) or (T, D)
+            else returns additive embedding only (B, T, D) or (T, D)
+        """
+        distances = tf.expand_dims(tf.cast(distances, self.compute_dtype), axis=self.expand_axis) # B, T, 1
+        additive_emb = self.add_embedding(distances)
+        if self.multiplicative:
+            mult_embedding = self.mult_embedding(distances)
+            return mult_embedding, additive_emb
         else:
-            return learned
+            return additive_emb
 
 def get_grad_weight_fun(weight):
     @tf.custom_gradient

@@ -11,7 +11,7 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
                  num_heads:int, attention_filters:int=0,
                  training_query_idx:list=None, inference_query_idx:list=None,
                  frame_aware: bool = False, frame_max_distance:int=0,
-                 dropout:float=0.1, l2_reg:float=0, embedding_l2_reg:float=1e-5, layer_normalization:bool = False,
+                 dropout:float=0.1, l2_reg:float=0, embedding_l2_reg:float=1e-5, multiplicative_embedding:bool=False, layer_normalization:bool = False,
                  skip_connection:bool = True,  name="TemporalAttention"):
         '''
             filters : number of output channels
@@ -27,6 +27,7 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
         self.dropout=dropout
         self.l2_reg=l2_reg
         self.embedding_l2_reg=embedding_l2_reg
+        self.multiplicative_embedding=multiplicative_embedding
         self.layer_normalization=layer_normalization
         self.temporal_dim=None
         self.training_query_idx = training_query_idx
@@ -39,7 +40,7 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"num_heads": self.num_heads, "dropout":self.dropout, "filters":self.filters, "skip_connection":self.skip_connection, "layer_normalization":self.layer_normalization, "l2_reg":self.l2_reg, "embedding_l2_reg":self.embedding_l2_reg, "frame_aware":self.frame_aware, "frame_max_distance":self.frame_max_distance, "training_query_idx":self.training_query_idx, "inference_query_idx":self.inference_query_idx})
+      config.update({"num_heads": self.num_heads, "dropout":self.dropout, "filters":self.filters, "skip_connection":self.skip_connection, "layer_normalization":self.layer_normalization, "l2_reg":self.l2_reg, "embedding_l2_reg":self.embedding_l2_reg, "multiplicative_embedding":self.multiplicative_embedding, "frame_aware":self.frame_aware, "frame_max_distance":self.frame_max_distance, "training_query_idx":self.training_query_idx, "inference_query_idx":self.inference_query_idx})
       return config
 
     def build(self, input_shape):
@@ -79,14 +80,10 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
             name="MultiHeadAttention")
 
-        self.temp_embedding = tf.keras.layers.Embedding(
-            self.temporal_dim,
+        self.temp_embedding = RelativeTemporalEmbedding(
             self.filters,
-            embeddings_regularizer=tf.keras.regularizers.l2(self.embedding_l2_reg) if self.embedding_l2_reg > 0 else None,
-            name="TempEnc"
-        ) if not self.frame_aware else RelativeTemporalEmbedding(
-            max(self.temporal_dim, self.frame_max_distance),
-            self.filters,
+            256,
+            multiplicative=self.multiplicative_embedding,
             l2_reg=self.embedding_l2_reg,
             name="TempEnc"
         )
@@ -103,18 +100,24 @@ class TemporalAttention(InferenceLayer, tf.keras.layers.Layer):
             frame_list, t_index = x
         else:
             frame_list = x
-            t_index = tf.range(self.temporal_dim, dtype=tf.int32)
+            t_index = tf.range(self.temporal_dim, dtype=tf.int32) - tf.cast((self.temporal_dim - 1) // 2, tf.int32) # index is relative to central feature
 
         shape = tf.shape(frame_list[0])
         B = shape[0]
         C = self.filters
         T = self.temporal_dim
 
-        t_emb = self.temp_embedding(t_index)  # (T, C) or (B, T, C) if frame_aware
+        t_emb = self.temp_embedding(t_index)  # (1, T, C) or (B, T, C) if frame_aware
+        if self.multiplicative_embedding:
+            t_emb_mul, t_emb = t_emb
+            t_emb_mul = tf.reshape(t_emb_mul, (1, 1, 1, T, C)) if not self.frame_aware else tf.reshape(t_emb_mul, (B, 1, 1, T, C))
         t_emb = tf.reshape(t_emb, (1, 1, 1, T, C)) if not self.frame_aware else tf.reshape(t_emb, (B, 1, 1, T, C))
 
         frame_stacked = tf.stack(frame_list, axis=3)  # (B, Y, X, T, C)
-        frame_stacked_emb = frame_stacked + t_emb
+        if self.multiplicative_embedding:
+            frame_stacked_emb = frame_stacked * t_emb_mul + t_emb
+        else:
+            frame_stacked_emb = frame_stacked + t_emb
         if self.layer_normalization:
             frame_stacked_emb = self.ln_qk(frame_stacked_emb)
             frame_stacked = self.ln_v(frame_stacked)
