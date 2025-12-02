@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 
 class WindowSpatialAttention(tf.keras.layers.Layer):
     """
@@ -213,6 +214,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         x_starts = self._compute_axis_coords_with_min_overlap(X, WSX)
         return y_starts, x_starts
 
+    @tf.function(jit_compile=True)
     def _extract_windows_vectorized(self, x, y_starts, x_starts):
         """
         Extract windows using vectorized operations.
@@ -270,6 +272,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
 
         return windows
 
+    @tf.function(jit_compile=True)
     def _scatter_windows_mean(self, windows, y_starts, x_starts, Y, X):
         """
         Scatter windows back with simple averaging (optimized for mean reduction).
@@ -342,6 +345,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
 
         return output
 
+    @tf.function(jit_compile=True)
     def _scatter_windows_with_averaging(self, windows, window_weights, y_starts, x_starts, Y, X):
         """
         Scatter windows back to spatial dimensions with weighted averaging at overlaps.
@@ -533,39 +537,66 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
                 raise ValueError("Invalid input length should be lower than 3")
         else:
             if self.layer_normalization:
-                x = self.ln(x)
+                x = self.ln_q(x)
             key = value = query = x
 
         B, Y, X, C = tf.unstack(tf.shape(query))
-
-        # Compute window grid with overlap
-        y_starts, x_starts = self._compute_window_grid(Y, X)
+        WSY, WSX = self.window_size
 
         # Project Q, K, V
         Q = self.qproj(query)
         K = self.kproj(key)
         V = self.vproj(value)
 
-        # Extract windows
-        Q_windows = self._extract_windows_vectorized(Q, y_starts, x_starts)
-        K_windows = self._extract_windows_vectorized(K, y_starts, x_starts)
-        V_windows = self._extract_windows_vectorized(V, y_starts, x_starts)
+        def single():
+            """Direct attention without windowing overhead."""
+            # Pad to window size if needed
+            pad_y = tf.maximum(0, WSY - Y)
+            pad_x = tf.maximum(0, WSX - X)
+            need_padding = tf.reduce_any(tf.greater([pad_y, pad_x], 0))
+            def pad():
+                Qp = tf.pad(Q, [[0, 0], [0, pad_y], [0, pad_x], [0, 0]], mode="SYMMETRIC")
+                Kp = tf.pad(K, [[0, 0], [0, pad_y], [0, pad_x], [0, 0]], mode="SYMMETRIC")
+                Vp = tf.pad(V, [[0, 0], [0, pad_y], [0, pad_x], [0, 0]], mode="SYMMETRIC")
+                return Qp, Kp, Vp
+            def identity():
+                return Q, K, V
 
-        # Apply window attention
-        out_windows, attention_confidence = self._window_attention(
-            Q_windows, K_windows, V_windows, training
-        )
+            Qp, Kp, Vp = tf.cond(need_padding, pad, identity)
 
-        # Scatter back with appropriate weighting
-        if self.overlap_reduction == 'attention_weighted':
-            output = self._scatter_windows_with_averaging( out_windows, attention_confidence, y_starts, x_starts, Y, X )
-        elif self.overlap_reduction == "geometrical":
-            num_win = tf.shape(y_starts)[0] * tf.shape(x_starts)[0]
-            geometrical_confidence = tf.tile(tf.cast(self.geometrical_confidence, out_windows.dtype), [B * num_win, 1, 1, 1] )
-            output = self._scatter_windows_with_averaging(out_windows, geometrical_confidence, y_starts, x_starts, Y, X)
-        else:  # 'mean'
-            output = self._scatter_windows_mean( out_windows, y_starts, x_starts, Y, X )
+            # Apply window attention (now Q, K, V are exactly window_size)
+            out_windows, _ = self._window_attention(Qp, Kp, Vp, training)
 
+            # Crop back to original size
+            return out_windows[:, :Y, :X, :]
+
+        def multiple():
+            # Compute window grid with overlap
+            y_starts, x_starts = self._compute_window_grid(Y, X)
+            # Extract windows
+            Q_windows = self._extract_windows_vectorized(Q, y_starts, x_starts)
+            K_windows = self._extract_windows_vectorized(K, y_starts, x_starts)
+            V_windows = self._extract_windows_vectorized(V, y_starts, x_starts)
+
+            # Apply window attention
+            out_windows, attention_confidence = self._window_attention(
+                Q_windows, K_windows, V_windows, training
+            )
+
+            # Scatter back with appropriate weighting
+            if self.overlap_reduction == 'attention_weighted':
+                output = self._scatter_windows_with_averaging( out_windows, attention_confidence, y_starts, x_starts, Y, X )
+            elif self.overlap_reduction == "geometrical":
+                num_win = tf.shape(y_starts)[0] * tf.shape(x_starts)[0]
+                geometrical_confidence = tf.tile(tf.cast(self.geometrical_confidence, out_windows.dtype), [B * num_win, 1, 1, 1] )
+                output = self._scatter_windows_with_averaging(out_windows, geometrical_confidence, y_starts, x_starts, Y, X)
+            else:  # 'mean'
+                output = self._scatter_windows_mean( out_windows, y_starts, x_starts, Y, X )
+            return output
+
+        # Branch based on image size
+        single_window = tf.logical_and( tf.less_equal(Y, WSY), tf.less_equal(X, WSX) )
+        output = tf.cond( single_window, single, multiple )
         # Output projection
         output = self.outproj(output)
 
@@ -714,7 +745,142 @@ def test_coordinate_handling():
     print("=" * 60)
 
 
+def test_window_coverage_with_geometrical():
+    # Create a small test image (6x6) with distinct values for visualization
+    test_image = tf.constant([
+        [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5], [6, 6]],
+        [[7, 7], [8, 8], [9, 9], [10, 10], [11, 11], [12, 12]],
+        [[13, 13], [14, 14], [15, 15], [16, 16], [17, 17], [18, 18]],
+        [[19, 19], [20, 20], [21, 21], [22, 22], [23, 23], [24, 24]],
+        [[25, 25], [26, 26], [27, 27], [28, 28], [29, 29], [30, 30]],
+        [[31, 31], [32, 32], [33, 33], [34, 34], [35, 35], [36, 36]]
+    ], dtype=tf.float32)  # Shape: (6, 6, 2)
+    test_image = tf.expand_dims(test_image, axis=0)  # Add batch dim: (1, 6, 6, 2)
+
+    # Test with different window sizes and overlap modes
+    window_sizes = [(3, 3), (4, 4), (6, 6)]
+    overlap_modes = ['mean', 'geometrical']
+
+    for window_size in window_sizes:
+        for overlap_mode in overlap_modes:
+            print(f"\n{'='*50}")
+            print(f"Testing: Window {window_size}, Overlap {overlap_mode}")
+            print(f"{'='*50}")
+
+            # Create layer
+            window_attention = WindowSpatialAttention(
+                num_heads=2,
+                attention_filters=32,
+                window_size=window_size,
+                overlap_reduction=overlap_mode,
+                layer_normalization=False,
+                skip_connection=False
+            )
+
+            # Build the layer
+            window_attention.build(test_image.shape)
+
+            # Get window grid coordinates
+            Y, X = test_image.shape[1], test_image.shape[2]
+            y_starts, x_starts = window_attention._compute_window_grid(Y, X)
+
+            print(f"Window start coordinates:")
+            print(f"Y starts: {y_starts.numpy()}")
+            print(f"X starts: {x_starts.numpy()}")
+
+            # Extract windows
+            Q = test_image  # Use same for Q/K/V for this test
+            windows = window_attention._extract_windows_vectorized(Q, y_starts, x_starts)
+
+            print(f"\nExtracted windows shape: {windows.shape}")
+            num_windows = windows.shape[0] // test_image.shape[0]  # Number of windows per batch
+            print(f"Number of windows: {num_windows}")
+
+            # Print each window's coordinates and values
+            WSY, WSX = window_attention.window_size
+            for win_idx in range(num_windows):
+                window = windows[win_idx, :, :, :]  # Shape: (WSY, WSX, C)
+                print(f"\nWindow {win_idx + 1}:")
+
+                # Get the actual coordinates of this window
+                y_start = y_starts[win_idx // len(x_starts)]
+                x_start = x_starts[win_idx % len(x_starts)]
+
+                # Create coordinate grid for this window
+                y_coords = tf.range(y_start, min(y_start + WSY, Y))
+                x_coords = tf.range(x_start, min(x_start + WSX, X))
+                y_grid, x_grid = tf.meshgrid(y_coords, x_coords, indexing='ij')
+
+                print(f"  Top-left corner: ({y_start.numpy()}, {x_start.numpy()})")
+                print(f"  Window coordinates:")
+                coords = tf.stack([y_grid, x_grid], axis=-1)
+                for y in range(len(y_coords)):
+                    row = []
+                    for x in range(len(x_coords)):
+                        coord = coords[y, x]
+                        val = window[y, x].numpy()
+                        row.append(f"({coord[0]}, {coord[1]}):{val}")
+                    print("  " + " ".join(row))
+
+            # Test reconstruction
+            if overlap_mode == 'mean':
+                reconstructed = window_attention._scatter_windows_mean(windows, y_starts, x_starts, Y, X)
+            else:  # geometrical
+                geometrical_confidence = window_attention._geometrical_confidence()
+                print(f"\nGeometrical confidence shape: {geometrical_confidence.shape}")
+                print("Geometrical confidence values:")
+                print(geometrical_confidence[0, :, :, 0].numpy())
+
+                num_win = tf.shape(y_starts)[0] * tf.shape(x_starts)[0]
+                tiled_confidence = tf.tile(tf.cast(geometrical_confidence, windows.dtype),
+                                         [test_image.shape[0] * num_win, 1, 1, 1])
+                reconstructed = window_attention._scatter_windows_with_averaging(
+                    windows, tiled_confidence, y_starts, x_starts, Y, X)
+
+            print(f"\nReconstructed image shape: {reconstructed.shape}")
+            print("First channel of reconstructed image:")
+            for y in range(Y):
+                row = []
+                for x in range(X):
+                    val = reconstructed[0, y, x, 0].numpy()
+                    row.append(f"{val:5.1f}")
+                print(" ".join(row))
+
+            # Verify reconstruction
+            diff = tf.abs(test_image - reconstructed)
+            max_diff = tf.reduce_max(diff).numpy()
+            mean_diff = tf.reduce_mean(diff).numpy()
+            print(f"\nMax difference: {max_diff:.4f}")
+            print(f"Mean difference: {mean_diff:.4f}")
+
+            # Edge case verification: Check if all original pixels are covered
+            coverage_mask = np.zeros((Y, X))
+            for win_idx in range(num_windows):
+                y_start = y_starts[win_idx // len(x_starts)].numpy()
+                x_start = x_starts[win_idx % len(x_starts)].numpy()
+                y_end = min(y_start + WSY, Y)
+                x_end = min(x_start + WSX, X)
+                coverage_mask[y_start:y_end, x_start:x_end] += 1
+
+            print("\nCoverage mask (number of windows covering each pixel):")
+            for y in range(Y):
+                row = []
+                for x in range(X):
+                    row.append(f"{coverage_mask[y, x]:1f}")
+                print(" ".join(row))
+
+            # Check if all pixels are covered by at least one window
+            min_coverage = np.min(coverage_mask)
+            max_coverage = np.max(coverage_mask)
+            print(f"\nCoverage statistics:")
+            print(f"  Minimum coverage: {min_coverage} (should be >=1)")
+            print(f"  Maximum coverage: {max_coverage}")
+            print(f"  All pixels covered: {min_coverage >= 1}")
+
+
+
 if __name__ == "__main__":
-    layer = WindowSpatialAttention(num_heads=4, window_size=(7, 4), overlap_reduction='mean')
-    print(layer._geometrical_confidence().numpy())
-    test_coordinate_handling()
+    #layer = WindowSpatialAttention(num_heads=4, window_size=(7, 4), overlap_reduction='mean')
+    #print(layer._geometrical_confidence().numpy())
+    #test_coordinate_handling()
+    test_window_coverage_with_geometrical()

@@ -613,9 +613,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             bw_gap_emb_k, fw_gap_emb_k = get_dist_emb(fdist_emb_k)
             bw_gap_emb_q, fw_gap_emb_q = get_dist_emb(fdist_emb_q)
             # TODO test if better to have two separate layers for forward and backward
-            bwfw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="NeighborAttention")
-            backward_features = bwfw_op([features_batch, direct_neigh_prev, direct_neigh_prev, (bw_gap_emb_q, bw_gap_emb_k)])
-            forward_features = bwfw_op([features_batch, direct_neigh_next, direct_neigh_prev, (fw_gap_emb_q, fw_gap_emb_k)])
+            bw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters, window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="BackwardCrossAttention")
+            fw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,  window_size=arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="ForwardCrossAttention")
+            backward_features = bw_op([features_batch, direct_neigh_prev, direct_neigh_prev, (bw_gap_emb_q, bw_gap_emb_k)])
+            forward_features = fw_op([features_batch, direct_neigh_next, direct_neigh_prev, (fw_gap_emb_q, fw_gap_emb_k)])
             bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")(  [backward_features, forward_features])
             if arch.frame_window > 1:
                 bwfw_features_list = SplitBatch(n_frames, compensate_gradient=False, name="SplitFeaturesBWFW")(bwfw_features_batch)
