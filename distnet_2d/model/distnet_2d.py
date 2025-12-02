@@ -612,10 +612,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
             bw_gap_emb_k, fw_gap_emb_k = get_dist_emb(fdist_emb_k)
             bw_gap_emb_q, fw_gap_emb_q = get_dist_emb(fdist_emb_q)
-            # TODO test if better to have two separate layers for forward and backward / test skip connection
+            shared_bwfw = True # TODO test if better to have two separate layers for forward and backward / test skip connection + test mul emb efficiency
             bw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
-                                           window_size = arch.attention_spatial_radius, skip_connection=False, layer_normalization=True, name="BackwardCrossAttention")
-            fw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
+                                           window_size = arch.attention_spatial_radius, skip_connection=False, layer_normalization=True, name="BWFWCrossAttention" if shared_bwfw else "BackwardCrossAttention")
+            fw_op = bw_op if shared_bwfw else WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                            window_size=arch.attention_spatial_radius, skip_connection=False, layer_normalization=True, name="ForwardCrossAttention")
             backward_features = bw_op([features_batch, direct_neigh_prev, direct_neigh_prev, (bw_gap_emb_q, bw_gap_emb_k)])
             forward_features = fw_op([features_batch, direct_neigh_next, direct_neigh_prev, (fw_gap_emb_q, fw_gap_emb_k)])
