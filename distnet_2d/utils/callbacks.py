@@ -1,5 +1,5 @@
 import math
-
+from math import cos, pi
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.callbacks import Callback
@@ -7,6 +7,50 @@ from collections import defaultdict
 
 from distnet_2d.model.layers import HideVariableWrapper
 
+class EpsilonCosineDecayCallback(Callback):
+    """Reduce optimizer epsilon parameter.
+    Args:
+      factor: factor by which epsilon will be reduced.
+        `new_epsilon = epsilon * factor`.
+      period: number of epochs after which epsilon will be reduced.
+      verbose: int. 0: quiet, 1: update messages.
+      min_epsilon: lower bound on the learning rate.
+    """
+
+    def __init__(self, decay_steps:int, start_epsilon=1e-6, min_epsilon=1e-7, start_step:int=0, verbose=1):
+        super(EpsilonCosineDecayCallback, self).__init__()
+        self.step_counter = start_step
+        self.start_epsilon = start_epsilon
+        self.decay_steps=decay_steps
+        self.alpha=min_epsilon / start_epsilon
+        self.verbose = verbose
+
+    def on_train_batch_begin(self, batch, logs=None):
+        epsilon = self._decayed_epsilon(self.step_counter)
+        self._set_epsilon(epsilon)
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.step_counter +=1
+        if logs is not None:
+            logs['epsilon'] = self._get_epsilon()
+
+    def _decayed_epsilon(self, step):
+        step = min(step, self.decay_steps)
+        cosine_decay = 0.5 * (1 + cos(pi * step / self.decay_steps))
+        decayed = (1 - self.alpha) * cosine_decay + self.alpha
+        return self.start_epsilon * decayed
+
+    def _get_epsilon(self):
+        optimizer = self.model.optimizer
+        if hasattr(optimizer, 'inner_optimizer'):
+            optimizer = optimizer.inner_optimizer
+        return optimizer.epsilon
+
+    def _set_epsilon(self, epsilon):
+        optimizer = self.model.optimizer
+        if hasattr(optimizer, 'inner_optimizer'):
+            optimizer = optimizer.inner_optimizer
+        optimizer.epsilon = epsilon
 
 class ClassWeightScheduler(Callback):
     def __init__(self, attribute_name:str, n_epochs:int, power_law:float=1., verbose:bool=True):

@@ -227,7 +227,8 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         Returns:
             windows: (num_y*num_x*B, WSY, WSX, C)
         """
-        B, Y, X, C = tf.unstack(tf.shape(x))
+        B, Y, X, _ = tf.unstack(tf.shape(x))
+        C = self.num_heads * self.attention_filters
         WSY, WSX = self.window_size
 
         # Create grid of window coordinates
@@ -286,7 +287,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         Returns:
             output: (B, Y, X, C)
         """
-        C = tf.shape(windows)[-1]
+        C = self.num_heads * self.attention_filters
         WSY, WSX = self.window_size
         num_y = tf.shape(y_starts)[0]
         num_x = tf.shape(x_starts)[0]
@@ -350,7 +351,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         """
         Scatter windows back to spatial dimensions with weighted averaging at overlaps.
         """
-        C = tf.shape(windows)[-1]
+        C = self.num_heads * self.attention_filters
         WSY, WSX = self.window_size
         num_y = tf.shape(y_starts)[0]
         num_x = tf.shape(x_starts)[0]
@@ -448,7 +449,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         """
         B_win = tf.shape(q_windows)[0]
         WSY, WSX = self.window_size
-        HF = tf.shape(q_windows)[-1]
+        HF = self.num_heads * self.attention_filters
         H = self.num_heads
         F = self.attention_filters
         N = WSY * WSX
@@ -540,7 +541,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
                 x = self.ln_q(x)
             key = value = query = x
 
-        B, Y, X, C = tf.unstack(tf.shape(query))
+        B, Y, X, _ = tf.unstack(tf.shape(query))
         WSY, WSX = self.window_size
 
         # Project Q, K, V

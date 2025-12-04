@@ -5,8 +5,10 @@ from pyexpat import features
 
 import tensorflow as tf
 
+from .temporal_pyramid import TemporalPyramid
+from .temporal_cross_attention import TemporalCrossAttention
 from .window_spatial_attention import WindowSpatialAttention
-from .architectures import ArchBase, Blend, TemA
+from .architectures import ArchBase, Blend, TemA, TemPy
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, \
     HideVariableWrapper, \
@@ -553,33 +555,40 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         for op in feature_convs:
             features_batch = op(features_batch)
 
-        features_list = SplitBatch(n_frames, compensate_gradient=False, name="SplitFeatures")(features_batch) if arch.frame_window > 0 else [features_batch]
-
         # feature_pairs
         if arch.frame_window > 0 :
-            frame_prev, frame_next = [], []
+            fidx_prev, fidx_next = [], []
             for i in range(1, n_frames):
-                frame_prev.append(i-1)
-                frame_next.append(i)
+                fidx_prev.append(i-1)
+                fidx_next.append(i)
             if long_term:
                 for c in range(0, arch.frame_window-1):
-                    frame_prev.append(c)
-                    frame_next.append(arch.frame_window)
+                    fidx_prev.append(c)
+                    fidx_next.append(arch.frame_window)
                 if arch.future_frames:
                     for c in range(arch.frame_window+2, n_frames):
-                        frame_prev.append(arch.frame_window)
-                        frame_next.append(c)
+                        fidx_prev.append(arch.frame_window)
+                        fidx_next.append(c)
             if arch.frame_aware:
-                frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = frame_prev, frame_next_idx = frame_next)(frame_index)
+                frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next)(frame_index)
 
 
 
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
-        if isinstance(arch, TemA) and arch.frame_window > 0:
-            prev_idx = np.clip(np.arange(n_frames)-1, 0, n_frames - 1).tolist() if arch.frame_window > 1 else [0] # special case if fw = 1 -> simplify
-            next_idx = np.clip(np.arange(n_frames)+1, 0, n_frames-1).tolist() if arch.frame_window > 1 else [2] # special case if fw = 1 -> simplify
-            direct_neigh_prev = tf.keras.layers.Concatenate(axis=0, name="FeaturePrevToBatch")( [features_list[i] for i in prev_idx])
-            direct_neigh_next = tf.keras.layers.Concatenate(axis=0, name="FeatureNextToBatch")( [features_list[i] for i in next_idx])
+        if isinstance(arch, TemPy) and arch.frame_window > 0:
+            features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
+            watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,  window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True)
+            blend_op = TemporalPyramid(watt_kwargs)
+            features_batch_r = blend_op(features_batch_r) + features_batch_r
+            feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=[fidx_prev[pidx] for pidx in inference_pair_idx], name="SelectFeaturePairPrev")(features_batch_r)  # Tp x B, Y, X, C
+            feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=[fidx_next[pidx] for pidx in inference_pair_idx], name="SelectFeaturePairNext")(features_batch_r)
+            feature_pairs_batch = pair_combine_op([feature_prev, feature_next])  # Tp x B, Y, X, C
+            features_batch = InferenceAwareBatchSelector(inference_idx=arch.frame_window, name="SelectFeature")( features_batch_r)
+        elif isinstance(arch, TemA) and arch.frame_window > 0:
+            features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch) # T, B, Y, X, C
+            feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=fidx_prev,  name="SelectFeaturePairPrev")( features_batch_r) # Tp x B, Y, X, C
+            feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=fidx_next,  name="SelectFeaturePairNext")( features_batch_r)
+
             # temporal embeddings
             multiplicative_embedding = True
             fdist_emb_q = RelativeTemporalEmbedding(embedding_dim=feature_filters, multiplicative=multiplicative_embedding, name = "NeighborTemporalDistanceKeys")
@@ -587,22 +596,20 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
             def get_dist_emb(layer):
                 if arch.frame_aware:
-                    bw_gap = tf.gather(frame_index[:, 0, 0], prev_idx, axis=1) - frame_index[:, 0, 0]
-                    fw_gap = tf.gather(frame_index[:, 0, 0], next_idx, axis=1) - frame_index[:, 0, 0]
-                    bw_gap_emb = layer(bw_gap)  # (B, T, F)
-                    fw_gap_emb = layer(fw_gap) # (B, T, F)
+                    gap = tf.gather(frame_index[:, 0, 0], fidx_next, axis=1) -  tf.gather(frame_index[:, 0, 0], fidx_prev, axis=1) # (B, Tp)
+                    fw_gap_emb = layer(gap) # (B, Tp, F)
+                    bw_gap_emb = layer(-gap) # (B, Tp, F)
                 else:
-                    bw_gap = tf.cast(np.array(prev_idx) - np.arange(n_frames), tf.int32)
-                    fw_gap = tf.cast(np.array(next_idx) - np.arange(n_frames), tf.int32)
-                    bw_gap_emb = layer(bw_gap)  # (1, T, F)
-                    fw_gap_emb = layer(fw_gap)  # (1, T, F)
-                    tile_fun = lambda t : tf.tile(t, [tf.shape(inputs[0])[0], 1, 1]) # (1, T, F) -> (B, T, F)
+                    gap = tf.cast(np.array(fidx_next) - np.array(fidx_prev), tf.int32) # (Tp, )
+                    fw_gap_emb = layer(gap)  # (1, Tp, F)
+                    bw_gap_emb = layer(-gap)  # (1, Tp, F)
+                    tile_fun = lambda t : tf.tile(t, [tf.shape(inputs[0])[0], 1, 1]) # (1, Tp, F) -> (B, Tp, F)
                     if multiplicative_embedding:
                         bw_gap_emb = tile_fun(bw_gap_emb[0]), tile_fun(bw_gap_emb[1])
                         fw_gap_emb = tile_fun(fw_gap_emb[0]), tile_fun(fw_gap_emb[1])
                     else:
                         bw_gap_emb, fw_gap_emb = tile_fun(bw_gap_emb), tile_fun(fw_gap_emb)
-                reshape_fun = lambda t: tf.reshape(tf.transpose(t, [1, 0, 2]), [-1, 1, 1, feature_filters]) # (T x B, 1, 1, F)
+                reshape_fun = lambda t: tf.reshape(tf.transpose(t, [1, 0, 2]), [-1, 1, 1, feature_filters]) # (Tp x B, 1, 1, F)
                 if multiplicative_embedding:
                     bw_gap_emb = reshape_fun(bw_gap_emb[0]), reshape_fun(bw_gap_emb[1])
                     fw_gap_emb = reshape_fun(fw_gap_emb[0]), reshape_fun(fw_gap_emb[1])
@@ -614,44 +621,37 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             bw_gap_emb_q, fw_gap_emb_q = get_dist_emb(fdist_emb_q)
             shared_bwfw = True # TODO test if better to have two separate layers for forward and backward / test skip connection + test mul emb efficiency
             bw_op = WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
-                                           window_size = arch.attention_spatial_radius, skip_connection=False, layer_normalization=True, name="BWFWCrossAttention" if shared_bwfw else "BackwardCrossAttention")
+                                           window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="BWFWCrossAttention" if shared_bwfw else "BackwardCrossAttention")
             fw_op = bw_op if shared_bwfw else WindowSpatialAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
-                                           window_size=arch.attention_spatial_radius, skip_connection=False, layer_normalization=True, name="ForwardCrossAttention")
-            backward_features = bw_op([features_batch, direct_neigh_prev, direct_neigh_prev, (bw_gap_emb_q, bw_gap_emb_k)])
-            forward_features = fw_op([features_batch, direct_neigh_next, direct_neigh_prev, (fw_gap_emb_q, fw_gap_emb_k)])
-            bwfw_features_batch = tf.keras.layers.Concatenate(axis=-1, name="FeaturesBWFW")(  [features_batch, backward_features, forward_features])
-            if arch.frame_window > 1:
-                bwfw_features_list = SplitBatch(n_frames, compensate_gradient=False, name="SplitFeaturesBWFW")(bwfw_features_batch)
-                inference_idx = list(  set([frame_prev[i] for i in inference_pair_idx] + [frame_next[i] for i in inference_pair_idx]))
-                inference_idx.sort()
-                long_term_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
-                                                 inference_query_idx = inference_idx,
-                                                 frame_aware = arch.frame_aware, frame_max_distance = arch.frame_max_distance,
-                                                 multiplicative_embedding=multiplicative_embedding,
-                                                 layer_normalization = True, skip_connection=True )
-                if arch.frame_aware:
-                    frame_relative_index = frame_index[:, 0, 0, :] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]
-                    features = long_term_op([bwfw_features_list, frame_relative_index])
-                else:
-                    features = long_term_op(bwfw_features_list)
-            else:
-                central_feature = tf.keras.layers.Conv2D(filters=feature_filters, kernel=1, padding="same", activation="relu", name="CentralFeatureConv")(bwfw_features_batch)
-                features = [features_list[0], central_feature, features_list[2]]
+                                           window_size=arch.attention_spatial_radius, skip_connection=True, layer_normalization=True, name="ForwardCrossAttention")
+            backward_fp = bw_op([feature_next, feature_prev, feature_prev, (bw_gap_emb_q, bw_gap_emb_k)]) # Tp x B, Y, X, C
+            forward_fp = fw_op([feature_prev, feature_next, feature_next, (fw_gap_emb_q, fw_gap_emb_k)]) # Tp x B, Y, X, C
+            fp_batch = pair_combine_op(  [backward_fp, forward_fp]) # Tp x B, Y, X, C
+            fp_batch_r = SplitBatch(n_frame_pairs, return_list=False, name="SplitFeaturesBWFW")(fp_batch) # Tp, B, Y, X, C
+            fp_att_op = TemporalAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
+                                         inference_query_idx=central_pair_idx,
+                                         relative_temporal_embedding=False, # normal index based learnt embeddings
+                                         layer_normalization = True, skip_connection=True, name="FPTempAttention" )
+            fp_batch_r = fp_att_op(fp_batch_r) # Tp, B, Y, X, C
 
-            features_batch = InferenceAwareBatchSelector(inference_idx=inference_idx.index(arch.frame_window), name="SelectFeature")(features)
-            # feature pairs
-            feature_prev = InferenceAwareBatchSelector(train_idx = frame_prev, inference_idx = [inference_idx.index(frame_prev[i]) for i in inference_pair_idx], name="SelectFeaturePairPrev")(features)
-            feature_next = InferenceAwareBatchSelector(train_idx = frame_next, inference_idx = [inference_idx.index(frame_next[i]) for i in inference_pair_idx], name="SelectFeaturePairNext")(features)
-            feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
+            cross_att_op = TemporalCrossAttention(num_heads=arch.temporal_attention, attention_filters=attention_filters,
+                                            layer_normalization=True, skip_connection=True, name="TempCrossAttention")
+            central_fp_r = InferenceAwareBatchSelector(train_idx=central_pair_idx, inference_idx=None, merge_batch_dim=False, name="SelectCentralFeaturePair")(fp_batch_r) #Tcp, B, Y, X, C
+            central_f = InferenceAwareBatchSelector(train_idx=arch.frame_window, inference_idx=arch.frame_window, merge_batch_dim=True, name="SelectCentralFeature")(features_batch_r)
+            central_f = cross_att_op([central_f, central_fp_r])
+            features_batch_r = tf.tensor_scatter_nd_update(features_batch_r, [[arch.frame_window]], [central_f]) # update the central feature only
+            features_batch = InferenceAwareBatchSelector(inference_idx=arch.frame_window, name="SelectFeature")(features_batch_r)
+            feature_pairs_batch = InferenceAwareBatchSelector(train_idx = None, inference_idx = [central_pair_idx.index(pidx) for pidx in inference_pair_idx], name="SelectFeaturePairs")(fp_batch_r)
 
         elif isinstance(arch, Blend) and arch.frame_window > 0: # BLEND architecture (first architecture) : combine feature / feature pair with convolution part so that each frame / frame pair has access to information from all other feature pairs / features
-            feature_prev = tf.keras.layers.Concatenate(axis=0, name="FeaturePairPrevToBatch")([features_list[i] for i in frame_prev])
-            feature_next = tf.keras.layers.Concatenate(axis=0, name="FeaturePairNextToBatch")([features_list[i] for i in frame_next])
-            feature_pairs_batch = pair_combine_op([feature_prev, feature_next])
+            features_list = SplitBatch(n_frames, compensate_gradient=False, name="SplitFeatures")( features_batch) if arch.frame_window > 0 else [features_batch]
+            long_term_feature_prev = tf.keras.layers.Concatenate(axis=0, name="FeaturePairPrevToBatch")([features_list[i] for i in fidx_prev])
+            long_term_feature_next = tf.keras.layers.Concatenate(axis=0, name="FeaturePairNextToBatch")([features_list[i] for i in fidx_next])
+            feature_pairs_batch = pair_combine_op([long_term_feature_prev, long_term_feature_next])
             if arch.attention > 0:
                 attention_op = SpatialAttention2D(num_heads=arch.attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=arch.frame_aware, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention")
                 pair_attention_skip_op = Combine(filters=feature_filters, kernel_size=arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairAttSkip")
-                attention_result = attention_op([feature_prev + frame_dist_emb, feature_next + frame_dist_emb,  feature_pairs_batch]) if arch.frame_aware else attention_op( [feature_prev, feature_next, feature_pairs_batch])
+                attention_result = attention_op([long_term_feature_prev + frame_dist_emb, long_term_feature_next + frame_dist_emb,  feature_pairs_batch]) if arch.frame_aware else attention_op( [long_term_feature_prev, long_term_feature_next, feature_pairs_batch])
                 feature_pairs_batch = pair_attention_skip_op([feature_pairs_batch, attention_result])
             feature_pairs_list = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairs")(feature_pairs_batch)
             if arch.frame_aware:

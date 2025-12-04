@@ -138,32 +138,35 @@ class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
                 return input_concat
 
 class InferenceAwareBatchSelector(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, inference_idx:list, train_idx:list=None, name: str= "SelectFeature2"):
+    def __init__(self, inference_idx:list, train_idx:list=None, merge_batch_dim:bool=True, name: str= "SelectFeature2"):
         super().__init__(name=name)
         self.train_idx=train_idx
         self.inference_idx=inference_idx
+        self.merge_batch_dim=merge_batch_dim
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({"train_idx":self.train_idx, "inference_idx":self.inference_idx})
+        config.update({"train_idx":self.train_idx, "inference_idx":self.inference_idx, "merge_batch_dim":self.merge_batch_dim})
         return config
 
     def call(self, input): # (N, B, Y, X, F)
         shape = tf.shape(input)
-        if self.inference_mode: # only produce one output
-            if isinstance(self.inference_idx, (tuple, list)):
+        if self.inference_mode:
+            if self.inference_idx is None:
+                return tf.reshape(input, [-1, shape[2], shape[3], shape[4]]) if self.merge_batch_dim else input
+            elif isinstance(self.inference_idx, (tuple, list)):
                 items = tf.gather(input, tf.constant(self.inference_idx, tf.int32), axis=0)
-                return tf.reshape(items, [-1, shape[2], shape[3], shape[4]])
+                return tf.reshape(items, [-1, shape[2], shape[3], shape[4]]) if self.merge_batch_dim else items
             else:
-                return input[self.inference_idx]
+                return input[self.inference_idx] if self.merge_batch_dim else input[self.inference_idx:self.inference_idx+1]
         else:
             if self.train_idx is None:
-                return tf.reshape(input, [-1, shape[2], shape[3], shape[4]])
+                return tf.reshape(input, [-1, shape[2], shape[3], shape[4]]) if self.merge_batch_dim else input
             elif isinstance(self.train_idx, (tuple, list)):
                 items = tf.gather(input, tf.constant(self.train_idx, tf.int32), axis=0)
-                return tf.reshape(items, [-1, shape[2], shape[3], shape[4]])
+                return tf.reshape(items, [-1, shape[2], shape[3], shape[4]]) if self.merge_batch_dim else items
             else:
-                return input[self.train_idx]
+                return input[self.train_idx] if self.merge_batch_dim else input[self.train_idx:self.train_idx+1]
 
 class ChannelToBatch(tf.keras.layers.Layer):
     def __init__(self, compensate_gradient:bool = False, add_channel_axis:bool = True, name: str="ChannelToBatch"):
@@ -199,14 +202,15 @@ class ChannelToBatch(tf.keras.layers.Layer):
         return input
 
 class SplitBatch(tf.keras.layers.Layer):
-    def __init__(self, n_splits:int, compensate_gradient:bool = False, name:str="SplitBatch2D"):
+    def __init__(self, n_splits:int, compensate_gradient:bool = False, return_list:bool=True, name:str="SplitBatch2D"):
         self.n_splits=n_splits
         self.compensate_gradient=compensate_gradient
+        self.return_list=return_list
         super().__init__(name=name)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"n_splits": self.n_splits, "compensate_gradient":self.compensate_gradient})
+      config.update({"n_splits": self.n_splits, "compensate_gradient":self.compensate_gradient, "return_list":self.return_list})
       return config
 
     def build(self, input_shape):
@@ -225,9 +229,11 @@ class SplitBatch(tf.keras.layers.Layer):
         if self.compensate_gradient:
             input = self.grad_fun(input) # so that gradient are averaged over N (number of frames)
         input = tf.reshape(input, target_shape) # (N, B, Y, X, C)
-        splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
-        return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
-
+        if self.return_list:
+            splits = tf.split(input, num_or_size_splits = self.n_splits, axis=0) # N x (1, B, Y, X, C)
+            return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
+        else :
+            return input
 class SplitReplaceConcatBatch(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, n_splits:int, replace_idx:int, compensate_gradient:bool = False, name:str="SplitReplaceMergeBatch2D"):
         self.n_splits=n_splits

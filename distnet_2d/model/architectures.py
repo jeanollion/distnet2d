@@ -27,6 +27,17 @@ def get_architecture(architecture_type:str, **kwargs):
         else:
             raise ValueError(f"Unsupported downsampling number: {n_downsampling}: must be in [2, 3, 4]")
         return arch(**kwargs)
+    elif architecture_type.lower()=="TEMPY".lower():
+        n_downsampling = kwargs.pop("n_downsampling", 3)
+        if n_downsampling == 2:
+            arch = TemPyD2
+        elif n_downsampling == 3:
+            arch = TemPyD3
+        elif n_downsampling == 4:
+            arch = TemPyD4
+        else:
+            raise ValueError(f"Unsupported downsampling number: {n_downsampling}: must be in [2, 3, 4]")
+        return arch(**kwargs)
     else:
         raise ValueError(f"Unknown architecture type: {architecture_type}")
 
@@ -385,6 +396,38 @@ class TemAD3(TemA, D3):
             print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemAD4(TemA, D4):
+    def __init__(self, attention_spatial_radius:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
+        if self.attention_spatial_radius != attention_spatial_radius:
+            print(f"tempAtt rad: {self.attention_spatial_radius}")
+
+class TemPy(ArchBase):
+    def __init__(self, temporal_attention:int, **kwargs):
+        self.temporal_attention = temporal_attention
+        assert temporal_attention > 0
+        super().__init__(frame_aware=False, **kwargs)
+        ker4_fd = self.feature_decoder_settings[0]["kernel_size"]
+        self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
+        self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
+        # to be defined:
+        self.attention_spatial_radius = None
+
+class TemPyD2(TemPy, D2):
+    def __init__(self, attention_spatial_radius:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2)
+        if self.attention_spatial_radius != attention_spatial_radius:
+            print(f"tempAtt rad: {self.attention_spatial_radius}")
+
+class TemPyD3(TemPy, D3):
+    def __init__(self, attention_spatial_radius:int, **kwargs):
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3)
+        if self.attention_spatial_radius != attention_spatial_radius:
+            print(f"tempAtt rad: {self.attention_spatial_radius}")
+
+class TemPyD4(TemPy, D4):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
