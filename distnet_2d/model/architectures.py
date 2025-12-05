@@ -415,21 +415,21 @@ class TemPy(ArchBase):
 
 class TemPyD2(TemPy, D2):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, last_bn=False, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemPyD3(TemPy, D3):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, last_bn=False, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemPyD4(TemPy, D4):
     def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
+        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, last_bn=False, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
         if self.attention_spatial_radius != attention_spatial_radius:
             print(f"tempAtt rad: {self.attention_spatial_radius}")
