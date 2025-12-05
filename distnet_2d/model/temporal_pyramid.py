@@ -29,6 +29,7 @@ class TemporalPyramid(Layer):
         super(TemporalPyramid, self).__init__(**kwargs)
         self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
         self.skip_connection=skip_connection
+        self.layer_normalization = self.window_spatial_attention_kwargs.pop("layer_normalization", True)
         self.down_op = down_layer
         self.up_op = up_layer
         self.verbose = verbose
@@ -112,7 +113,7 @@ class TemporalPyramid(Layer):
             for i in range(len(self.down_indices)):
                 input_filters = self.C + filter_increase * i
                 output_filters = input_filters + filter_increase
-                att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, skip_connection=False, name=f"down_att{i}")
+                att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, layer_normalization=False, skip_connection=False, name=f"down_att{i}")
                 conv_layer = Combine(filters=output_filters, name=f"down_comb{i}")
                 input_layers = [tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters])]
                 q = tf.concat([input_layers[1], input_layers[0], input_layers[1], input_layers[2]], axis=0)
@@ -123,10 +124,10 @@ class TemporalPyramid(Layer):
         else:
             # Test mode: repeat the provided operation
             self.down_op = [self.down_op] * len(self.down_indices)
-
+        self.ln = tf.keras.layers.LayerNormalization() if self.layer_normalization else None
         if self.up_op is None:
-            self.up_op = WindowSpatialAttention(**self.window_spatial_attention_kwargs, skip_connection=self.skip_connection, name=f"up_att")
-        self.tem_emb = RelativeTemporalEmbedding(embedding_dim=self.C, multiplicative=False) if self.frame_aware else tf.keras.layers.Embedding(
+            self.up_op = WindowSpatialAttention(**self.window_spatial_attention_kwargs, layer_normalization=False, skip_connection=False, name=f"up_att")
+        self.tem_emb = RelativeTemporalEmbedding(embedding_dim=self.C, multiplicative=False, l2_reg=self.embedding_l2_reg) if self.frame_aware else tf.keras.layers.Embedding(
             input_dim = self.T, output_dim=self.C,
             embeddings_regularizer=tf.keras.regularizers.l2(self.embedding_l2_reg) if self.embedding_l2_reg > 0 else None
         )
@@ -140,7 +141,17 @@ class TemporalPyramid(Layer):
         input_shape = tf.shape(inputs)
         _, B, Y, X, _ = tf.unstack(input_shape)
 
-        down_layers = [inputs]
+        if self.frame_aware:
+            t_emb = self.tem_emb(frame_index) # B, T, C
+            t_emb = tf.transpose(t_emb, [1, 0, 2]) # T, B, C
+            t_emb = tf.reshape(t_emb, [self.T, B, 1, 1, self.C])
+        else:
+            t_emb = self.tem_emb(tf.range(self.T)) # T, C
+            t_emb = tf.reshape(t_emb, [self.T, 1, 1, 1, self.C])
+        inputs_emb = inputs + t_emb
+        if self.layer_normalization:
+            inputs_emb = self.ln(inputs_emb)
+        down_layers = [inputs_emb]
 
         # Downsample phase
         for level in range(self.num_levels - 1):
@@ -168,15 +179,11 @@ class TemporalPyramid(Layer):
 
         # Upsample phase
         central_feature = down_layers[-1][0]
-        if self.frame_aware:
-            t_emb = self.tem_emb(frame_index) # B, T, C
-            t_emb = tf.transpose(t_emb, [1, 0, 2]) # T, B, C
-            t_emb = tf.reshape(t_emb, [self.T, B, 1, 1, self.C])
-        else:
-            t_emb = self.tem_emb(tf.range(self.T)) # T, C
-            t_emb = tf.reshape(t_emb, [self.T, 1, 1, 1, self.C])
-        inputs_emb = inputs + t_emb
-        return self.up_op([inputs_emb, central_feature]) # multi-query mode: all queries attend to the same KV
+
+        out =  self.up_op([inputs_emb, central_feature]) # multi-query mode: all queries attend to the same KV
+        if self.skip_connection:
+            out = out + inputs
+        return out
 
     def compute_output_shape(self, input_shape):
         return input_shape
