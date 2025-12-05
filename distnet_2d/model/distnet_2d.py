@@ -572,14 +572,12 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             if arch.frame_aware:
                 frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next)(frame_index)
 
-
-
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
         if isinstance(arch, TemPy) and arch.frame_window > 0:
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
-            watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,  window_size = arch.attention_spatial_radius, skip_connection=True, layer_normalization=True)
-            blend_op = TemporalPyramid(watt_kwargs)
-            features_batch_r = blend_op(features_batch_r) + features_batch_r
+            watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,  window_size = arch.attention_spatial_radius, layer_normalization=True)
+            blend_op = TemporalPyramid(watt_kwargs, skip_connection=True)
+            features_batch_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[arch.frame_window:arch.frame_window+1, 0, 0]]) if arch.frame_aware else blend_op([features_batch_r])
             feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=[fidx_prev[pidx] for pidx in inference_pair_idx], name="SelectFeaturePairPrev")(features_batch_r)  # Tp x B, Y, X, C
             feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=[fidx_next[pidx] for pidx in inference_pair_idx], name="SelectFeaturePairNext")(features_batch_r)
             feature_pairs_batch = pair_combine_op([feature_prev, feature_next])  # Tp x B, Y, X, C

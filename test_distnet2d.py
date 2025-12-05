@@ -44,7 +44,8 @@ if not seg:
 
         dn.set_inference(True)
         dn.compile()
-        out = dn([tf.zeros(shape=(1, 64, 32, 7)), tf.zeros(shape=(1, 1, 1, 7))])
+        #out = dn([tf.zeros(shape=(1, 64, 32, 7)), tf.zeros(shape=(1, 1, 1, 7))]) # frame aware case
+        out = dn([tf.zeros(shape=(1, 64, 32, 7))])
         print(f"{[o.shape for o in out]}")
         tf.keras.utils.plot_model(dn, "/data/model.png", dpi=96, show_shapes=True)
         #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")

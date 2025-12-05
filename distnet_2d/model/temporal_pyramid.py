@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import numpy as np
 
-from .layers import Combine
+from .layers import Combine, RelativeTemporalEmbedding
 from .window_spatial_attention import WindowSpatialAttention
 
 class TemporalPyramid(Layer):
@@ -25,12 +25,14 @@ class TemporalPyramid(Layer):
     Output shape: (T, B, Y, X, C)
     """
 
-    def __init__(self, window_spatial_attention_kwargs, down_layer=None, up_layer=None, verbose=False, **kwargs):
+    def __init__(self, window_spatial_attention_kwargs, embedding_l2_reg=1e-5, skip_connection:bool=True, down_layer=None, up_layer=None, verbose=False, **kwargs):
         super(TemporalPyramid, self).__init__(**kwargs)
         self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
+        self.skip_connection=skip_connection
         self.down_op = down_layer
         self.up_op = up_layer
         self.verbose = verbose
+        self.embedding_l2_reg=embedding_l2_reg
 
     def _precompute_indices(self):
         """Pre-compute all indices for down/upsampling at each level using stride-based formula."""
@@ -67,7 +69,7 @@ class TemporalPyramid(Layer):
             next_idx = np.clip(kept_indices + 1, 0, current_size - 1)
 
             self.down_indices.append({
-                'kept': kept_indices,      # Indices kept at this level
+                'center': kept_indices,      # Indices kept at this level
                 'prev': prev_idx,          # Left neighbors for downsampling
                 'next': next_idx           # Right neighbors for downsampling
             })
@@ -86,109 +88,33 @@ class TemporalPyramid(Layer):
             current_size = next_size
             current_center = next_center
             level += 1
-
         self.num_levels = len(self.level_sizes)
 
-        # Build upsampling indices
-        self.up_indices = []
-
-        if self.verbose:
-            print(f"\n=== Upsampling Phase ===")
-            print(f"Number of levels: {self.num_levels}")
-
-        for level_idx in range(self.num_levels - 2, -1, -1):
-            target_size = self.level_sizes[level_idx]
-            kept_indices = self.down_indices[level_idx]['kept']
-
-            # Build position mappings
-            kept_set = set(kept_indices)
-            keep_target_pos = []    # Target positions that are kept
-            keep_from_prev = []     # Corresponding indices in prev_up
-            up_positions = []       # Positions that need upsampling
-
-            for target_pos in range(target_size):
-                if target_pos in kept_set:
-                    # This position comes from prev_up
-                    prev_up_idx = np.where(kept_indices == target_pos)[0][0]
-                    keep_target_pos.append(target_pos)
-                    keep_from_prev.append(prev_up_idx)
-                else:
-                    # This position needs upsampling
-                    up_positions.append(target_pos)
-
-            # For each upsampled position, determine neighbors
-            prev_neighbor_idx = []
-            prev_is_center = []     # True if prev neighbor is center (edge case)
-            next_neighbor_idx = []
-            next_is_center = []     # True if next neighbor is center (edge case)
-
-            for pos in up_positions:
-                # Find left neighbor from kept indices
-                left_kept = kept_indices[kept_indices < pos]
-                if len(left_kept) > 0:
-                    # Use the rightmost kept index to the left
-                    left_target_pos = left_kept[-1]
-                    left_prev_up_idx = np.where(kept_indices == left_target_pos)[0][0]
-                    prev_neighbor_idx.append(left_prev_up_idx)
-                    prev_is_center.append(False)
-                else:
-                    # No left neighbor - use center from down_layer
-                    prev_neighbor_idx.append(pos)
-                    prev_is_center.append(True)
-
-                # Find right neighbor from kept indices
-                right_kept = kept_indices[kept_indices > pos]
-                if len(right_kept) > 0:
-                    # Use the leftmost kept index to the right
-                    right_target_pos = right_kept[0]
-                    right_prev_up_idx = np.where(kept_indices == right_target_pos)[0][0]
-                    next_neighbor_idx.append(right_prev_up_idx)
-                    next_is_center.append(False)
-                else:
-                    # No right neighbor - use center from down_layer
-                    next_neighbor_idx.append(pos)
-                    next_is_center.append(True)
-
-            self.up_indices.append({
-                'keep_target_pos': np.array(keep_target_pos, dtype=np.int32),
-                'keep_from_prev': np.array(keep_from_prev, dtype=np.int32),
-                'up_positions': np.array(up_positions, dtype=np.int32),
-                'prev_neighbor': np.array(prev_neighbor_idx, dtype=np.int32),
-                'prev_is_center': np.array(prev_is_center, dtype=bool),
-                'next_neighbor': np.array(next_neighbor_idx, dtype=np.int32),
-                'next_is_center': np.array(next_is_center, dtype=bool)
-            })
-
-            if self.verbose:
-                print(f"\nUp Level {level_idx}: size {self.level_sizes[level_idx + 1]} -> {target_size}")
-                print(f"  Kept indices: {kept_indices.tolist()}")
-                print(f"  Keep: target_pos {keep_target_pos} from prev_up {keep_from_prev}")
-                print(f"  Upsample positions: {up_positions}")
-                if len(up_positions) > 0:
-                    print(f"  Upsampling operations:")
-                    for i, pos in enumerate(up_positions):
-                        pn = prev_neighbor_idx[i]
-                        nn = next_neighbor_idx[i]
-                        pn_src = f"DownLayer{level_idx}[{pos}]" if prev_is_center[i] else f"PrevUp[{pn}]"
-                        nn_src = f"DownLayer{level_idx}[{pos}]" if next_is_center[i] else f"PrevUp[{nn}]"
-                        print(f"    Out[{pos}] = up({pn_src}, DownLayer{level_idx}[{pos}], {nn_src})")
-
     def build(self, input_shape):
+        if isinstance(input_shape, (list, tuple)) and len(input_shape)==2:
+            self.frame_aware = True
+            input_shape, _ = input_shape
+        else:
+            if isinstance(input_shape, (list, tuple)) and len(input_shape)==1:
+                input_shape=input_shape[0]
+            self.frame_aware = False
         self.T = input_shape[0]
         assert self.T % 2 == 1, "T must be odd (T = 2W + 1)"
         self.W = (self.T - 1) // 2
         self.C = input_shape[-1]
         Y, X = input_shape[2:4]
-
+        filter_increase = self.C // 2
         # Pre-compute all indices for each level
         self._precompute_indices()
 
         if self.down_op is None:
             self.down_op = []
-            for i in range(len(self.down_indices)):  # TODO add temporal position encoding ?
-                att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, name=f"down_att{i}")
-                conv_layer = Combine(filters=self.C, name=f"down_comb{i}")
-                input_layers = [tf.keras.layers.Input([Y, X, self.C]), tf.keras.layers.Input([Y, X, self.C]), tf.keras.layers.Input([Y, X, self.C])]
+            for i in range(len(self.down_indices)):
+                input_filters = self.C + filter_increase * i
+                output_filters = input_filters + filter_increase
+                att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, skip_connection=False, name=f"down_att{i}")
+                conv_layer = Combine(filters=output_filters, name=f"down_comb{i}")
+                input_layers = [tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters])]
                 q = tf.concat([input_layers[1], input_layers[0], input_layers[1], input_layers[2]], axis=0)
                 kv = tf.concat([input_layers[0], input_layers[1], input_layers[2], input_layers[1]], axis=0)
                 att = att_layer([q, kv])
@@ -199,20 +125,20 @@ class TemporalPyramid(Layer):
             self.down_op = [self.down_op] * len(self.down_indices)
 
         if self.up_op is None:
-            self.up_op = []
-            for i in range(len(self.up_indices)):
-                self.up_op.append(Combine(filters=self.C, name=f"up_comb{i}"))
-        else:
-            # Test mode: repeat the provided operation
-            self.up_op = [self.up_op] * len(self.up_indices)
-
+            self.up_op = WindowSpatialAttention(**self.window_spatial_attention_kwargs, skip_connection=self.skip_connection, name=f"up_att")
+        self.tem_emb = RelativeTemporalEmbedding(embedding_dim=self.C, multiplicative=False) if self.frame_aware else tf.keras.layers.Embedding(
+            input_dim = self.T, output_dim=self.C,
+            embeddings_regularizer=tf.keras.regularizers.l2(self.embedding_l2_reg) if self.embedding_l2_reg > 0 else None
+        )
         super(TemporalPyramid, self).build(input_shape)
 
     def call(self, inputs, training=None):
+        if self.frame_aware:
+            inputs, frame_index = inputs
+        elif isinstance(inputs, (tuple, list)):
+            inputs = inputs[0]
         input_shape = tf.shape(inputs)
-        B = input_shape[1]
-        Y = input_shape[2]
-        X = input_shape[3]
+        _, B, Y, X, _ = tf.unstack(input_shape)
 
         down_layers = [inputs]
 
@@ -224,11 +150,11 @@ class TemporalPyramid(Layer):
 
             # Gather triplets
             prev_neighbors = tf.gather(current, indices['prev'])
-            centers = tf.gather(current, indices['kept'])
+            centers = tf.gather(current, indices['center'])
             next_neighbors = tf.gather(current, indices['next'])
 
             # Batch processing
-            next_size = len(indices['kept'])
+            next_size = len(indices['center'])
             prev_neighbors = tf.reshape(prev_neighbors, [next_size * B, Y, X, C])
             centers = tf.reshape(centers, [next_size * B, Y, X, C])
             next_neighbors = tf.reshape(next_neighbors, [next_size * B, Y, X, C])
@@ -241,68 +167,16 @@ class TemporalPyramid(Layer):
             down_layers.append(downsampled)
 
         # Upsample phase
-        up_layers = [down_layers[-1]]
-
-        for level_idx in range(len(self.up_indices)):
-            prev_up = up_layers[-1]
-            level = self.num_levels - 2 - level_idx
-            down_layer_data = down_layers[level]
-            indices = self.up_indices[level_idx]
-
-            # Gather kept items
-            kept_items = tf.gather(prev_up, indices['keep_from_prev'])
-
-            # Perform upsampling
-            if len(indices['up_positions']) > 0:
-                num_ups = len(indices['up_positions'])
-
-                # Centers come from down_layer at upsampled positions
-                centers = tf.gather(down_layer_data, indices['up_positions'])
-
-                # Build prev neighbors: gather from prev_up (non-edge) or down_layer (edge)
-                prev_from_up = tf.gather(prev_up, indices['prev_neighbor'][~indices['prev_is_center']])
-                prev_from_down = tf.gather(down_layer_data, indices['up_positions'][indices['prev_is_center']])
-                # Determine insertion positions
-                prev_up_positions = tf.reshape(tf.cast(tf.where(~indices['prev_is_center']), tf.int32), [-1])
-                prev_down_positions = tf.reshape(tf.cast(tf.where(indices['prev_is_center']), tf.int32), [-1])
-                prev_neighbors = tf.dynamic_stitch(
-                    [prev_up_positions, prev_down_positions],
-                    [prev_from_up, prev_from_down]
-                )
-
-                # Build next neighbors: gather from prev_up (non-edge) or down_layer (edge)
-                next_from_up = tf.gather(prev_up, indices['next_neighbor'][~indices['next_is_center']])
-                next_from_down = tf.gather(down_layer_data, indices['up_positions'][indices['next_is_center']])
-                # Determine insertion positions
-                next_up_positions = tf.reshape(tf.cast(tf.where(~indices['next_is_center']), tf.int32), [-1])
-                next_down_positions = tf.reshape(tf.cast(tf.where(indices['next_is_center']), tf.int32), [-1])
-                next_neighbors = tf.dynamic_stitch(
-                    [next_up_positions, next_down_positions],
-                    [next_from_up, next_from_down]
-                )
-
-                C = tf.shape(prev_neighbors)[-1]
-                # Batch processing
-                prev_neighbors = tf.reshape(prev_neighbors, [num_ups * B, Y, X, C])
-                centers = tf.reshape(centers, [num_ups * B, Y, X, C])
-                next_neighbors = tf.reshape(next_neighbors, [num_ups * B, Y, X, C])
-
-                upsampled = self.up_op[level_idx]([prev_neighbors, centers, next_neighbors], training=training)
-
-                # Reshape back
-                upsampled = tf.reshape(upsampled, [num_ups, B, Y, X, tf.shape(upsampled)[-1]])
-
-                # Stitch together kept and upsampled items
-                all_indices = tf.concat([indices['keep_target_pos'], indices['up_positions']], axis=0)
-                all_values = tf.concat([kept_items, upsampled], axis=0)
-                result = tf.dynamic_stitch([all_indices], [all_values])
-            else:
-                # No upsampling needed
-                result = tf.dynamic_stitch([indices['keep_target_pos']], [kept_items])
-
-            up_layers.append(result)
-
-        return up_layers[-1]
+        central_feature = down_layers[-1][0]
+        if self.frame_aware:
+            t_emb = self.tem_emb(frame_index) # B, T, C
+            t_emb = tf.transpose(t_emb, [1, 0, 2]) # T, B, C
+            t_emb = tf.reshape(t_emb, [self.T, B, 1, 1, self.C])
+        else:
+            t_emb = self.tem_emb(tf.range(self.T)) # T, C
+            t_emb = tf.reshape(t_emb, [self.T, 1, 1, 1, self.C])
+        inputs_emb = inputs + t_emb
+        return self.up_op([inputs_emb, central_feature]) # multi-query mode: all queries attend to the same KV
 
     def compute_output_shape(self, input_shape):
         return input_shape
@@ -311,6 +185,7 @@ class TemporalPyramid(Layer):
         config = super(TemporalPyramid, self).get_config()
         config.update({
             'window_spatial_attention_kwargs': self.window_spatial_attention_kwargs,
+            'skip_connection':self.skip_connection,
             'verbose': self.verbose
         })
         return config
