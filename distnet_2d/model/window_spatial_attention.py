@@ -1,5 +1,7 @@
 import tensorflow as tf
 import numpy as np
+from skfmm import distance
+
 
 class WindowSpatialAttention(tf.keras.layers.Layer):
     """
@@ -22,8 +24,8 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
 
     def __init__(self, num_heads: int, attention_filters: int, window_size:tuple,
                  use_bias:bool = True, dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
-                 add_position_to_value:bool=True,
-                 overlap_reduction: str = 'geometrical', # 'mean', 'attention_weighted', 'geometrical'
+                 add_distance_embedding:bool=True,
+                 overlap_reduction: str = 'geometrical',  # 'mean', 'attention_weighted', 'geometrical'
                  l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention"):
         super().__init__(name=name)
         self.num_heads = num_heads
@@ -43,7 +45,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         self.overlap_reduction = overlap_reduction
         assert overlap_reduction in ['mean', 'attention_weighted', 'geometrical'], \
             f"overlap_reduction must be 'mean' or 'attention_weighted', got {overlap_reduction}"
-        self.add_position_to_value=add_position_to_value
+        self.add_distance_embedding=add_distance_embedding
         # Multi-query mode settings (populated in build)
         self.multi_query = False
         self.q_count = 1
@@ -62,7 +64,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             "skip_connection": self.skip_connection,
             "layer_normalization": self.layer_normalization,
             "overlap_reduction": self.overlap_reduction,
-            "add_position_to_value": self.add_position_to_value,
+            "add_distance_embedding": self.add_distance_embedding,
             "multi_query": self.multi_query,
             "q_count": self.q_count,
         })
@@ -160,13 +162,15 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         relative_coords = relative_coords + [WSY - 1, WSX - 1]
         relative_position_index = (relative_coords[:, :, 0] * (2 * WSX - 1) + relative_coords[:, :, 1])
         self.relative_position_index = tf.constant(relative_position_index, dtype=tf.int32)
-        if self.add_position_to_value: # embedding added to V
-            self.value_position_encoding = tf.keras.layers.Embedding(
-                input_dim=WSY * WSX, output_dim=HF,
+        if self.add_distance_embedding: # embedding added to V
+            self.distance_encoding_y = tf.keras.layers.Embedding(
+                input_dim=WSY, output_dim=HF//2,
                 embeddings_regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg > 0 else None
             )
-            self.value_position_index = tf.range(WSY * WSX, dtype=tf.int32)
-
+            self.distance_encoding_x = tf.keras.layers.Embedding(
+                input_dim=WSX, output_dim=HF - HF//2,
+                embeddings_regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg > 0 else None
+            )
         if self.overlap_reduction == "geometrical":
             self.geometrical_confidence = self._geometrical_confidence()
 
@@ -497,10 +501,16 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         F = self.attention_filters
         N = WSY * WSX
 
-        if self.add_position_to_value:
-            pos_emb = self.value_position_encoding(self.value_position_index)
-            pos_emb = tf.reshape(pos_emb, (WSY, WSX, HF))
-            v_windows = v_windows + pos_emb[None]
+        if self.add_distance_embedding:
+            distance_emb_y = self.distance_encoding_y(tf.range(WSY))
+            distance_emb_x = self.distance_encoding_x(tf.range(WSX))
+            distance_emb_y = tf.reshape(distance_emb_y, (1, WSY, 1, HF // 2))
+            distance_emb_x = tf.reshape(distance_emb_x, (1, 1, WSX, HF - HF // 2))
+            distance_emb = tf.concat([
+                tf.broadcast_to(distance_emb_y, [1, WSY, WSX, HF // 2]),
+                tf.broadcast_to(distance_emb_x, [1, WSY, WSX, HF - HF // 2])
+            ], axis=-1)
+            v_windows = v_windows - distance_emb
 
         if not self.multi_query:
             # single-query implementation: q,k,v are (B_win, WSY, WSX, HF)
@@ -541,7 +551,8 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             out = tf.matmul(attn_probs, v) # (B_win, H, N, N) x (B_win, H, N, F) ->  (B_win, H, N, F)
             out = tf.transpose(out, [0, 2, 1, 3]) # (B_win, N, H, F)
             out = tf.reshape(out, [B_win, WSY, WSX, HF])
-
+            if self.add_distance_embedding:
+                out = out + distance_emb
             return out, confidence_spatial
 
         else:
@@ -585,7 +596,8 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             out = tf.einsum('mqbhik,mbkhf->mqbihf', attn_probs, v, optimize='optimal') #[num_windows, Q, B, H, i, k]
             # Reorder and reshape back to (num_windows * Q * B, WSY, WSX, HF)
             out = tf.reshape(out, [-1, WSY, WSX, HF])
-
+            if self.add_distance_embedding:
+                out = out + distance_emb
             return out, confidence_spatial
 
     def call(self, x, training: bool = None):
