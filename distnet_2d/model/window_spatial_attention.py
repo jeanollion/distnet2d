@@ -22,6 +22,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
 
     def __init__(self, num_heads: int, attention_filters: int, window_size:tuple,
                  use_bias:bool = True, dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
+                 add_position_to_value:bool=True,
                  overlap_reduction: str = 'geometrical', # 'mean', 'attention_weighted', 'geometrical'
                  l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention"):
         super().__init__(name=name)
@@ -42,7 +43,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         self.overlap_reduction = overlap_reduction
         assert overlap_reduction in ['mean', 'attention_weighted', 'geometrical'], \
             f"overlap_reduction must be 'mean' or 'attention_weighted', got {overlap_reduction}"
-
+        self.add_position_to_value=add_position_to_value
         # Multi-query mode settings (populated in build)
         self.multi_query = False
         self.q_count = 1
@@ -61,6 +62,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             "skip_connection": self.skip_connection,
             "layer_normalization": self.layer_normalization,
             "overlap_reduction": self.overlap_reduction,
+            "add_position_to_value": self.add_position_to_value,
             "multi_query": self.multi_query,
             "q_count": self.q_count,
         })
@@ -137,17 +139,16 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
 
         # Relative position bias table
         WSY, WSX = self.window_size
-        bias_size = (2 * WSY - 1) * (2 * WSX - 1)
 
+        embedding_size = (2 * WSY - 1) * (2 * WSX - 1)
         self.relative_position_bias_table = self.add_weight(
             name="rpb",
-            shape=(bias_size, self.num_heads),
+            shape=(embedding_size, self.num_heads),
             initializer=tf.initializers.Zeros(),
             constraint=tf.keras.constraints.MaxNorm(max_value=5.0, axis=0),
             regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg>0 else None,
             trainable=True
         )
-
         # Pre-compute relative position indices for window
         coords_y = tf.range(WSY)
         coords_x = tf.range(WSX)
@@ -158,8 +159,13 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         relative_coords = tf.transpose(relative_coords, [1, 2, 0])
         relative_coords = relative_coords + [WSY - 1, WSX - 1]
         relative_position_index = (relative_coords[:, :, 0] * (2 * WSX - 1) + relative_coords[:, :, 1])
-
         self.relative_position_index = tf.constant(relative_position_index, dtype=tf.int32)
+        if self.add_position_to_value: # embedding added to V
+            self.value_position_encoding = tf.keras.layers.Embedding(
+                input_dim=WSY * WSX, output_dim=HF,
+                embeddings_regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg > 0 else None
+            )
+            self.value_position_index = tf.range(WSY * WSX, dtype=tf.int32)
 
         if self.overlap_reduction == "geometrical":
             self.geometrical_confidence = self._geometrical_confidence()
@@ -490,6 +496,11 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         H = self.num_heads
         F = self.attention_filters
         N = WSY * WSX
+
+        if self.add_position_to_value:
+            pos_emb = self.value_position_encoding(self.value_position_index)
+            pos_emb = tf.reshape(pos_emb, (WSY, WSX, HF))
+            v_windows = v_windows + pos_emb[None]
 
         if not self.multi_query:
             # single-query implementation: q,k,v are (B_win, WSY, WSX, HF)

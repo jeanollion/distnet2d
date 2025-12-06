@@ -114,17 +114,11 @@ class TemporalPyramid(Layer):
             att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, name=f"down_att{i}")
             conv_layer = Combine(filters=output_filters, name=f"down_comb{i}")
             input_layers = [tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters])]
-            if i==0: # all fw/bw combinations between prev-center and center-next
-                q = tf.keras.layers.Concatenate(axis=0, name=f"concat_q{i}")( [input_layers[1], input_layers[0], input_layers[1], input_layers[2]] )
-                kv = tf.keras.layers.Concatenate(axis=0, name=f"concat_kv{i}")( [input_layers[0], input_layers[1], input_layers[2], input_layers[1]] )
-                att = att_layer([q, kv])
-                out = SplitBatch(n_splits=4, name=f"att_split{i}")(att)
-                out = conv_layer(out)
-            else: # prev / next attend to center in multi-query mode
-                q = Stack(axis=0, name = f"stack_q{i}")( [ input_layers[0], input_layers[2] ] ) # multi-query mode
-                kv = input_layers[1]
-                att = att_layer([q, kv]) # (2, B, Y, X, C)
-                out = conv_layer([input_layers[1], att[0], att[1]])
+            q = tf.keras.layers.Concatenate(axis=0, name=f"concat_q{i}")( [input_layers[1], input_layers[0], input_layers[1], input_layers[2]] )
+            kv = tf.keras.layers.Concatenate(axis=0, name=f"concat_kv{i}")( [input_layers[0], input_layers[1], input_layers[2], input_layers[1]] )
+            att = att_layer([q, kv])
+            out = SplitBatch(n_splits=4, name=f"att_split{i}")(att)
+            out = conv_layer(out)
             self.down_op.append(tf.keras.Model(input_layers, out))
             self.ln.append(tf.keras.layers.LayerNormalization())
             self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.embedding_l2_reg) if self.frame_aware else tf.keras.layers.Embedding(

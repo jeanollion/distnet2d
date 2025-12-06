@@ -575,8 +575,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
         if isinstance(arch, TemPy) and arch.frame_window > 0:
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
-            watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,  window_size = arch.attention_spatial_radius, skip_connection=True)
-            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, verbose=True)
+            watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
+                               window_size = arch.attention_spatial_radius,
+                               add_position_to_value = True, skip_connection=True)
+            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1)
             blended_features = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
             feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
             for op in feature_blending_convs:
