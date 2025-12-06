@@ -540,7 +540,8 @@ class Stack(tf.keras.layers.Layer):
                 raise ValueError("All input shapes must be the same for stacking.")
 
         # Compute the output shape
-        output_shape = first_shape[:self.axis+1] + [len(input_shape)] + first_shape[self.axis+1:]
+        lim = self.axis if self.axis>=0 else self.axis+1
+        output_shape = first_shape[:lim] + [len(input_shape)] + first_shape[lim:]
         return tf.TensorShape(output_shape)
 
     def get_config(self):
