@@ -43,19 +43,61 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         super().build(input_shape)
 
     def call(self, input): # (B, Y, X, F)
-        if self.inference_mode: # only produce one output
+        if self.inference_mode and self.inference_idx is not None:
             if isinstance(self.inference_idx, (tuple, list)):
                 items = [self.convs[idx](input) for idx in self.inference_idx]
                 return tf.concat(items, axis=0)
             else:
                 return self.convs[self.inference_idx](input)
         # input = get_print_grad_fun(f"{self.name} before split")(input)
-        if self.grad_fun_inv is not None:
+        if self.grad_fun_inv is not None and not self.inference_mode:
             input = self.grad_fun_inv(input)
 
         inputs = [conv(input) for conv in self.convs] # N x (B, Y, X, F)
         # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
         output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
+        if self.grad_fun is not None and not self.inference_mode:
+            output = self.grad_fun(output) # compensate gradients to have same level in
+        # output = get_print_grad_fun(f"{self.name} after concat")(output)
+        return output
+
+class FusedNConvToBatch2D(tf.keras.layers.Layer):
+    def __init__(self, n_conv:int, filters:int, compensate_gradient:bool = False, name: str= "FusedNConvToBatch2D"):
+        super().__init__(name=name)
+        self.n_conv = n_conv
+        self.filters = filters
+        self.compensate_gradient=compensate_gradient
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient})
+        return config
+
+    def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        self.rank = len(input_shape)
+        self.conv = tf.keras.layers.Conv2D(filters=self.filters * self.n_conv, kernel_size=1, padding='same', activation="relu", name=f"Conv")
+        self.c2b = ChannelToBatch(add_channel_axis=False)
+        if self.compensate_gradient and self.n_conv>1:
+            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
+            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
+        else:
+            self.grad_fun = None
+            self.grad_fun_inv = None
+        super().build(input_shape)
+
+    def call(self, input): # (B, Y, X, C)
+        if self.grad_fun_inv is not None:
+            input = self.grad_fun_inv(input)
+
+        output = self.conv(input) # (B, Y, X, F * N)
+        shape = tf.shape(input)
+        target_shape = tf.concat([ [shape[i] for i in range(0, self.rank-1)], [self.filters, self.n_conv] ], 0)
+        output = tf.reshape(output, target_shape) # (B, Y, X, F, N)
+        output = self.c2b(output) # (N x B, Y, X, F)
         if self.grad_fun is not None:
             output = self.grad_fun(output) # compensate gradients to have same level in
         # output = get_print_grad_fun(f"{self.name} after concat")(output)

@@ -330,8 +330,14 @@ class Blend(ArchBase):
         super().__init__(frame_aware=frame_aware, **kwargs)
         self.attention = attention
         self.blending_filter_factor = blending_filter_factor
-        # to be defined
-        self.feature_blending_settings = None
+        self.feature_blending_settings = [
+            {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+             "batch_norm": False, "split_conv": False},
+            {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+             "batch_norm": False, "split_conv": False},
+            {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+             "batch_norm": False, "split_conv": False}
+        ]
 
 
 class BlendD2(Blend, D2):
@@ -339,11 +345,6 @@ class BlendD2(Blend, D2):
         super().__init__(filters=filters, pair_combine_kernel_size=5, kernel_size_fd=3, **kwargs)
         prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
         self.name = f"{prefix}blendD2-{filters}"
-        self.feature_blending_settings = [
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False, "split_conv":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False, "split_conv":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False, "split_conv":False}
-        ]
 
 
 class BlendD3(Blend, D3):
@@ -351,23 +352,13 @@ class BlendD3(Blend, D3):
         super().__init__(filters=filters, pair_combine_kernel_size=5, kernel_size_fd=3, **kwargs)
         prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
         self.name = f"{prefix}blendD3-{filters}"
-        self.feature_blending_settings = [
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False}
-        ]
 
 
 class BlendD4(Blend, D4):
     def __init__(self, filters:int = 192, **kwargs):
         super().__init__(filters=filters, pair_combine_kernel_size=5, kernel_size_fd=3, **kwargs)
         prefix = f"{'a' if self.attention else ''}{'sa' if self.self_attention else ''}"
-        self.name = f"{prefix}blendD3-{filters}"
-        self.feature_blending_settings = [
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False},
-            {"op":"res2d", "weighted_sum":False, "weight_scaled":False, "dropout_rate":self.dropout, "batch_norm":False}
-        ]
+        self.name = f"{prefix}blendD4-{filters}"
 
 
 class TemA(ArchBase):
@@ -408,8 +399,14 @@ class TemPy(ArchBase):
         assert temporal_attention > 0
         super().__init__(frame_aware=False, **kwargs)
         ker4_fd = self.feature_decoder_settings[0]["kernel_size"]
-        self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
-        self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
+        self.feature_blending_settings = [
+            {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+             "batch_norm": False, "split_conv": False},
+            {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+             "batch_norm": False, "split_conv": False},
+            {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
+             "batch_norm": False, "split_conv": False}
+        ]
         # to be defined:
         self.attention_spatial_radius = None
 

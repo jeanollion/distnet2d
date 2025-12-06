@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import numpy as np
 
-from .layers import Combine, RelativeTemporalEmbedding
+from .layers import Combine, RelativeTemporalEmbedding, SplitBatch
 from .window_spatial_attention import WindowSpatialAttention
 
 class TemporalPyramid(Layer):
@@ -25,13 +25,11 @@ class TemporalPyramid(Layer):
     Output shape: (T, B, Y, X, C)
     """
 
-    def __init__(self, window_spatial_attention_kwargs, embedding_l2_reg=1e-5, skip_connection:bool=True, down_layer=None, up_layer=None, verbose=False, **kwargs):
+    def __init__(self, window_spatial_attention_kwargs, filter_increase_factor:float=1, embedding_l2_reg=1e-5, verbose=False, **kwargs):
         super(TemporalPyramid, self).__init__(**kwargs)
         self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
-        self.skip_connection=skip_connection
         self.layer_normalization = self.window_spatial_attention_kwargs.pop("layer_normalization", True)
-        self.down_op = down_layer
-        self.up_op = up_layer
+        self.filter_increase_factor=filter_increase_factor
         self.verbose = verbose
         self.embedding_l2_reg=embedding_l2_reg
 
@@ -89,44 +87,41 @@ class TemporalPyramid(Layer):
             current_size = next_size
             current_center = next_center
             level += 1
-        self.num_levels = len(self.level_sizes)
+        self.num_levels = len(self.level_sizes) -1
 
     def build(self, input_shape):
-        if isinstance(input_shape, (list, tuple)) and len(input_shape)==2:
+        if isinstance(input_shape, list) and len(input_shape)==2:
             self.frame_aware = True
-            input_shape, _ = input_shape
+            tensor_shape, _ = input_shape
         else:
-            if isinstance(input_shape, (list, tuple)) and len(input_shape)==1:
-                input_shape=input_shape[0]
+            if isinstance(input_shape, list) and len(input_shape)==1:
+                tensor_shape=input_shape[0]
+            else:
+                tensor_shape = input_shape
             self.frame_aware = False
-        self.T = input_shape[0]
+        self.T = tensor_shape[0]
         assert self.T % 2 == 1, "T must be odd (T = 2W + 1)"
         self.W = (self.T - 1) // 2
-        self.C = input_shape[-1]
-        Y, X = input_shape[2:4]
-        filter_increase = self.C // 2
+        self.C = tensor_shape[-1]
+        Y, X = tensor_shape[2:4]
+        filter_increase = int(self.C * self.filter_increase_factor)
         # Pre-compute all indices for each level
         self._precompute_indices()
 
-        if self.down_op is None:
-            self.down_op = []
-            for i in range(len(self.down_indices)):
-                input_filters = self.C + filter_increase * i
-                output_filters = input_filters + filter_increase
-                att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, layer_normalization=False, skip_connection=False, name=f"down_att{i}")
-                conv_layer = Combine(filters=output_filters, name=f"down_comb{i}")
-                input_layers = [tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters])]
-                q = tf.concat([input_layers[1], input_layers[0], input_layers[1], input_layers[2]], axis=0)
-                kv = tf.concat([input_layers[0], input_layers[1], input_layers[2], input_layers[1]], axis=0)
-                att = att_layer([q, kv])
-                out = conv_layer(tf.split(att, 4))
-                self.down_op.append(tf.keras.Model(input_layers, out))
-        else:
-            # Test mode: repeat the provided operation
-            self.down_op = [self.down_op] * len(self.down_indices)
+        self.down_op = []
+        for i in range(len(self.down_indices)):
+            input_filters = self.C + filter_increase * i
+            output_filters = input_filters + filter_increase
+            att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, layer_normalization=False, name=f"down_att{i}")
+            conv_layer = Combine(filters=output_filters, name=f"down_comb{i}")
+            input_layers = [tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters])]
+            q = tf.keras.layers.Concatenate(axis=0, name=f"concat_q{i}")( [input_layers[1], input_layers[0], input_layers[1], input_layers[2]] )
+            kv = tf.keras.layers.Concatenate(axis=0, name=f"concat_kv{i}")( [input_layers[0], input_layers[1], input_layers[2], input_layers[1]] )
+            att = att_layer([q, kv])
+            out = SplitBatch(n_splits=4, name=f"att_split{i}")(att)
+            out = conv_layer(out)
+            self.down_op.append(tf.keras.Model(input_layers, out))
         self.ln = tf.keras.layers.LayerNormalization() if self.layer_normalization else None
-        if self.up_op is None:
-            self.up_op = WindowSpatialAttention(**self.window_spatial_attention_kwargs, layer_normalization=False, skip_connection=False, name=f"up_att")
         self.tem_emb = RelativeTemporalEmbedding(embedding_dim=self.C, multiplicative=False, l2_reg=self.embedding_l2_reg) if self.frame_aware else tf.keras.layers.Embedding(
             input_dim = self.T, output_dim=self.C,
             embeddings_regularizer=tf.keras.regularizers.l2(self.embedding_l2_reg) if self.embedding_l2_reg > 0 else None
@@ -136,7 +131,7 @@ class TemporalPyramid(Layer):
     def call(self, inputs, training=None):
         if self.frame_aware:
             inputs, frame_index = inputs
-        elif isinstance(inputs, (tuple, list)):
+        elif isinstance(inputs, list):
             inputs = inputs[0]
         input_shape = tf.shape(inputs)
         _, B, Y, X, _ = tf.unstack(input_shape)
@@ -153,8 +148,7 @@ class TemporalPyramid(Layer):
             inputs_emb = self.ln(inputs_emb)
         down_layers = [inputs_emb]
 
-        # Downsample phase
-        for level in range(self.num_levels - 1):
+        for level in range(self.num_levels):
             current = down_layers[-1]
             indices = self.down_indices[level]
             C = tf.shape(current)[-1]
@@ -173,214 +167,23 @@ class TemporalPyramid(Layer):
             # Apply downsampling
             downsampled = self.down_op[level]([prev_neighbors, centers, next_neighbors], training=training)
 
-            # Reshape back
-            downsampled = tf.reshape(downsampled, [next_size, B, Y, X, tf.shape(downsampled)[-1]])
+            if next_size > 1: # Reshape back
+                downsampled = tf.reshape(downsampled, [next_size, B, Y, X, tf.shape(downsampled)[-1]])
             down_layers.append(downsampled)
 
-        # Upsample phase
-        central_feature = down_layers[-1][0]
-
-        out =  self.up_op([inputs_emb, central_feature]) # multi-query mode: all queries attend to the same KV
-        if self.skip_connection:
-            out = out + inputs
-        return out
+        return down_layers[-1]
 
     def compute_output_shape(self, input_shape):
-        return input_shape
+        if isinstance(input_shape, list):
+            input_shape = input_shape[0]
+        n_filters = input_shape[-1] + int(input_shape[-1] * self.filter_increase_factor) * self.num_levels
+        return input_shape[1:-1] + (n_filters, )
 
     def get_config(self):
         config = super(TemporalPyramid, self).get_config()
         config.update({
             'window_spatial_attention_kwargs': self.window_spatial_attention_kwargs,
-            'skip_connection':self.skip_connection,
+            "filter_increase_factor":self.filter_increase_factor,
             'verbose': self.verbose
         })
         return config
-
-# Test code
-def test_left_neighbor_downsampling():
-    """Test that downsampling correctly uses the LEFT neighbor (prev)."""
-    print("\n" + "=" * 80)
-    print("TEST 1: LEFT NEIGHBOR DOWNSAMPLING")
-    print("=" * 80)
-
-    W = 3
-    T = 2 * W + 1  # T = 7
-    B, Y, X, C = 1, 1, 1, 1
-
-    print(f"\nSetup: W={W}, T={T}, B={B}, Y={Y}, X={X}, C={C}")
-    print("Down layer: outputs prev (first input)")
-    print("Up layer: outputs center (second input, identity)")
-
-    # Down layer returns the PREV (left) neighbor
-    down_layer = tf.keras.layers.Lambda(lambda x: x[0])
-    # Up layer returns center (identity)
-    up_layer = tf.keras.layers.Lambda(lambda x: x[1])
-
-    hier_layer = TemporalPyramid(None, down_layer, up_layer, verbose=True)
-
-    # Input: [10, 20, 30, 40, 50, 60, 70]
-    test_input = tf.constant([10, 20, 30, 40, 50, 60, 70], dtype=tf.float32)
-    test_input = tf.reshape(test_input, [T, B, Y, X, C])
-
-    print(f"\nInput:  {test_input[:, 0, 0, 0, 0].numpy()}")
-
-    output = hier_layer(test_input)
-    output_vals = output[:, 0, 0, 0, 0].numpy()
-
-    print(f"Output: {output_vals}")
-    print("\n✓ Left neighbor downsampling test completed")
-
-
-def test_right_neighbor_downsampling():
-    """Test that downsampling correctly uses the RIGHT neighbor (next)."""
-    print("\n" + "=" * 80)
-    print("TEST 2: RIGHT NEIGHBOR DOWNSAMPLING")
-    print("=" * 80)
-
-    W = 3
-    T = 2 * W + 1
-    B, Y, X, C = 1, 1, 1, 1
-
-    print(f"\nSetup: W={W}, T={T}, B={B}, Y={Y}, X={X}, C={C}")
-    print("Down layer: outputs next (third input)")
-    print("Up layer: outputs center (second input, identity)")
-
-    # Down layer returns the NEXT (right) neighbor
-    down_layer = tf.keras.layers.Lambda(lambda x: x[2])
-    # Up layer returns center (identity)
-    up_layer = tf.keras.layers.Lambda(lambda x: x[1])
-
-    hier_layer = TemporalPyramid(None, down_layer, up_layer, verbose=True)
-
-    test_input = tf.constant([10, 20, 30, 40, 50, 60, 70], dtype=tf.float32)
-    test_input = tf.reshape(test_input, [T, B, Y, X, C])
-
-    print(f"\nInput:  {test_input[:, 0, 0, 0, 0].numpy()}")
-
-    output = hier_layer(test_input)
-    output_vals = output[:, 0, 0, 0, 0].numpy()
-
-    print(f"Output: {output_vals}")
-    print("\n✓ Right neighbor downsampling test completed")
-
-
-def test_left_neighbor_upsampling():
-    """Test that upsampling correctly uses the LEFT neighbor."""
-    print("\n" + "=" * 80)
-    print("TEST 3: LEFT NEIGHBOR UPSAMPLING")
-    print("=" * 80)
-
-    W = 3
-    T = 2 * W + 1
-    B, Y, X, C = 1, 1, 1, 1
-
-    print(f"\nSetup: W={W}, T={T}, B={B}, Y={Y}, X={X}, C={C}")
-    print("Down layer: outputs center (identity)")
-    print("Up layer: outputs prev (first input, left neighbor)")
-
-    # Down layer returns center (identity)
-    down_layer = tf.keras.layers.Lambda(lambda x: x[1])
-    # Up layer returns the PREV (left) neighbor
-    up_layer = tf.keras.layers.Lambda(lambda x: x[0])
-
-    hier_layer = TemporalPyramid(None, down_layer, up_layer, verbose=True)
-
-    test_input = tf.constant([10, 20, 30, 40, 50, 60, 70], dtype=tf.float32)
-    test_input = tf.reshape(test_input, [T, B, Y, X, C])
-
-    print(f"\nInput:  {test_input[:, 0, 0, 0, 0].numpy()}")
-    print("Expected: [10, 20, 20, 40, 40, 40, 40]")
-
-    output = hier_layer(test_input)
-    output_vals = output[:, 0, 0, 0, 0].numpy()
-
-    print(f"Output:   {output_vals}")
-
-    expected = np.array([10, 20, 20, 40, 40, 40, 40], dtype=np.float32)
-    if np.allclose(output_vals, expected):
-        print("✓ Left neighbor upsampling test PASSED!")
-    else:
-        print("✗ Left neighbor upsampling test FAILED!")
-        print(f"Difference: {output_vals - expected}")
-
-
-def test_right_neighbor_upsampling():
-    """Test that upsampling correctly uses the RIGHT neighbor."""
-    print("\n" + "=" * 80)
-    print("TEST 4: RIGHT NEIGHBOR UPSAMPLING")
-    print("=" * 80)
-
-    W = 3
-    T = 2 * W + 1
-    B, Y, X, C = 1, 1, 1, 1
-
-    print(f"\nSetup: W={W}, T={T}, B={B}, Y={Y}, X={X}, C={C}")
-    print("Down layer: outputs center (identity)")
-    print("Up layer: outputs next (third input, right neighbor)")
-
-    # Down layer returns center (identity)
-    down_layer = tf.keras.layers.Lambda(lambda x: x[1])
-    # Up layer returns the NEXT (right) neighbor
-    up_layer = tf.keras.layers.Lambda(lambda x: x[2])
-
-    hier_layer = TemporalPyramid(None, down_layer, up_layer, verbose=True)
-
-    test_input = tf.constant([10, 20, 30, 40, 50, 60, 70], dtype=tf.float32)
-    test_input = tf.reshape(test_input, [T, B, Y, X, C])
-
-    print(f"\nInput:  {test_input[:, 0, 0, 0, 0].numpy()}")
-    print("Expected: [40, 40, 40, 40, 60, 60, 70]")
-
-    output = hier_layer(test_input)
-    output_vals = output[:, 0, 0, 0, 0].numpy()
-
-    print(f"Output:   {output_vals}")
-
-    expected = np.array([40, 40, 40, 40, 60, 60, 70], dtype=np.float32)
-    if np.allclose(output_vals, expected):
-        print("✓ Right neighbor upsampling test PASSED!")
-    else:
-        print("✗ Right neighbor upsampling test FAILED!")
-        print(f"Difference: {output_vals - expected}")
-
-
-def test_hierarchical_layer():
-    """Original comprehensive test."""
-    print("=" * 80)
-    print("COMPREHENSIVE IDENTITY TEST")
-    print("=" * 80)
-
-    W = 4
-    T = 2 * W + 1
-    B, Y, X, C = 2, 4, 4, 8
-
-    # Down and up layers both return center (identity)
-    down_layer = tf.keras.layers.Lambda(lambda x: x[1])
-    up_layer = tf.keras.layers.Lambda(lambda x: x[1])
-
-    hier_layer = TemporalPyramid(None, down_layer, up_layer, verbose=True)
-
-    test_input = tf.constant(
-        np.arange(T).reshape(T, 1, 1, 1, 1) * np.ones((T, B, Y, X, C)),
-        dtype=tf.float32
-    )
-
-    output = hier_layer(test_input)
-
-    assert output.shape == test_input.shape, f"Shape mismatch!"
-
-    if np.allclose(output.numpy(), test_input.numpy()):
-        print("✓ Identity test PASSED!")
-    else:
-        print("✗ Identity test FAILED!")
-        print(f"Input:  {test_input[:, 0, 0, 0, 0].numpy()}")
-        print(f"Output: {output[:, 0, 0, 0, 0].numpy()}")
-
-
-if __name__ == "__main__":
-    test_left_neighbor_upsampling()
-    test_right_neighbor_upsampling()
-    test_left_neighbor_downsampling()
-    test_right_neighbor_downsampling()
-    test_hierarchical_layer()
