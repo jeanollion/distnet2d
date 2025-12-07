@@ -5,7 +5,7 @@ from pyexpat import features
 
 import tensorflow as tf
 
-from .temporal_pyramid import TemporalPyramid
+from .temporal_pyramid import TemporalPyramid, TemporalFeatureReconstructor
 from .temporal_cross_attention import TemporalCrossAttention
 from .window_spatial_attention import WindowSpatialAttention
 from .architectures import ArchBase, Blend, TemA, TemPy
@@ -578,19 +578,25 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                window_size = arch.attention_spatial_radius,
                                add_distance_embedding = True, skip_connection=True)
-            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1)
-            blended_features = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
+            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, verbose=True)
+            blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
             feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
             for op in feature_blending_convs:
                 blended_features = op(blended_features)
-            blended_features_batch = FusedNConvToBatch2D(compensate_gradient=True, n_conv=n_frames, filters=feature_filters,  name=f"BlendedFeatures")( blended_features )  # (N_CHAN x B, Y, X, F)
-            features_batch = Combine(filters=feature_filters, kernel_size=1, name="FeatureSkip")([features_batch, blended_features_batch])
-            features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitBlendedFeatures")(features_batch)
-
-            feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=[fidx_prev[pidx] for pidx in inference_pair_idx], name="SelectFeaturePairPrev")(features_batch_r)  # Tp x B, Y, X, C
-            feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=[fidx_next[pidx] for pidx in inference_pair_idx], name="SelectFeaturePairNext")(features_batch_r)
+            v5 = False
+            if v5:
+                blended_features_batch = FusedNConvToBatch2D(compensate_gradient=True, n_conv=n_frames, filters=feature_filters,  name=f"BlendedFeatures")( blended_features )  # (N_CHAN x B, Y, X, F)
+                features_batch = Combine(filters=feature_filters, kernel_size=1, name="FeatureSkip")([features_batch, blended_features_batch])
+                features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitBlendedFeatures")(features_batch)
+                inference_feature_idx = list(range(n_frames))
+            else:
+                inference_feature_idx = list(set([fidx_prev[pidx] for pidx in inference_pair_idx] + [fidx_next[pidx] for pidx in inference_pair_idx]))
+                inference_feature_idx.sort()
+                features_batch_r = TemporalFeatureReconstructor(feature_filters, inference_idx=inference_feature_idx)([features_batch_r, blended_features_level1_r, blended_features])
+            feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=[inference_feature_idx.index(fidx_prev[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairPrev")(features_batch_r)  # Tp x B, Y, X, C
+            feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=[inference_feature_idx.index(fidx_next[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairNext")(features_batch_r)
             feature_pairs_batch = pair_combine_op([feature_prev, feature_next])  # Tp x B, Y, X, C
-            features_batch = InferenceAwareBatchSelector(inference_idx=arch.frame_window, name="SelectFeature")( features_batch_r)
+            features_batch = InferenceAwareBatchSelector(inference_idx=inference_feature_idx.index(arch.frame_window), name="SelectFeature")( features_batch_r)
         elif isinstance(arch, TemA) and arch.frame_window > 0:
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch) # T, B, Y, X, C
             feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=fidx_prev,  name="SelectFeaturePairPrev")( features_batch_r) # Tp x B, Y, X, C

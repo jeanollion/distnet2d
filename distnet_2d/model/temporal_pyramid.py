@@ -3,7 +3,7 @@ from numpy.core.defchararray import center
 from tensorflow.keras.layers import Layer
 import numpy as np
 
-from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, Stack
+from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, Stack, InferenceLayer
 from .window_spatial_attention import WindowSpatialAttention
 
 class TemporalPyramid(Layer):
@@ -26,66 +26,51 @@ class TemporalPyramid(Layer):
     Output shape: (T, B, Y, X, C)
     """
 
-    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, embedding_l2_reg=1e-5, verbose=False, **kwargs):
+    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, embedding_l2_reg=1e-5, verbose=False, **kwargs):
         super(TemporalPyramid, self).__init__(**kwargs)
         self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
         self.window_spatial_attention_kwargs["layer_normalization"] = False
         self.layer_normalization=layer_normalization
         self.filter_increase_factor=filter_increase_factor
+        self.filter_increase_mode_log=filter_increase_mode_log
         self.verbose = verbose
         self.embedding_l2_reg=embedding_l2_reg
 
     def _precompute_indices(self):
-        """Pre-compute all indices for down/upsampling at each level using stride-based formula."""
-
+        """Pre-compute all indices for downsampling at each level using stride-based formula."""
         self.down_indices = []
-        self.level_sizes = []
-
         current_size = self.T
         current_center = self.W
-        self.level_sizes.append(current_size)
-
-        if self.verbose:
-            print(f"\n=== Building Hierarchy for T={self.T}, W={self.W} ===")
-            print(f"Center is at index {self.W}")
-            print(f"Level 0 (input): size={current_size}, center={current_center}")
-
-        # Build downsampling hierarchy
         level = 0
         while current_size > 1:
-            # Keep elements at even offsets from center: [center-2k, ..., center, ..., center+2k]
-            right_indices = list(range(current_center, current_size, 2)) # Right side (including center): [center, center+2, center+4, ...]
-            left_indices = list(range(current_center - 2, -1, -2)) # Left side (excluding center): [center-2, center-4, ...]
-            center_idx = left_indices[::-1] + right_indices # Combine: left (reversed) + right
-            next_center = center_idx.index(current_center)
+            center_idx = self._get_indices(current_center, current_size)
+            next_center = np.where(center_idx == current_center)[0][0]
             next_size = len(center_idx)
-            center_idx = np.array(center_idx, dtype=np.int32)
-            center_idx = np.clip(center_idx, 1, current_size - 2) # center is never at edge
-            prev_idx = center_idx - 1
-            next_idx = center_idx + 1
             self.down_indices.append({
                 'center': center_idx,      # Indices kept at this level
-                'prev': prev_idx,          # Left neighbors for downsampling
-                'next': next_idx,           # Right neighbors for downsampling
+                'prev':  center_idx - 1,   # Left neighbors for downsampling
+                'next': center_idx + 1,    # Right neighbors for downsampling
             })
-
             if self.verbose:
                 symbolic = [f'A{idx - current_center:+d}' if idx != current_center else 'A0'
                            for idx in center_idx]
                 print(f"\nLevel {level + 1}: size {current_size} -> {next_size}, center {current_center} -> {next_center}")
                 print(f"  Center indices: {center_idx.tolist()}")
-                print(f"  Prev indices: {prev_idx.tolist()}")
-                print(f"  Next indices: {next_idx.tolist()}")
+                print(f"  Prev indices: {self.down_indices[-1]['prev'].tolist()}")
+                print(f"  Next indices: {self.down_indices[-1]['next'].tolist()}")
                 print(f"  Symbolic: {symbolic}")
-                print(f"  Downsampling triplets (prev, center, next):")
-                for i, (p, c, n) in enumerate(zip(prev_idx, center_idx, next_idx)):
-                    print(f"    Out[{i}] = down(In[{p}], In[{c}], In[{n}])")
-
-            self.level_sizes.append(next_size)
             current_size = next_size
             current_center = next_center
             level += 1
-        self.num_levels = len(self.level_sizes) -1
+        self.num_levels = len(self.down_indices)
+
+    @staticmethod
+    def _get_indices(current_center:int, current_size:int): # Keep elements at even offsets from center: [center-2k, ..., center, ..., center+2k]
+        right_indices = list( range(current_center, current_size, 2))  # Right side (including center): [center, center+2, center+4, ...]
+        left_indices = list( range(current_center - 2, -1, -2))  # Left side (excluding center): [center-2, center-4, ...]
+        center_idx = left_indices[::-1] + right_indices  # Combine: left (reversed) + right
+        center_idx = np.array(center_idx, dtype=np.int32)
+        return np.clip(center_idx, 1, current_size - 2)  # center is never at edge
 
     def build(self, input_shape):
         if isinstance(input_shape, list) and len(input_shape)==2:
@@ -102,15 +87,14 @@ class TemporalPyramid(Layer):
         self.W = (self.T - 1) // 2
         self.C = tensor_shape[-1]
         Y, X = tensor_shape[2:4]
-        filter_increase = int(self.C * self.filter_increase_factor)
         # Pre-compute all indices for each level
         self._precompute_indices()
         self.temp_emb = []
         self.ln = []
         self.down_op = []
         for i in range(len(self.down_indices)):
-            input_filters = self.C + filter_increase * i
-            output_filters = input_filters + filter_increase
+            input_filters = self._compute_filters(i, self.C)
+            output_filters = self._compute_filters(i+1, self.C)
             att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, name=f"down_att{i}")
             conv_layer = Combine(filters=output_filters, name=f"down_comb{i}")
             input_layers = [tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters])]
@@ -121,10 +105,7 @@ class TemporalPyramid(Layer):
             out = conv_layer(out)
             self.down_op.append(tf.keras.Model(input_layers, out))
             self.ln.append(tf.keras.layers.LayerNormalization())
-            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.embedding_l2_reg) if self.frame_aware else tf.keras.layers.Embedding(
-                input_dim = self.T, output_dim=input_filters,
-                embeddings_regularizer=tf.keras.regularizers.l2(self.embedding_l2_reg) if self.embedding_l2_reg > 0 else None
-            ))
+            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.embedding_l2_reg))
         super(TemporalPyramid, self).build(input_shape)
 
     def call(self, inputs, training=None):
@@ -135,7 +116,7 @@ class TemporalPyramid(Layer):
         input_shape = tf.shape(inputs)
         _, B, Y, X, _ = tf.unstack(input_shape)
         if not self.frame_aware:
-            frame_index = tf.range(self.T)
+            frame_index = tf.range(self.T) - tf.cast(self.W, tf.int32) # relative to center frame
 
         current_frame_index = frame_index # B, T if frame_aware, else T
         down_layers = [inputs]
@@ -175,20 +156,86 @@ class TemporalPyramid(Layer):
             down_layers.append(downsampled)
             # update frame index for temporal encoding
             current_frame_index = tf.gather(current_frame_index, indices['center'], axis=1 if self.frame_aware else 0) # update frame index
-        return down_layers[-1]
+        return down_layers[-1], down_layers[1]
 
     def compute_output_shape(self, input_shape):
         if isinstance(input_shape, list):
             input_shape = input_shape[0]
-        n_filters = input_shape[-1] + int(input_shape[-1] * self.filter_increase_factor) * self.num_levels
-        return input_shape[1:-1] + (n_filters, )
+        n_filters_global = self._compute_filters(self.num_levels, input_shape[-1])
+        n_filters_l1 = self._compute_filters(1, input_shape[-1])
+        return input_shape[1:-1] + (n_filters_global, ), input_shape[:-1] + (n_filters_l1, )
+
+    def _compute_filters(self, level:int, base_filters:int):
+        if self.filter_increase_mode_log:
+            compression_ratio = self.T / len(self.down_indices[level-1]['center']) if level > 0 else 1
+            return int(base_filters * np.log2(1 + compression_ratio * self.filter_increase_factor))
+        else:
+            return base_filters + int(base_filters * self.filter_increase_factor) * level
+
 
     def get_config(self):
         config = super(TemporalPyramid, self).get_config()
         config.update({
             'window_spatial_attention_kwargs': self.window_spatial_attention_kwargs,
             "filter_increase_factor":self.filter_increase_factor,
+            "filter_increase_mode_log":self.filter_increase_mode_log,
             "layer_normalization":self.layer_normalization,
             'verbose': self.verbose
         })
         return config
+
+# reconstruct features through independent convolutions that inputs both features, global context and level 1 features from pyramid
+class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
+    def __init__(self, output_filters, inference_idx:list, **kwargs):
+        super().__init__(**kwargs)
+        self.output_filters = output_filters
+        self.inference_idx=inference_idx
+        self.frame_convs = []
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx })
+        return config
+
+    def build(self, input_shape):
+        features_level0, features_level1, global_features = input_shape
+        self.T = features_level0[0]
+
+        # Create T independent 1x1 convolutions
+        for i in range(self.T):
+            conv = tf.keras.layers.Conv2D(
+                filters=self.output_filters,
+                kernel_size=1,
+                use_bias=True,
+                name=f'frame_{i}_conv'
+            )
+            self.frame_convs.append(conv)
+            self.feature_level1_indices = self._get_closest_indices(self.T)
+        super().build(input_shape)
+
+    @staticmethod
+    def _get_closest_indices(T):
+        next_indices = TemporalPyramid._get_indices((T - 1) // 2, T)
+        closest_indices = []
+        for i in np.arange(T):
+            distances = np.abs(next_indices - i)
+            min_distance_indices = np.where(distances == np.min(distances))[0]
+            if len(min_distance_indices) > 1:  # multiple indices
+                closest_indices.append(min_distance_indices.tolist())
+            else:
+                closest_indices.append(min_distance_indices.tolist())
+        return closest_indices
+
+    def call(self, inputs, training=None):
+        features_level0, features_level1, global_features = inputs
+        outputs = []
+        idx_list = self.inference_idx if self.inference_mode and self.inference_idx is not None else list(range(self.T))
+        for i in idx_list:
+            idx = self.feature_level1_indices[i]
+            input_list = [features_level0[i], global_features, features_level1[idx[0]]]
+            if len(idx) == 2: # feature is in between two level 1 features -> also add the second one to inputs
+                input_list.append(features_level1[idx[1]])
+            combined_i = tf.concat(input_list, axis=-1)
+            output_i = self.frame_convs[i](combined_i, training=training)
+            outputs.append(output_i)
+        return tf.stack(outputs, axis=0)
