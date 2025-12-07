@@ -521,7 +521,14 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                         decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
+                    v6c = True
+                    if v6c and (decoder_name == "Seg" or decoder_name == "Center") and isinstance(arch,  TemPy) and l_idx == len( arch.decoder_settings) - 1:
+                        wsatt_kwargs = dict(num_heads=arch.temporal_attention // 2, attention_filters=attention_filters // 2,
+                                            window_size=(np.array(arch.attention_spatial_radius) * 2).tolist(), add_distance_embedding=True,
+                                            skip_connection=True)
+                    else:
+                        wsatt_kwargs = None
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation="relu", window_self_attention_kwargs=wsatt_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
         if arch.n_inputs == 1:
@@ -577,8 +584,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                window_size=arch.attention_spatial_radius,
                                add_distance_embedding=True, skip_connection=True)
-            v5 = False
-            if not v5:
+            v6b = False
+            if v6b:
                 # self-attention with distance embedding for EDM / CDM prediction
                 sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
                 features_batch = sa(features_batch) # T x B, Y, X, C
@@ -588,15 +595,9 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
             for op in feature_blending_convs:
                 blended_features = op(blended_features)
-            if v5:
-                blended_features_batch = FusedNConvToBatch2D(compensate_gradient=True, n_conv=n_frames, filters=feature_filters,  name=f"BlendedFeatures")( blended_features )  # (N_CHAN x B, Y, X, F)
-                features_batch = Combine(filters=feature_filters, kernel_size=1, name="FeatureSkip")([features_batch, blended_features_batch])
-                features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitBlendedFeatures")(features_batch)
-                inference_feature_idx = list(range(n_frames))
-            else:
-                inference_feature_idx = list(set([fidx_prev[pidx] for pidx in inference_pair_idx] + [fidx_next[pidx] for pidx in inference_pair_idx]))
-                inference_feature_idx.sort()
-                features_batch_r = TemporalFeatureReconstructor(feature_filters, inference_idx=inference_feature_idx)([features_batch_r, blended_features_level1_r, blended_features])
+            inference_feature_idx = list(set([fidx_prev[pidx] for pidx in inference_pair_idx] + [fidx_next[pidx] for pidx in inference_pair_idx]))
+            inference_feature_idx.sort()
+            features_batch_r = TemporalFeatureReconstructor(feature_filters, inference_idx=inference_feature_idx)([features_batch_r, blended_features_level1_r, blended_features])
             feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=[inference_feature_idx.index(fidx_prev[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairPrev")(features_batch_r)  # Tp x B, Y, X, C
             feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=[inference_feature_idx.index(fidx_next[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairNext")(features_batch_r)
             feature_pairs_batch = pair_combine_op([feature_prev, feature_next])  # Tp x B, Y, X, C
@@ -801,6 +802,7 @@ def decoder_op(
             op:str = "conv", # conv, resconv2d, resconv2d
             weighted_sum:bool=False, # in case op = resconv2d, resconv2d
             n_conv:int = 1,
+            window_self_attention_kwargs = None,
             l2_reg:float=0,
             name: str="DecoderLayer",
             output_name: str = None,
@@ -835,6 +837,7 @@ def decoder_op(
                 convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==n_conv-1 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}"if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
             else:
                 convs = [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
+        wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
         def op(input):
             down, res = input
             up = up_op_out(down) if n_conv==0 and res is None else up_op(down)
@@ -844,6 +847,8 @@ def decoder_op(
                 else:
                     res = tf.cast(res, up.dtype)
                     up = up + res
+            if wsa is not None:
+                up = wsa(up)
             for c in convs:
                 up = c(up)
             return up

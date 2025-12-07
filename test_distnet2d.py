@@ -36,8 +36,9 @@ if not seg:
     if True:
         from tensorflow.keras import mixed_precision
         mixed_precision.set_global_policy('mixed_float16')
+        fw = 2
         dn = get_distnet_2d(
-            arch=architectures.TemPyD2(frame_window=9, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
+            arch=architectures.TemPyD2(frame_window=fw, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
                                       temporal_attention=64, attention_spatial_radius=8,
                                       skip_connections=False, early_downsampling=True, category_number=0, inference_gap_number=1,
                                       predict_edm_derivatives=False, predict_cdm_derivatives=False)
@@ -45,13 +46,13 @@ if not seg:
 
         dn.set_inference(True)
         dn.compile()
-        frame_index = tf.reshape(tf.range(19), [1, 1, 1, 19])
-        out = dn([tf.zeros(shape=(1, 64, 32, 19)), frame_index]) # frame aware case
+        frame_index = tf.reshape(tf.range(fw*2+1), [1, 1, 1, fw*2+1])
+        out = dn([tf.zeros(shape=(1, 64, 32, fw*2+1)), frame_index]) # frame aware case
         #out = dn([tf.zeros(shape=(1, 64, 32, 19))])
         print(f"{[o.shape for o in out]}")
-        #tf.keras.utils.plot_model(dn, "/data/model.png", dpi=96, show_shapes=True)
+        #tf.keras.utils.plot_model(dn, "/data/model.png", dpi=64, show_shapes=True)
         #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
-        #print(dn.summary())
+        print(dn.summary())
 
     if False:
 
