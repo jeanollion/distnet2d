@@ -71,7 +71,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         return config
 
     def build(self, input_shapes):
-        if not isinstance(input_shapes, (tuple, list)):  # single tensor : self attention
+        if not isinstance(input_shapes, list):  # single tensor : self attention
             input_shapes = [input_shapes]
         try:
             input_shapes = [s.as_list() for s in input_shapes]
@@ -601,7 +601,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             return out, confidence_spatial
 
     def call(self, x, training: bool = None):
-        if isinstance(x, (list, tuple)):
+        if isinstance(x, list):
             if len(x) == 1:
                 assert not self.multi_query
                 source_query = x[0]

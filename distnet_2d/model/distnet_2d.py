@@ -574,16 +574,20 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
         if isinstance(arch, TemPy) and arch.frame_window > 0:
-            features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
             watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
-                               window_size = arch.attention_spatial_radius,
-                               add_distance_embedding = True, skip_connection=True)
-            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, verbose=True)
+                               window_size=arch.attention_spatial_radius,
+                               add_distance_embedding=True, skip_connection=True)
+            v5 = False
+            if not v5:
+                # self-attention with distance embedding for EDM / CDM prediction
+                sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
+                features_batch = sa(features_batch) # T x B, Y, X, C
+            features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
+            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, verbose=False)
             blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
             feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
             for op in feature_blending_convs:
                 blended_features = op(blended_features)
-            v5 = False
             if v5:
                 blended_features_batch = FusedNConvToBatch2D(compensate_gradient=True, n_conv=n_frames, filters=feature_filters,  name=f"BlendedFeatures")( blended_features )  # (N_CHAN x B, Y, X, F)
                 features_batch = Combine(filters=feature_filters, kernel_size=1, name="FeatureSkip")([features_batch, blended_features_batch])

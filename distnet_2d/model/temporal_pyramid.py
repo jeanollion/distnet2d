@@ -1,5 +1,4 @@
 import tensorflow as tf
-from numpy.core.defchararray import center
 from tensorflow.keras.layers import Layer
 import numpy as np
 
@@ -95,6 +94,7 @@ class TemporalPyramid(Layer):
         for i in range(len(self.down_indices)):
             input_filters = self._compute_filters(i, self.C)
             output_filters = self._compute_filters(i+1, self.C)
+            print(f"level: {i} filters: {input_filters} -> {output_filters}")
             att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, name=f"down_att{i}")
             conv_layer = Combine(filters=output_filters, name=f"down_comb{i}")
             input_layers = [tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters])]
@@ -166,12 +166,13 @@ class TemporalPyramid(Layer):
         return input_shape[1:-1] + (n_filters_global, ), input_shape[:-1] + (n_filters_l1, )
 
     def _compute_filters(self, level:int, base_filters:int):
+        if level == 0:
+            return base_filters
         if self.filter_increase_mode_log:
-            compression_ratio = self.T / len(self.down_indices[level-1]['center']) if level > 0 else 1
-            return int(base_filters * np.log2(1 + compression_ratio * self.filter_increase_factor))
+            compression_ratio = self.T / len(self.down_indices[level-1]['center'])
+            return int(base_filters * compression_ratio * self.filter_increase_factor)
         else:
             return base_filters + int(base_filters * self.filter_increase_factor) * level
-
 
     def get_config(self):
         config = super(TemporalPyramid, self).get_config()
