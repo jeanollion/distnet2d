@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import numpy as np
 
-from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, Stack, InferenceLayer
+from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, Stack, InferenceLayer, get_grad_weight_fun
 from .window_spatial_attention import WindowSpatialAttention
 
 class TemporalPyramid(Layer):
@@ -187,19 +187,21 @@ class TemporalPyramid(Layer):
 
 # reconstruct features through independent convolutions that inputs both features, global context and level 1 features from pyramid
 class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, output_filters, inference_idx:list, **kwargs):
+    def __init__(self, output_filters, inference_idx:list, compensate_gradient:bool, stack:bool=False, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
-        self.inference_idx=inference_idx
-        self.frame_convs = []
+        self.inference_idx=[inference_idx] if isinstance(inference_idx, int) else inference_idx
+        self.compensate_gradient=compensate_gradient
+        self.stack=stack
+        self.convs = []
 
     def get_config(self):
         config = super().get_config()
-        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx })
+        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx, "compensate_gradient":self.compensate_gradient, "stack":self.stack })
         return config
 
     def build(self, input_shape):
-        features_level0, features_level1, global_features = input_shape
+        features_level0, global_features = input_shape
         self.T = features_level0[0]
 
         # Create T independent 1x1 convolutions
@@ -210,16 +212,80 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
                 use_bias=True,
                 name=f'frame_{i}_conv'
             )
-            self.frame_convs.append(conv)
+            self.convs.append(conv)
+
+        if self.compensate_gradient and self.T>1:
+            self.grad_fun = get_grad_weight_fun(float(self.T))
+            self.grad_fun_inv = get_grad_weight_fun(1./self.T)
+        else:
+            self.grad_fun = None
+            self.grad_fun_inv = None
+
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        features_level0, global_features = inputs
+        if self.grad_fun_inv is not None and not self.inference_mode:
+            features_level0 = self.grad_fun_inv(features_level0)
+            global_features = self.grad_fun_inv(global_features)
+        outputs = []
+        idx_list = self.inference_idx if self.inference_mode and self.inference_idx is not None else list(range(self.T))
+        for i in idx_list:
+            input_list = [features_level0[i], global_features]
+            combined_i = tf.concat(input_list, axis=-1)
+            output_i = self.convs[i](combined_i, training=training)
+            outputs.append(output_i)
+        output = tf.stack(outputs, axis=0) if self.stack else tf.concat(outputs, axis=0)
+        if self.grad_fun is not None and not self.inference_mode:
+            output = self.grad_fun(output) # compensate gradients to have same level in
+        return output
+
+class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
+    def __init__(self, output_filters, prev_idx:list, next_idx:list, inference_idx:list, compensate_gradient:bool, stack:bool=False, **kwargs):
+        super().__init__(**kwargs)
+        self.output_filters = output_filters
+        self.prev_idx=prev_idx
+        self.next_idx = next_idx
+        assert len(prev_idx) >= 1 and len(prev_idx)==len(next_idx)
+        self.inference_idx=[inference_idx] if isinstance(inference_idx, int) else inference_idx
+        self.compensate_gradient=compensate_gradient
+        self.stack=stack
+        self.convs = []
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx, "prev_idx":self.prev_idx, "next_idx":self.next_idx, "compensate_gradient":self.compensate_gradient, "stack":self.stack })
+        return config
+
+    def build(self, input_shape):
+        features_level0, features_level1, global_features = input_shape
+        self.T = features_level0[0]
+        n_conv = len(self.prev_idx)
+        # Create T independent 1x1 convolutions
+        for i in range(n_conv):
+            conv = tf.keras.layers.Conv2D(
+                filters=self.output_filters,
+                kernel_size=1,
+                use_bias=True,
+                name=f'framepair_{i}_conv'
+            )
+            self.convs.append(conv)
             self.feature_level1_indices = self._get_closest_indices(self.T)
+        if self.compensate_gradient:
+            self.grad_fun = get_grad_weight_fun(float(n_conv))
+            self.grad_fun_inv = get_grad_weight_fun(1./n_conv)
+        else:
+            self.grad_fun = None
+            self.grad_fun_inv = None
+
         super().build(input_shape)
 
     @staticmethod
     def _get_closest_indices(T):
-        next_indices = TemporalPyramid._get_indices((T - 1) // 2, T)
+        level1_indices = TemporalPyramid._get_indices((T - 1) // 2, T)
         closest_indices = []
         for i in np.arange(T):
-            distances = np.abs(next_indices - i)
+            distances = np.abs(level1_indices - i)
             min_distance_indices = np.where(distances == np.min(distances))[0]
             if len(min_distance_indices) > 1:  # multiple indices
                 closest_indices.append(min_distance_indices.tolist())
@@ -229,14 +295,31 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
 
     def call(self, inputs, training=None):
         features_level0, features_level1, global_features = inputs
+        if self.grad_fun_inv is not None and not self.inference_mode:
+            features_level0 = self.grad_fun_inv(features_level0)
+            features_level1 = self.grad_fun_inv(features_level1)
+            global_features = self.grad_fun_inv(global_features)
         outputs = []
-        idx_list = self.inference_idx if self.inference_mode and self.inference_idx is not None else list(range(self.T))
-        for i in idx_list:
-            idx = self.feature_level1_indices[i]
-            input_list = [features_level0[i], global_features, features_level1[idx[0]]]
-            if len(idx) == 2: # feature is in between two level 1 features -> also add the second one to inputs
-                input_list.append(features_level1[idx[1]])
+        prev_idx_list = [self.prev_idx[i] for i in self.inference_idx] if not training and self.inference_mode and self.inference_idx is not None else self.prev_idx
+        next_idx_list = [self.next_idx[i] for i in self.inference_idx] if not training and self.inference_mode and self.inference_idx is not None else self.next_idx
+        idx_list = self.inference_idx if not training and self.inference_mode and self.inference_idx is not None else list(range(len(self.prev_idx)))
+        for i, p, n in zip(idx_list, prev_idx_list, next_idx_list):
+            input_list = [features_level0[p], features_level0[n], global_features]
+            if p+1 == n: # successive pairs: also use 1st level idx
+                idx_p = self.feature_level1_indices[p]
+                idx_n = self.feature_level1_indices[n]
+                idx = list(set(idx_p) & set(idx_n))
+                if len(idx)==0:
+                    assert len(idx_p)==1 and len(idx_n)==1
+                    input_list.append(features_level1[idx_p[0]])
+                    input_list.append(features_level1[idx_n[0]])
+                else:
+                    assert len(idx) == 1
+                    input_list.append(features_level1[idx[0]])
             combined_i = tf.concat(input_list, axis=-1)
-            output_i = self.frame_convs[i](combined_i, training=training)
+            output_i = self.convs[i](combined_i, training=training)
             outputs.append(output_i)
-        return tf.stack(outputs, axis=0)
+        output = tf.stack(outputs, axis=0) if self.stack else tf.concat(outputs, axis=0)
+        if self.grad_fun is not None and not self.inference_mode:
+            output = self.grad_fun(output) # compensate gradients to have same level in
+        return output
