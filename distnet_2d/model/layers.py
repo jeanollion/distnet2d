@@ -12,17 +12,17 @@ class StopGradient(tf.keras.layers.Layer):
 
 class InferenceLayer:
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self.inference_mode = False
+        super().__init__(*args, **kwargs)
 
 
 class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, name: str= "NConvToBatch2D"):
-        super().__init__(name=name)
+    def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, name: str= "NConvToBatch2D", **kwargs):
         self.n_conv = n_conv
         self.filters = filters
         self.inference_idx=inference_idx
         self.compensate_gradient=compensate_gradient
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
         config = super().get_config().copy()
@@ -62,11 +62,11 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         return output
 
 class FusedNConvToBatch2D(tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, filters:int, compensate_gradient:bool = False, name: str= "FusedNConvToBatch2D"):
-        super().__init__(name=name)
+    def __init__(self, n_conv:int, filters:int, compensate_gradient:bool = False, name: str= "FusedNConvToBatch2D", **kwargs):
         self.n_conv = n_conv
         self.filters = filters
         self.compensate_gradient=compensate_gradient
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
         config = super().get_config().copy()
@@ -104,8 +104,7 @@ class FusedNConvToBatch2D(tf.keras.layers.Layer):
         return output
 
 class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, inference_idx, filters:int, kernel, compensate_gradient:bool = False, name: str= "SplitNConvToBatch2D"):
-        super().__init__(name=name)
+    def __init__(self, n_conv:int, inference_idx, filters:int, kernel, compensate_gradient:bool = False, name: str= "SplitNConvToBatch2D", **kwargs):
         self.n_conv = n_conv
         self.filters = filters
         self.kernel = kernel
@@ -114,6 +113,7 @@ class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         self.convs = None
         self.split_layer = None
         self.inference_split_layer = None
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
         config = super().get_config().copy()
@@ -156,9 +156,9 @@ class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         return output
 
 class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, inference_idx, name: str= "SelectFeature"):
-        super().__init__(name=name)
+    def __init__(self, inference_idx, name: str= "SelectFeature", **kwargs):
         self.inference_idx=inference_idx
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
         config = super().get_config().copy()
@@ -180,11 +180,11 @@ class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
                 return input_concat
 
 class InferenceAwareBatchSelector(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, inference_idx:list, train_idx:list=None, merge_batch_dim:bool=True, name: str= "SelectFeature2"):
-        super().__init__(name=name)
+    def __init__(self, inference_idx:list, train_idx:list=None, merge_batch_dim:bool=True, name: str= "SelectFeature2", **kwargs):
         self.train_idx=train_idx
         self.inference_idx=inference_idx
         self.merge_batch_dim=merge_batch_dim
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
         config = super().get_config().copy()
@@ -211,10 +211,10 @@ class InferenceAwareBatchSelector(InferenceLayer, tf.keras.layers.Layer):
                 return input[self.train_idx] if self.merge_batch_dim else input[self.train_idx:self.train_idx+1]
 
 class ChannelToBatch(tf.keras.layers.Layer):
-    def __init__(self, compensate_gradient:bool = False, add_channel_axis:bool = True, name: str="ChannelToBatch"):
+    def __init__(self, compensate_gradient:bool = False, add_channel_axis:bool = True, name: str="ChannelToBatch", **kwargs):
         self.compensate_gradient=compensate_gradient
         self.add_channel_axis=add_channel_axis
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
         config = super().get_config().copy()
@@ -244,11 +244,11 @@ class ChannelToBatch(tf.keras.layers.Layer):
         return input
 
 class SplitBatch(tf.keras.layers.Layer):
-    def __init__(self, n_splits:int, compensate_gradient:bool = False, return_list:bool=True, name:str="SplitBatch2D"):
+    def __init__(self, n_splits:int, compensate_gradient:bool = False, return_list:bool=True, name:str="SplitBatch2D", **kwargs):
         self.n_splits=n_splits
         self.compensate_gradient=compensate_gradient
         self.return_list=return_list
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
       config = super().get_config().copy()
@@ -277,12 +277,12 @@ class SplitBatch(tf.keras.layers.Layer):
         else :
             return input
 class SplitReplaceConcatBatch(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_splits:int, replace_idx:int, compensate_gradient:bool = False, name:str="SplitReplaceMergeBatch2D"):
+    def __init__(self, n_splits:int, replace_idx:int, compensate_gradient:bool = False, name:str="SplitReplaceMergeBatch2D", **kwargs):
         self.n_splits=n_splits
         self.replace_idx = replace_idx
         self.compensate_gradient=compensate_gradient
         self.split_layer = None
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
       config = super().get_config().copy()
@@ -305,7 +305,7 @@ class SplitReplaceConcatBatch(InferenceLayer, tf.keras.layers.Layer):
         return tf.concat(input_list, 0) # (N x B, Y, X, C)
 
 class BatchToChannel(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_splits:int, n_splits_inference:int=1, inference_idx=None, compensate_gradient:bool = False, name:str= "BatchToChannel"):
+    def __init__(self, n_splits:int, n_splits_inference:int=1, inference_idx=None, compensate_gradient:bool = False, name:str= "BatchToChannel", **kwargs):
         self.n_splits=n_splits
         self.compensate_gradient = compensate_gradient
         self.n_splits_inference=n_splits_inference
@@ -315,7 +315,7 @@ class BatchToChannel(InferenceLayer, tf.keras.layers.Layer):
             assert isinstance(inference_idx, list), f"inference_idx must be a list of indices: {inference_idx}"
             assert np.all(np.asarray(inference_idx)<n_splits_inference), f"all inference_idx must be lower than {n_splits_inference} got {inference_idx}"
         self.inference_idx = inference_idx
-        super().__init__(name=name, autocast=False)
+        super().__init__(name=name, autocast=False, **kwargs)
 
     def get_config(self):
       config = super().get_config().copy()
@@ -351,7 +351,7 @@ class BatchToChannel(InferenceLayer, tf.keras.layers.Layer):
         return tf.reshape(input, target_shape2) # (B, Y, X, N x F)
 
 class FrameDistanceEmbedding(tf.keras.layers.Layer):
-    def __init__(self, input_dim:int, output_dim:int, frame_prev_idx:list, frame_next_idx:list, offset:int = 0 , name:str="FrameDistanceEmbedding"):
+    def __init__(self, input_dim:int, output_dim:int, frame_prev_idx:list, frame_next_idx:list, offset:int = 0 , name:str="FrameDistanceEmbedding", **kwargs):
         self.input_dim=input_dim
         self.output_dim=output_dim
         self.frame_next_idx=frame_next_idx
@@ -359,7 +359,7 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
         self.offset=offset
         assert len(frame_prev_idx) == len(frame_next_idx)
         self.embedding=None
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
       config = super().get_config().copy()
@@ -418,11 +418,11 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
 
     def __init__(self, embedding_dim:int, hidden_dim:int=256, multiplicative:bool=True, l2_reg=1e-5,
                  **kwargs):
-        super().__init__(**kwargs)
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.multiplicative = multiplicative
         self.l2_reg = l2_reg
+        super().__init__(**kwargs)
 
     def build(self, input_shape):
         self.expand_axis = [0, -1] if len(input_shape)==1 else [-1]
@@ -519,9 +519,9 @@ def get_print_grad_fun(message):
         return x, grad
     return wgrad
 
-class Stack(tf.keras.layers.Layer):
-    def __init__(self, axis, **kwargs):
-        super(Stack, self).__init__(**kwargs)
+class StackLayer(tf.keras.layers.Layer):
+    def __init__(self, axis=-1, **kwargs):
+        super(StackLayer, self).__init__(**kwargs)
         self.axis = axis
         self.supports_masking = True
 
@@ -532,20 +532,18 @@ class Stack(tf.keras.layers.Layer):
         if not isinstance(input_shape, (list, tuple)):
             raise ValueError("StackLayer expects a list of input tensors.")
 
-        # Check that all input shapes are compatible for stacking
         first_shape = tf.TensorShape(input_shape[0]).as_list()
         for shape in input_shape[1:]:
             current_shape = tf.TensorShape(shape).as_list()
             if first_shape != current_shape:
                 raise ValueError("All input shapes must be the same for stacking.")
 
-        # Compute the output shape
-        lim = self.axis if self.axis>=0 else self.axis+1
+        lim = self.axis if self.axis >= 0 else self.axis + 1
         output_shape = first_shape[:lim] + [len(input_shape)] + first_shape[lim:]
         return tf.TensorShape(output_shape)
 
     def get_config(self):
-        config = super(Stack, self).get_config()
+        config = super(StackLayer, self).get_config()
         config.update({'axis': self.axis})
         return config
 
@@ -561,6 +559,7 @@ class Combine(tf.keras.layers.Layer):
             l2_reg: float=0,
             output_dtype:str = None,
             name: str="Combine",
+            **kwargs
         ):
         self.activation = activation
         self.filters= filters
@@ -569,7 +568,7 @@ class Combine(tf.keras.layers.Layer):
         self.compensate_gradient = compensate_gradient
         self.l2_reg=l2_reg
         self.output_dtype=output_dtype
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
 
     def get_config(self):
       config = super().get_config().copy()
@@ -618,8 +617,8 @@ class Combine(tf.keras.layers.Layer):
 
 
 class WeigthedGradient(tf.keras.layers.Layer):
-    def __init__(self, weight, name: str="WeigthedGradient"):
-        super().__init__()
+    def __init__(self, weight, name: str="WeigthedGradient", **kwargs):
+        super().__init__(name=name, **kwargs)
         self.weight = weight
 
     def call(self, x):
@@ -649,8 +648,9 @@ class ResConv2D(tf.keras.layers.Layer):
             output_dtype=None,
             split_conv:bool = False,
             name: str="ResConv2D",
+            **kwargs
     ):
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
         self.kernel_size = kernel_size
         self.dilation = dilation
         self.activation=activation
@@ -731,8 +731,9 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             l2_reg:float = 0,
             output_dtype=None,
             name: str="ConvBNDrop",
+            **kwargs
     ):
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
         self.filters = filters
         self.kernel_size = kernel_size
         self.dilation = dilation
@@ -818,8 +819,9 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             l2_reg:float = 0,
             output_dtype=None,
             name: str="ResConv2DTransposeBNDrop",
+            **kwargs
     ):
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
         self.filters = filters
         self.kernel_size = kernel_size
         self.activation=activation
@@ -922,8 +924,9 @@ class SplitConv2D(tf.keras.layers.Layer):
             padding:str = "same",
             kernel_regularizer = None,
             name: str="SplitConv2D",
+            **kwargs
     ):
-        super().__init__(name=name)
+        super().__init__(name=name, **kwargs)
         self.kernel_size = kernel_size
         self.dilation = dilation_rate
         self.activation=activation

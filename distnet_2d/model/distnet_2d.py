@@ -10,7 +10,7 @@ from .temporal_cross_attention import TemporalCrossAttention
 from .window_spatial_attention import WindowSpatialAttention
 from .architectures import ArchBase, Blend, TemA, TemPy
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
-    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, \
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, StackLayer, \
     HideVariableWrapper, \
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch, SplitNConvToBatch2D, \
     InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, FusedNConvToBatch2D
@@ -406,7 +406,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             inference_gap_number = 0
             kwargs["displacement_loss_weight"] = 0
             kwargs["link_multiplicity_loss_weight"] = 0
-        wsa = False # for big objects only -> window spatial attention in EDM & CDM decoder with distance embedding
+
         print(f"edm activation: {'tanh' if arch.scale_edm else 'linear'}")
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in arch.encoder_settings])
         assert len(arch.encoder_settings) == len(arch.decoder_settings), "decoder should have same length as encoder"
@@ -521,12 +521,6 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                         decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    if wsa and (decoder_name == "Seg" or decoder_name == "Center") and isinstance(arch,  TemPy) and l_idx == len( arch.decoder_settings) - 1:
-                        wsatt_kwargs = dict(num_heads=arch.temporal_attention // 2, attention_filters=attention_filters // 2,
-                                            window_size=(np.array(arch.attention_spatial_radius) * 2).tolist(), add_distance_embedding=True,
-                                            skip_connection=True)
-                    else:
-                        wsatt_kwargs = None
                     d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation="relu", window_self_attention_kwargs=wsatt_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
@@ -539,7 +533,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         else:
             if arch.frame_window > 0:
                 inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name=f"input{i}") for i in range(arch.n_inputs)]
-                input_stacked = Stack(axis = -2, name="InputStack")(inputs)
+                input_stacked = StackLayer(axis = -2, name="InputStack")(inputs)
                 input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=False, name="MergeInputs")(input_stacked)
                 if arch.frame_aware:
                     frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name=f"input{arch.n_inputs}_frameindex")
@@ -583,14 +577,29 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                window_size=arch.attention_spatial_radius,
                                add_distance_embedding=True, skip_connection=True)
+            v7 = True
+            v6b = False
+            if not v7 and v6b:
+                # self-attention with distance embedding for EDM / CDM prediction
+                sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
+                features_batch = sa(features_batch) # T x B, Y, X, C
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
             blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, verbose=False)
             blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
             feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
             for op in feature_blending_convs:
                 blended_features = op(blended_features)
-            features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True)([features_batch_r, blended_features])
-            feature_pairs_batch = TemporalFeaturePairReconstructor(feature_filters, prev_idx=fidx_prev, next_idx=fidx_next, inference_idx=inference_pair_idx, compensate_gradient=True)([features_batch_r, blended_features_level1_r, blended_features])
+            if v7:
+                features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True)([features_batch_r, blended_features])
+                feature_pairs_batch = TemporalFeaturePairReconstructor(feature_filters, prev_idx=fidx_prev, next_idx=fidx_next, inference_idx=inference_pair_idx, compensate_gradient=True)([features_batch_r, blended_features_level1_r, blended_features])
+            else: # v6
+                inference_feature_idx = list( set([fidx_prev[pidx] for pidx in inference_pair_idx] + [fidx_next[pidx] for pidx in inference_pair_idx]))
+                inference_feature_idx.sort()
+                features_batch_r = TemporalFeatureReconstructor(feature_filters, inference_idx=inference_feature_idx)([features_batch_r, blended_features_level1_r, blended_features])
+                feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev,  inference_idx=[inference_feature_idx.index(fidx_prev[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairPrev")(features_batch_r)  # Tp x B, Y, X, C
+                feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=[inference_feature_idx.index(fidx_next[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairNext")(features_batch_r)
+                feature_pairs_batch = pair_combine_op([feature_prev, feature_next])  # Tp x B, Y, X, C
+                features_batch = InferenceAwareBatchSelector(inference_idx=inference_feature_idx.index(arch.frame_window), name="SelectFeature")( features_batch_r)
         elif isinstance(arch, TemA) and arch.frame_window > 0:
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch) # T, B, Y, X, C
             feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=fidx_prev,  name="SelectFeaturePairPrev")( features_batch_r) # Tp x B, Y, X, C

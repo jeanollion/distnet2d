@@ -25,10 +25,10 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
     def __init__(self, num_heads: int, attention_filters: int, window_size:tuple,
                  use_bias:bool = True, dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
                  add_distance_embedding:bool=True,
-                 window_processing:str="sequential", # "all", "row", "col", "sequential"
+                 window_processing:str="sequential", # "batch", "row", "col", "sequential"
                  overlap_reduction: str = 'geometrical',  # 'mean', 'attention_weighted', 'geometrical'
-                 l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention"):
-        super().__init__(name=name)
+                 l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention", **kwargs):
+        super().__init__(name=name, **kwargs)
         self.num_heads = num_heads
         self.attention_filters = attention_filters
         # Support both int and tuple for window_size
@@ -36,7 +36,6 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             self.window_size = (window_size, window_size)
         else:
             self.window_size = tuple(window_size)
-        self.filters = None
         self.use_bias=use_bias
         self.dropout = dropout
         self.l2_reg = l2_reg
@@ -51,6 +50,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         # Multi-query mode settings (populated in build)
         self.multi_query = False
         self.q_count = 1
+        self.filters = None
 
     def get_config(self):
         config = super().get_config().copy()
@@ -60,16 +60,13 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             "window_size": self.window_size,
             "use_bias":self.use_bias,
             "dropout": self.dropout,
-            "filters": self.filters,
             "l2_reg": self.l2_reg,
             "position_encoding_l2_reg":self.position_encoding_l2_reg,
             "skip_connection": self.skip_connection,
             "layer_normalization": self.layer_normalization,
             "window_processing":self.window_processing,
             "overlap_reduction": self.overlap_reduction,
-            "add_distance_embedding": self.add_distance_embedding,
-            "multi_query": self.multi_query,
-            "q_count": self.q_count,
+            "add_distance_embedding": self.add_distance_embedding
         })
         return config
 
@@ -762,7 +759,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             y_starts, x_starts = self._compute_window_grid(Y, X)
             num_y, num_x = tf.shape(y_starts)[0], tf.shape(x_starts)[0]
 
-            if self.window_processing == 'all': # extract all windows at once
+            if self.window_processing == 'batch': # extract all windows at once
                 num_windows = num_y * num_x
                 Q_windows = self._extract_windows_vectorized(Q_proj, y_starts, x_starts)
                 K_windows = self._extract_windows_vectorized(K_proj, y_starts, x_starts)
@@ -777,116 +774,67 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
                 else:
                     output = self._scatter_windows_mean(out_windows, y_starts, x_starts, Y, X)
             else:
-                # Chunked processing with direct accumulation
+                # Chunked processing for inference
                 C = self.num_heads * self.attention_filters
                 WSY, WSX = self.window_size
                 B_size = tf.shape(Q_proj)[0]
-                output = tf.zeros([B_size, Y, X, C], dtype=Q_proj.dtype)
-                weight_sums = tf.zeros([B_size, Y, X, 1], dtype=Q_proj.dtype)
 
                 num_y = tf.shape(y_starts)[0]
                 num_x = tf.shape(x_starts)[0]
 
-                # Process based on mode
                 if self.window_processing == 'row':
-                    # Process row by row
-                    def process_row(i, out, weights):
-                        y_sub = y_starts[i:i + 1]
-                        num_wins = tf.shape(y_sub)[0] * num_x
-
-                        Q_wins = self._extract_windows_vectorized(Q_proj, y_sub, x_starts)
-                        K_wins = self._extract_windows_vectorized(K_proj, y_sub, x_starts)
-                        V_wins = self._extract_windows_vectorized(V_proj, y_sub, x_starts)
-
-                        out_wins, attn_conf = self._window_attention(Q_wins, K_wins, V_wins, training, num_wins)
-
-                        if self.overlap_reduction == 'attention_weighted':
-                            conf = attn_conf
-                        elif self.overlap_reduction == 'geometrical':
-                            conf = tf.tile(tf.cast(self.geometrical_confidence, out_wins.dtype),
-                                           [tf.shape(out_wins)[0], 1, 1, 1])
-                        else:  # mean
-                            conf = tf.ones([tf.shape(out_wins)[0], WSY, WSX, 1], dtype=out_wins.dtype)
-
-                        out, weights = self._scatter_windows_accumulate(
-                            out_wins, conf, y_sub, x_starts, out, weights, Y, X
-                        )
-                        return i + 1, out, weights
-
-                    _, output, weight_sums = tf.while_loop(
-                        lambda i, o, w: i < num_y,
-                        process_row,
-                        [0, output, weight_sums]
-                    )
-
+                    num_chunks = num_y
+                    get_coords = lambda i: (y_starts[i:i + 1], x_starts)
                 elif self.window_processing == 'col':
-                    # Process column by column
-                    def process_col(j, out, weights):
-                        x_sub = x_starts[j:j + 1]
-                        num_wins = num_y * tf.shape(x_sub)[0]
-
-                        Q_wins = self._extract_windows_vectorized(Q_proj, y_starts, x_sub)
-                        K_wins = self._extract_windows_vectorized(K_proj, y_starts, x_sub)
-                        V_wins = self._extract_windows_vectorized(V_proj, y_starts, x_sub)
-
-                        out_wins, attn_conf = self._window_attention(Q_wins, K_wins, V_wins, training, num_wins)
-
-                        if self.overlap_reduction == 'attention_weighted':
-                            conf = attn_conf
-                        elif self.overlap_reduction == 'geometrical':
-                            conf = tf.tile(tf.cast(self.geometrical_confidence, out_wins.dtype),
-                                           [tf.shape(out_wins)[0], 1, 1, 1])
-                        else:  # mean
-                            conf = tf.ones([tf.shape(out_wins)[0], WSY, WSX, 1], dtype=out_wins.dtype)
-
-                        out, weights = self._scatter_windows_accumulate(
-                            out_wins, conf, y_starts, x_sub, out, weights, Y, X
-                        )
-                        return j + 1, out, weights
-
-                    _, output, weight_sums = tf.while_loop(
-                        lambda j, o, w: j < num_x,
-                        process_col,
-                        [0, output, weight_sums]
-                    )
-
+                    num_chunks = num_x
+                    get_coords = lambda j: (y_starts, x_starts[j:j + 1])
                 else:  # sequential
-                    # Process one window at a time
-                    def process_window(idx, out, weights):
-                        i = idx // num_x
-                        j = idx % num_x
-
-                        y_sub = y_starts[i:i + 1]
-                        x_sub = x_starts[j:j + 1]
-                        num_wins = 1
-
-                        Q_wins = self._extract_windows_vectorized(Q_proj, y_sub, x_sub)
-                        K_wins = self._extract_windows_vectorized(K_proj, y_sub, x_sub)
-                        V_wins = self._extract_windows_vectorized(V_proj, y_sub, x_sub)
-
-                        out_wins, attn_conf = self._window_attention(Q_wins, K_wins, V_wins, training, num_wins)
-
-                        if self.overlap_reduction == 'attention_weighted':
-                            conf = attn_conf
-                        elif self.overlap_reduction == 'geometrical':
-                            conf = tf.tile(tf.cast(self.geometrical_confidence, out_wins.dtype),
-                                           [tf.shape(out_wins)[0], 1, 1, 1])
-                        else:  # mean
-                            conf = tf.ones([tf.shape(out_wins)[0], WSY, WSX, 1], dtype=out_wins.dtype)
-
-                        out, weights = self._scatter_windows_accumulate(
-                            out_wins, conf, y_sub, x_sub, out, weights, Y, X
-                        )
-                        return idx + 1, out, weights
-
                     total_windows = num_y * num_x
-                    _, output, weight_sums = tf.while_loop(
-                        lambda idx, o, w: idx < total_windows,
-                        process_window,
-                        [0, output, weight_sums]
+                    num_chunks = total_windows
+                    get_coords = lambda idx: (y_starts[idx // num_x:idx // num_x + 1],
+                                              x_starts[idx % num_x:idx % num_x + 1])
+
+                def process_chunk(idx, output_acc, weights_acc):
+                    y_sub, x_sub = get_coords(idx)
+                    num_wins = tf.shape(y_sub)[0] * tf.shape(x_sub)[0]
+
+                    Q_wins = self._extract_windows_vectorized(Q_proj, y_sub, x_sub)
+                    K_wins = self._extract_windows_vectorized(K_proj, y_sub, x_sub)
+                    V_wins = self._extract_windows_vectorized(V_proj, y_sub, x_sub)
+
+                    out_wins, attn_conf = self._window_attention(Q_wins, K_wins, V_wins, training, num_wins)
+
+                    if self.overlap_reduction == 'attention_weighted':
+                        conf = attn_conf
+                    elif self.overlap_reduction == 'geometrical':
+                        conf = tf.tile(tf.cast(self.geometrical_confidence, out_wins.dtype),
+                                       [tf.shape(out_wins)[0], 1, 1, 1])
+                    else:
+                        conf = tf.ones([tf.shape(out_wins)[0], WSY, WSX, 1], dtype=out_wins.dtype)
+
+                    output_acc, weights_acc = self._scatter_windows_accumulate(
+                        out_wins, conf, y_sub, x_sub, output_acc, weights_acc, Y, X
                     )
 
-                # Final normalization
+                    return idx + 1, output_acc, weights_acc
+
+                initial_output = tf.zeros([B_size, Y, X, C], dtype=Q_proj.dtype)
+                initial_weights = tf.zeros([B_size, Y, X, 1], dtype=Q_proj.dtype)
+
+                # Simple while_loop - no stop_gradient needed at inference
+                _, output, weight_sums = tf.while_loop(
+                    cond=lambda i, o, w: i < num_chunks,
+                    body=process_chunk,
+                    loop_vars=[0, initial_output, initial_weights],
+                    parallel_iterations=1,  # Sequential: minimal memory
+                    swap_memory=False,  # Keep on GPU
+                    shape_invariants=[
+                        tf.TensorShape([]),
+                        tf.TensorShape([None, None, None, C]),
+                        tf.TensorShape([None, None, None, 1])
+                    ]
+                )
+
                 epsilon = tf.cast(1e-3 if self.overlap_reduction != 'mean' else 1.0, output.dtype)
                 output = output / tf.maximum(weight_sums, epsilon)
 
@@ -1474,13 +1422,13 @@ def test_window_processing_modes_equivalence():
             print(f"Testing overlap_reduction='{overlap_method}'")
             print(f"{'-' * 70}")
 
-            # Reference: 'all' mode (original behavior)
+            # Reference: 'batch' mode (original behavior)
             layer_all = WindowSpatialAttention(
                 num_heads=num_heads,
                 attention_filters=attention_filters,
                 window_size=window_size,
                 overlap_reduction=overlap_method,
-                window_processing='all',
+                window_processing='batch',
                 skip_connection=False,
                 layer_normalization=False,
                 dropout=0.0,
@@ -1553,7 +1501,7 @@ def test_window_processing_memory_profile():
     print("Window Processing Memory Profile Demo")
     print("=" * 70)
     print("\nThis test demonstrates the memory trade-offs:")
-    print("  'all':        Fastest, highest memory (processes all windows at once)")
+    print("  'batch':        Fastest, highest memory (processes all windows at once)")
     print("  'row':        Medium speed/memory (processes one row at a time)")
     print("  'col':        Medium speed/memory (processes one column at a time)")
     print("  'sequential': Slowest, lowest memory (processes one window at a time)")
@@ -1568,7 +1516,7 @@ def test_window_processing_memory_profile():
         num_heads=4,
         attention_filters=4,
         window_size=window_size,
-        window_processing='all',
+        window_processing='batch',
         dropout=0.0,
         add_distance_embedding=False
     )
@@ -1581,7 +1529,7 @@ def test_window_processing_memory_profile():
 
     print(f"\nExample: {H}x{W} image with {window_size} windows")
     print(f"  Number of windows: {num_windows}")
-    print(f"  'all' mode: processes {num_windows} windows at once")
+    print(f"  'batch' mode: processes {num_windows} windows at once")
     print(f"  'row' mode: processes {len(x_starts)} windows per iteration ({len(y_starts)} iterations)")
     print(f"  'col' mode: processes {len(y_starts)} windows per iteration ({len(x_starts)} iterations)")
     print(f"  'sequential' mode: processes 1 window per iteration ({num_windows} iterations)")
