@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import numpy as np
 
-from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, Stack, InferenceLayer, get_grad_weight_fun
+from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, InferenceLayer, get_grad_weight_fun
 from .window_spatial_attention import WindowSpatialAttention
 
 class TemporalPyramid(Layer):
