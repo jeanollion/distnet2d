@@ -712,6 +712,7 @@ class ResConv2D(tf.keras.layers.Layer):
             x = self.drop(x, training = training)
         if self.output_dtype is not None:
             x = tf.cast(x, dtype=self.output_dtype)
+            input = tf.cast(input, dtype=self.output_dtype)
         if self.weighted_sum:
             return self.activation_layer(self.ws([input, x]))
         else:
@@ -907,7 +908,7 @@ class UpSampling2DWithDtype(tf.keras.layers.UpSampling2D):
 
     def get_config(self):
         config = super(UpSampling2DWithDtype, self).get_config()
-        config.update({'output_dtype': self.output_dtype.name})
+        config.update({'output_dtype': self.output_dtype})
         return config
 
 

@@ -25,7 +25,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
     def __init__(self, num_heads: int, attention_filters: int, window_size:tuple,
                  use_bias:bool = True, dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
                  add_distance_embedding:bool=True,
-                 window_processing:str="sequential", # "batch", "row", "col", "sequential"
+                 window_processing:str="batch", # "batch", "row", "col", "sequential"
                  overlap_reduction: str = 'geometrical',  # 'mean', 'attention_weighted', 'geometrical'
                  l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention", **kwargs):
         super().__init__(name=name, **kwargs)

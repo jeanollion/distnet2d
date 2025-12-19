@@ -187,7 +187,7 @@ class TemporalPyramid(Layer):
 
 # reconstruct features through independent convolutions that inputs both features, global context and level 1 features from pyramid
 class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, output_filters, inference_idx:list, compensate_gradient:bool, stack:bool=False, **kwargs):
+    def __init__(self, output_filters, inference_idx:list, compensate_gradient:bool=False, stack:bool=False, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
         self.inference_idx=[inference_idx] if isinstance(inference_idx, int) else inference_idx
@@ -239,6 +239,61 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
         if self.grad_fun is not None and not self.inference_mode:
             output = self.grad_fun(output) # compensate gradients to have same level in
         return output
+
+class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
+    def __init__(self, output_filters, inference_idx:list, **kwargs):
+        super().__init__(**kwargs)
+        self.output_filters = output_filters
+        self.inference_idx=inference_idx
+        self.frame_convs = []
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx })
+        return config
+
+    def build(self, input_shape):
+        features_level0, features_level1, global_features = input_shape
+        self.T = features_level0[0]
+
+        # Create T independent 1x1 convolutions
+        for i in range(self.T):
+            conv = tf.keras.layers.Conv2D(
+                filters=self.output_filters,
+                kernel_size=1,
+                use_bias=True,
+                name=f'frame_{i}_conv'
+            )
+            self.frame_convs.append(conv)
+            self.feature_level1_indices = self._get_closest_indices(self.T)
+        super().build(input_shape)
+
+    @staticmethod
+    def _get_closest_indices(T):
+        next_indices = TemporalPyramid._get_indices((T - 1) // 2, T)
+        closest_indices = []
+        for i in np.arange(T):
+            distances = np.abs(next_indices - i)
+            min_distance_indices = np.where(distances == np.min(distances))[0]
+            if len(min_distance_indices) > 1:  # multiple indices
+                closest_indices.append(min_distance_indices.tolist())
+            else:
+                closest_indices.append(min_distance_indices.tolist())
+        return closest_indices
+
+    def call(self, inputs, training=None):
+        features_level0, features_level1, global_features = inputs
+        outputs = []
+        idx_list = self.inference_idx if self.inference_mode and self.inference_idx is not None else list(range(self.T))
+        for i in idx_list:
+            idx = self.feature_level1_indices[i]
+            input_list = [features_level0[i], global_features, features_level1[idx[0]]]
+            if len(idx) == 2: # feature is in between two level 1 features -> also add the second one to inputs
+                input_list.append(features_level1[idx[1]])
+            combined_i = tf.concat(input_list, axis=-1)
+            output_i = self.frame_convs[i](combined_i, training=training)
+            outputs.append(output_i)
+        return tf.stack(outputs, axis=0)
 
 class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, output_filters, prev_idx:list, next_idx:list, inference_idx:list, compensate_gradient:bool, stack:bool=False, **kwargs):

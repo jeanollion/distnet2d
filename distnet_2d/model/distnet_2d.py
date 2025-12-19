@@ -581,7 +581,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             v6b = False
             if not v7 and v6b:
                 # self-attention with distance embedding for EDM / CDM prediction
-                sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
+                sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True, add_distance_embedding=True)
                 features_batch = sa(features_batch) # T x B, Y, X, C
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
             blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, verbose=False)
@@ -589,7 +589,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
             for op in feature_blending_convs:
                 blended_features = op(blended_features)
-            if v7:
+            if v7: # TODO USE MODIFIED VERSION FOR V7
                 features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True)([features_batch_r, blended_features])
                 feature_pairs_batch = TemporalFeaturePairReconstructor(feature_filters, prev_idx=fidx_prev, next_idx=fidx_next, inference_idx=inference_pair_idx, compensate_gradient=True)([features_batch_r, blended_features_level1_r, blended_features])
             else: # v6
