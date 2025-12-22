@@ -31,7 +31,7 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self.convs = [
-            tf.keras.layers.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
+            tf.keras.layers.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", dtype=self.dtype_policy, name=f"Conv_{i}")
         for i in range(self.n_conv)]
 
         if self.compensate_gradient and self.n_conv>1:
@@ -79,7 +79,7 @@ class FusedNConvToBatch2D(tf.keras.layers.Layer):
         except:
             pass
         self.rank = len(input_shape)
-        self.conv = tf.keras.layers.Conv2D(filters=self.filters * self.n_conv, kernel_size=1, padding='same', activation="relu", name=f"Conv")
+        self.conv = tf.keras.layers.Conv2D(filters=self.filters * self.n_conv, kernel_size=1, padding='same', activation="relu", dtype=self.dtype_policy, name=f"Conv")
         self.c2b = ChannelToBatch(add_channel_axis=False)
         if self.compensate_gradient and self.n_conv>1:
             self.grad_fun = get_grad_weight_fun(float(self.n_conv))
@@ -122,7 +122,7 @@ class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self.convs = [
-            tf.keras.layers.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", name=f"Conv_{i}")
+            tf.keras.layers.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", dtype=self.dtype_policy, name=f"Conv_{i}")
         for i in range(self.n_conv)]
         self.split_layer = SplitBatch(n_splits=self.n_conv)
         self.inference_split_layer = SplitBatch(n_splits=len(self.inference_idx))
@@ -243,6 +243,7 @@ class ChannelToBatch(tf.keras.layers.Layer):
             input = self.grad_fun(input)
         return input
 
+
 class SplitBatch(tf.keras.layers.Layer):
     def __init__(self, n_splits:int, compensate_gradient:bool = False, return_list:bool=True, name:str="SplitBatch2D", **kwargs):
         self.n_splits=n_splits
@@ -276,6 +277,8 @@ class SplitBatch(tf.keras.layers.Layer):
             return [tf.squeeze(s, 0) for s in splits] # N x (B, Y, X, C)
         else :
             return input
+
+
 class SplitReplaceConcatBatch(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, n_splits:int, replace_idx:int, compensate_gradient:bool = False, name:str="SplitReplaceMergeBatch2D", **kwargs):
         self.n_splits=n_splits
@@ -367,7 +370,7 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
-        self.embedding = tf.keras.layers.Embedding(input_dim=self.input_dim, output_dim=self.output_dim)
+        self.embedding = tf.keras.layers.Embedding(input_dim=self.input_dim, output_dim=self.output_dim, dtype=self.dtype_policy)
         super().build(input_shape)
 
     def call(self, frame_index): # (B, 1, 1, FW)
@@ -430,6 +433,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
             tf.keras.layers.Dense(
                 units=self.hidden_dim,
                 activation='tanh',
+                dtype=self.dtype_policy,
                 kernel_initializer='glorot_uniform',
                 bias_initializer=tf.keras.initializers.Zeros(),
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
@@ -437,6 +441,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
             tf.keras.layers.Dense(
                 units=self.embedding_dim,
                 activation=None,
+                dtype=self.dtype_policy,
                 kernel_initializer=tf.keras.initializers.Zeros(),
                 bias_initializer=tf.keras.initializers.Zeros(),
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
@@ -448,6 +453,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 tf.keras.layers.Dense(
                     self.hidden_dim,
                     activation='tanh',
+                    dtype=self.dtype_policy,
                     bias_initializer=tf.keras.initializers.Zeros(),
                     kernel_initializer='glorot_uniform',
                     kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
@@ -456,6 +462,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 tf.keras.layers.Dense(
                     self.embedding_dim,
                     activation='tanh',
+                    dtype=self.dtype_policy,
                     bias_initializer=tf.keras.initializers.Zeros(),
                     kernel_initializer=tf.keras.initializers.Zeros(),
                     kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
@@ -519,9 +526,9 @@ def get_print_grad_fun(message):
         return x, grad
     return wgrad
 
-class StackLayer(tf.keras.layers.Layer):
+class Stack(tf.keras.layers.Layer):
     def __init__(self, axis=-1, **kwargs):
-        super(StackLayer, self).__init__(**kwargs)
+        super(Stack, self).__init__(**kwargs)
         self.axis = axis
         self.supports_masking = True
 
@@ -543,7 +550,7 @@ class StackLayer(tf.keras.layers.Layer):
         return tf.TensorShape(output_shape)
 
     def get_config(self):
-        config = super(StackLayer, self).get_config()
+        config = super(Stack, self).get_config()
         config.update({'axis': self.axis})
         return config
 
@@ -587,6 +594,7 @@ class Combine(tf.keras.layers.Layer):
             self.combine_conv = WSConv2D(
                 filters=filters,
                 kernel_size=self.kernel_size,
+                dtype=self.dtype_policy,
                 padding='same',
                 activation=self.activation,
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
@@ -595,6 +603,7 @@ class Combine(tf.keras.layers.Layer):
             self.combine_conv = Conv2DWithDtype(
                 filters=filters,
                 kernel_size=self.kernel_size,
+                dtype=self.dtype_policy,
                 padding='same',
                 activation=self.activation,
                 kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
@@ -676,8 +685,9 @@ class ResConv2D(tf.keras.layers.Layer):
             strides=1,
             padding='same',
             name=f"Conv1_{ker_size_to_string(self.kernel_size)}",
+            dtype=self.dtype_policy,
             activation="linear",
-            #kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.conv2 = conv_fun(
             filters=input_channels,
@@ -685,17 +695,18 @@ class ResConv2D(tf.keras.layers.Layer):
             dilation_rate = self.dilation,
             strides=1,
             padding='same',
+            dtype=self.dtype_policy,
             name=f"Conv2_{ker_size_to_string(self.kernel_size)}",
             activation="linear",
-            #kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
         )
         self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
-            self.bn1 = tf.keras.layers.BatchNormalization()
-            self.bn2 = tf.keras.layers.BatchNormalization()
+            self.bn1 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
+            self.bn2 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
         if self.weighted_sum:
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
@@ -757,6 +768,7 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             dilation_rate = self.dilation,
             strides=self.strides,
             padding='same',
+            dtype=self.dtype_policy,
             name=f"Conv",
             activation="linear",
             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
@@ -765,7 +777,7 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
-            self.bn = tf.keras.layers.BatchNormalization()
+            self.bn = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
         super().build(input_shape)
 
     def call(self, input, training=None):
@@ -843,6 +855,7 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             kernel_size=self.kernel_size,
             strides=self.strides,
             padding='same',
+            dtype=self.dtype_policy,
             activation="linear",
             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
             name=f"tConv{ker_size_to_string(self.kernel_size)}",
@@ -852,7 +865,7 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"Dropout")
         if self.batch_norm:
             #self.bn = MockBatchNormalization(name = f"/MockBatchNormalization")
-            self.bn = tf.keras.layers.BatchNormalization(name = f"BatchNormalization")
+            self.bn = tf.keras.layers.BatchNormalization(name = f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
         super().build(input_shape)
 
     def call(self, input, training=None):
@@ -956,6 +969,7 @@ class SplitConv2D(tf.keras.layers.Layer):
             dilation_rate = self.dilation,
             strides=self.strides,
             padding=self.padding,
+            dtype=self.dtype_policy,
             name=name,
             activation="linear",
             kernel_regularizer=self.kernel_regularizer
@@ -965,7 +979,7 @@ class SplitConv2D(tf.keras.layers.Layer):
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
-            self.bn = tf.keras.layers.BatchNormalization()
+            self.bn = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
         super().build(input_shape)
 
     def call(self, input, training=None):
@@ -1021,7 +1035,7 @@ class WSConv2D(tf.keras.layers.Conv2D):
                 shape=(self.kernel.shape[-1],),
                 initializer="ones",
                 trainable=True,
-                dtype=self.dtype,
+                dtype=self.dtype_policy,
             )
         else:
             self.gain = None
@@ -1076,7 +1090,7 @@ class WeightedSum(tf.keras.layers.Layer):
         self.weight = self.add_weight(
             name="weight",
             shape=(input_shape[0][-1], len(input_shape)) if self.per_channel else (len(input_shape),),
-            dtype=self.dtype,
+            dtype=self.dtype_policy,
             initializer=tf.constant_initializer(1./len(input_shape)), # "ones"
             trainable=True
         )

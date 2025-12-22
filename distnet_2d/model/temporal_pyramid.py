@@ -95,17 +95,17 @@ class TemporalPyramid(Layer):
             input_filters = self._compute_filters(i, self.C)
             output_filters = self._compute_filters(i+1, self.C)
             print(f"level: {i} filters: {input_filters} -> {output_filters}")
-            att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, name=f"down_att{i}")
-            conv_layer = Combine(filters=output_filters, name=f"down_comb{i}")
-            input_layers = [tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters]), tf.keras.layers.Input([Y, X, input_filters])]
-            q = tf.keras.layers.Concatenate(axis=0, name=f"concat_q{i}")( [input_layers[1], input_layers[0], input_layers[1], input_layers[2]] )
-            kv = tf.keras.layers.Concatenate(axis=0, name=f"concat_kv{i}")( [input_layers[0], input_layers[1], input_layers[2], input_layers[1]] )
+            att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, dtype=self.dtype_policy, name=f"down_att{i}")
+            conv_layer = Combine(filters=output_filters, dtype=self.dtype_policy, name=f"down_comb{i}")
+            input_layers = [tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype), tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype), tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype)]
+            q = tf.keras.layers.Concatenate(axis=0, name=f"concat_q{i}", dtype=self.compute_dtype)( [input_layers[1], input_layers[0], input_layers[1], input_layers[2]] )
+            kv = tf.keras.layers.Concatenate(axis=0, name=f"concat_kv{i}", dtype=self.compute_dtype)( [input_layers[0], input_layers[1], input_layers[2], input_layers[1]] )
             att = att_layer([q, kv])
-            out = SplitBatch(n_splits=4, name=f"att_split{i}")(att)
+            out = SplitBatch(n_splits=4, name=f"att_split{i}", dtype=self.compute_dtype)(att)
             out = conv_layer(out)
             self.down_op.append(tf.keras.Model(input_layers, out))
-            self.ln.append(tf.keras.layers.LayerNormalization())
-            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.embedding_l2_reg))
+            self.ln.append(tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32'))
+            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.embedding_l2_reg, dtype=self.dtype_policy))
         super(TemporalPyramid, self).build(input_shape)
 
     def call(self, inputs, training=None):
@@ -186,7 +186,7 @@ class TemporalPyramid(Layer):
         return config
 
 # reconstruct features through independent convolutions that inputs both features, global context and level 1 features from pyramid
-class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
+class TemporalFeatureReconstructorV7(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, output_filters, inference_idx:list, compensate_gradient:bool=False, stack:bool=False, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
@@ -210,6 +210,7 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
                 filters=self.output_filters,
                 kernel_size=1,
                 use_bias=True,
+                dtype=self.dtype_policy,
                 name=f'frame_{i}_conv'
             )
             self.convs.append(conv)
@@ -240,7 +241,7 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
             output = self.grad_fun(output) # compensate gradients to have same level in
         return output
 
-class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
+class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, output_filters, inference_idx:list, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
@@ -262,6 +263,7 @@ class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
                 filters=self.output_filters,
                 kernel_size=1,
                 use_bias=True,
+                dtype=self.dtype_policy,
                 name=f'frame_{i}_conv'
             )
             self.frame_convs.append(conv)
@@ -322,6 +324,7 @@ class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
                 filters=self.output_filters,
                 kernel_size=1,
                 use_bias=True,
+                dtype=self.dtype_policy,
                 name=f'framepair_{i}_conv'
             )
             self.convs.append(conv)

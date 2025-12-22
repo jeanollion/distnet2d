@@ -1,9 +1,10 @@
 import tensorflow as tf
 import numpy as np
 from skfmm import distance
+from distnet_2d.model.layers import InferenceLayer
 
 
-class WindowSpatialAttention(tf.keras.layers.Layer):
+class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
     """
     Swin-style window attention with forced overlap and averaging.
 
@@ -25,7 +26,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
     def __init__(self, num_heads: int, attention_filters: int, window_size:tuple,
                  use_bias:bool = True, dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
                  add_distance_embedding:bool=True,
-                 window_processing:str="batch", # "batch", "row", "col", "sequential"
+                 window_processing:str="auto", # "batch", "row", "col", "sequential", "auto"="batch" at train and "sequential" otherwise
                  overlap_reduction: str = 'geometrical',  # 'mean', 'attention_weighted', 'geometrical'
                  l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention", **kwargs):
         super().__init__(name=name, **kwargs)
@@ -101,12 +102,12 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         if self.layer_normalization:
             # LayerNorm will be applied per (batch-like) sample. For multi_query we apply it
             # after reshaping Q to (Q*B, Y, X, C) in call(), so the same ln_q can be used.
-            self.ln_q = tf.keras.layers.LayerNormalization()
+            self.ln_q = tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
             if len(input_shapes) >= 3 : # Q, K, V provided
-                self.ln_v = tf.keras.layers.LayerNormalization()
-                self.ln_k = tf.keras.layers.LayerNormalization()
+                self.ln_v = tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
+                self.ln_k = tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
             elif len(input_shapes) == 2: # Q, K provided
-                self.ln_k = tf.keras.layers.LayerNormalization()
+                self.ln_k = tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
                 self.ln_v = None
             else:
                 self.ln_v = None
@@ -121,18 +122,22 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         # Separate Q, K, V projections
         self.qproj = tf.keras.layers.Conv2D(HF, 1, padding='same',
                                             use_bias=self.use_bias, name="qproj",
+                                            dtype=self.dtype_policy,
                                             bias_initializer=tf.keras.initializers.Zeros(),
                                             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
         self.kproj = tf.keras.layers.Conv2D(HF, 1, padding='same',
                                             use_bias=self.use_bias, name="kproj",
+                                            dtype=self.dtype_policy,
                                             bias_initializer=tf.keras.initializers.Zeros(),
                                             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
         self.vproj = tf.keras.layers.Conv2D(HF, 1, padding='same',
                                             use_bias=self.use_bias, name="vproj",
+                                            dtype=self.dtype_policy,
                                             bias_initializer=tf.keras.initializers.Zeros(),
                                             kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
         self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same',
                                               use_bias=self.use_bias, name="outproj",
+                                              dtype=self.dtype_policy,
                                               bias_initializer=tf.keras.initializers.Zeros(),
                                               kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None)
 
@@ -146,6 +151,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         self.relative_position_bias_table = self.add_weight(
             name="rpb",
             shape=(embedding_size, self.num_heads),
+            dtype=self.compute_dtype,
             initializer=tf.initializers.Zeros(),
             constraint=tf.keras.constraints.MaxNorm(max_value=5.0, axis=0),
             regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg>0 else None,
@@ -164,11 +170,13 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         self.relative_position_index = tf.constant(relative_position_index, dtype=tf.int32)
         if self.add_distance_embedding: # embedding added to V
             self.distance_encoding_y = tf.keras.layers.Embedding(
-                input_dim=WSY, output_dim=HF//2,
+                name = "distance_encoding_y",
+                input_dim=WSY, output_dim=HF//2, dtype=self.dtype_policy,
                 embeddings_regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg > 0 else None
             )
             self.distance_encoding_x = tf.keras.layers.Embedding(
-                input_dim=WSX, output_dim=HF - HF//2,
+                name="distance_encoding_x",
+                input_dim=WSX, output_dim=HF - HF//2, dtype=self.dtype_policy,
                 embeddings_regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg > 0 else None
             )
         if self.overlap_reduction == "geometrical":
@@ -733,6 +741,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
         K_proj = self.kproj(key)
         V_proj = self.vproj(value)
 
+        window_processing = self.window_processing if self.window_processing != "auto" else ("sequential" if self.inference_mode else "batch")
         def single():
             """Direct attention without windowing overhead."""
             # Pad to window size if needed
@@ -759,7 +768,7 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
             y_starts, x_starts = self._compute_window_grid(Y, X)
             num_y, num_x = tf.shape(y_starts)[0], tf.shape(x_starts)[0]
 
-            if self.window_processing == 'batch': # extract all windows at once
+            if window_processing == 'batch': # extract all windows at once
                 num_windows = num_y * num_x
                 Q_windows = self._extract_windows_vectorized(Q_proj, y_starts, x_starts)
                 K_windows = self._extract_windows_vectorized(K_proj, y_starts, x_starts)
@@ -782,10 +791,10 @@ class WindowSpatialAttention(tf.keras.layers.Layer):
                 num_y = tf.shape(y_starts)[0]
                 num_x = tf.shape(x_starts)[0]
 
-                if self.window_processing == 'row':
+                if window_processing == 'row':
                     num_chunks = num_y
                     get_coords = lambda i: (y_starts[i:i + 1], x_starts)
-                elif self.window_processing == 'col':
+                elif window_processing == 'col':
                     num_chunks = num_x
                     get_coords = lambda j: (y_starts, x_starts[j:j + 1])
                 else:  # sequential

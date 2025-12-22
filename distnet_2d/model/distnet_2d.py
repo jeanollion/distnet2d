@@ -10,7 +10,7 @@ from .temporal_cross_attention import TemporalCrossAttention
 from .window_spatial_attention import WindowSpatialAttention
 from .architectures import ArchBase, Blend, TemA, TemPy
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
-    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, StackLayer, \
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, \
     HideVariableWrapper, \
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch, SplitNConvToBatch2D, \
     InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, FusedNConvToBatch2D
@@ -533,7 +533,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         else:
             if arch.frame_window > 0:
                 inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name=f"input{i}") for i in range(arch.n_inputs)]
-                input_stacked = StackLayer(axis = -2, name="InputStack")(inputs)
+                input_stacked = Stack(axis = -2, name="InputStack")(inputs)
                 input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=False, name="MergeInputs")(input_stacked)
                 if arch.frame_aware:
                     frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name=f"input{arch.n_inputs}_frameindex")
@@ -577,11 +577,11 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                window_size=arch.attention_spatial_radius,
                                add_distance_embedding=True, skip_connection=True)
-            v7 = True
-            v6b = False
+            v7 = False
+            v6b = True
             if not v7 and v6b:
                 # self-attention with distance embedding for EDM / CDM prediction
-                sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True, add_distance_embedding=True)
+                sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
                 features_batch = sa(features_batch) # T x B, Y, X, C
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
             blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, verbose=False)
