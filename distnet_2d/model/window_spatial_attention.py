@@ -151,7 +151,6 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
         self.relative_position_bias_table = self.add_weight(
             name="rpb",
             shape=(embedding_size, self.num_heads),
-            dtype=self.compute_dtype,
             initializer=tf.initializers.Zeros(),
             constraint=tf.keras.constraints.MaxNorm(max_value=5.0, axis=0),
             regularizer=tf.keras.regularizers.l2(self.position_encoding_l2_reg) if self.position_encoding_l2_reg>0 else None,

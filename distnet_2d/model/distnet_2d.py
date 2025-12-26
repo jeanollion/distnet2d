@@ -201,11 +201,11 @@ class DiSTNetModel(tf.keras.Model):
             loss_weights = dict()
 
             cell_mask = tf.math.greater(true_edm, 0)
-            cell_mask_interior = tf.math.greater(true_edm, 1.5) if self.cdm_derivative_loss or self.predict_cdm_derivatives or self.edm_derivative_loss else None
+            cell_mask_interior = tf.math.greater(true_edm, 1) if self.cdm_derivative_loss or self.predict_cdm_derivatives else None
             # edm
-            if edm_weight>0:
+            if edm_weight>0: # TODO: add a "heat map" mode: predict a gaussian
                 weight_map = tf.where(cell_mask, self.edm_class_weights[1], self.edm_class_weights[0]) if self.edm_class_weights is not None else None
-                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dy=edm_dy, pred_dx=edm_dx, mask_interior=cell_mask_interior, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
+                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dy=edm_dy, pred_dx=edm_dx, der_mask=None, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
                 edm_loss = tf.reduce_mean(edm_loss)
                 losses["EDM"] = edm_loss
                 loss_weights["EDM"] = edm_weight
@@ -213,17 +213,17 @@ class DiSTNetModel(tf.keras.Model):
             # center
             if center_weight>0:
                 cdm_true = y[1]
-                if self.cdm_loss_radius <= 0:
-                    cdm_mask = cell_mask
+                if self.cdm_loss_radius <= 0: # GCDM mode : interior of cell
+                    cdm_mask = None # was cell_mask
                     cdm_mask_interior = cell_mask_interior
-                    weight_map = None
-                else:
+                    weight_map = tf.where(cell_mask, 1., 0.01) # TODO adjust this value.
+                else: # ECDM mode: also exterior of object
                     cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
                     half_rad = tf.cast(self.cdm_loss_radius, cdm_true.dtype) / tf.cast(2, cdm_true.dtype)
                     weight_map = tf.math.exp(- tf.math.square(cdm_true / half_rad ) )
                     weight_map = tf.where(cdm_mask, weight_map, 0)
                     cdm_mask_interior = cdm_mask
-                center_loss = compute_loss_derivatives(cdm_true, cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, mask_interior=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
+                center_loss = compute_loss_derivatives(cdm_true, cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, der_mask=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
                 losses["CDM"] = center_loss
                 loss_weights["CDM"] = center_weight
@@ -577,9 +577,9 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                window_size=arch.attention_spatial_radius,
                                add_distance_embedding=True, skip_connection=True)
-            v7 = False
-            v6b = True
-            if not v7 and v6b:
+            v7 = True
+            sa = True
+            if not v7 and sa:
                 # self-attention with distance embedding for EDM / CDM prediction
                 sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
                 features_batch = sa(features_batch) # T x B, Y, X, C

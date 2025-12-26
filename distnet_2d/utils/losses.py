@@ -85,14 +85,14 @@ class TemperedFocalCrossEntropy(tf.keras.losses.Loss):
         })
         return config
 
-def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, pred_dy=None, pred_dx=None, pred_lap=None, mask=None, mask_interior=None, derivative_loss: bool = False, laplacian_loss: bool = False, weight_map=None):
+def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, pred_dy=None, pred_dx=None, pred_lap=None, mask=None, der_mask=None, derivative_loss: bool = False, laplacian_loss: bool = False, weight_map=None):
     loss = loss_fun(true, tf.where(mask, pred, 0) if mask is not None else pred)
     if weight_map is not None:
         loss = loss * weight_map
     #print(f"compute loss with mask: {mask is not None} interior: {mask_interior is not None} der: {derivative_loss} grad: {gradient_loss} lap: {laplacian_loss} pred lap: {y_pred_lap is not None} pred dy: {y_pred_dy is not None} pred dx: {y_pred_dx is not None}", flush=True)
     if derivative_loss or laplacian_loss or pred_dy is not None or pred_dx is not None or pred_lap is not None:
-        if mask_interior is None:
-            mask_interior = mask
+        if der_mask is None:
+            der_mask = mask
         if true_dy is None:
             true_dy = der.der_2d(true, 1)
         if true_dx is None:
@@ -102,21 +102,21 @@ def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, p
         if laplacian_loss or pred_lap is not None:
             true_lap = der.laplacian_2d(None, true_dy, true_dx)
         if pred_lap is not None:
-            pred_lap = tf.where(mask_interior, pred_lap, 0) if mask_interior is not None else pred_lap
+            pred_lap = tf.where(der_mask, pred_lap, 0) if der_mask is not None else pred_lap
             loss = loss + loss_fun(true_lap, pred_lap)
         if laplacian_loss:
             lap_pred = der.laplacian_2d(None, dy_pred, dx_pred)
-            lap_pred = tf.where(mask_interior, lap_pred, 0) if mask_interior is not None else lap_pred
+            lap_pred = tf.where(der_mask, lap_pred, 0) if der_mask is not None else lap_pred
             loss = loss + loss_fun(true_lap, lap_pred)
         if pred_dy is not None:
-            pred_dy = tf.where(mask_interior, pred_dy, 0) if mask_interior is not None else pred_dy
+            pred_dy = tf.where(der_mask, pred_dy, 0) if der_mask is not None else pred_dy
             loss = loss + loss_fun(true_dy, pred_dy)
         if pred_dx is not None:
-            pred_dx = tf.where(mask_interior, pred_dx, 0) if mask_interior is not None else pred_dx
+            pred_dx = tf.where(der_mask, pred_dx, 0) if der_mask is not None else pred_dx
             loss = loss + loss_fun(true_dx, pred_dx)
         if derivative_loss:
-            dy_pred = tf.where(mask_interior, dy_pred, 0) if mask_interior is not None else dy_pred
-            dx_pred = tf.where(mask_interior, dx_pred, 0) if mask_interior is not None else dx_pred
+            dy_pred = tf.where(der_mask, dy_pred, 0) if der_mask is not None else dy_pred
+            dx_pred = tf.where(der_mask, dx_pred, 0) if der_mask is not None else dx_pred
             loss = loss + loss_fun(true_dy, dy_pred) + loss_fun(true_dx, dx_pred)
     return loss
 

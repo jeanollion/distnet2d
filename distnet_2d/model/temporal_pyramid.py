@@ -186,7 +186,7 @@ class TemporalPyramid(Layer):
         return config
 
 # reconstruct features through independent convolutions that inputs both features, global context and level 1 features from pyramid
-class TemporalFeatureReconstructorV7(InferenceLayer, tf.keras.layers.Layer):
+class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, output_filters, inference_idx:list, compensate_gradient:bool=False, stack:bool=False, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
@@ -241,7 +241,7 @@ class TemporalFeatureReconstructorV7(InferenceLayer, tf.keras.layers.Layer):
             output = self.grad_fun(output) # compensate gradients to have same level in
         return output
 
-class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
+class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, output_filters, inference_idx:list, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
