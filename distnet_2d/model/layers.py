@@ -1088,6 +1088,95 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
 
 
 # Gradient manipulation
+class ScheduledGradientWeight(tf.keras.layers.Layer):
+    """
+    Layer that applies scheduled gradient weighting to skip connections.
+    Forward pass: unchanged (information flows normally)
+    Backward pass: gradients are scaled by a scheduled weight
+    """
+
+    def __init__(self,
+                 min_weight: float = 0.0,  # Initial gradient weight (training start)
+                 max_weight: float = 1.0,  # Final gradient weight (target)
+                 max_progress: float = 1.0,  # When this layer reaches max_weight
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.min_weight = min_weight
+        self.max_weight = max_weight
+        self.max_progress = max_progress
+
+        # Training progress variable [0, 1] - set by callback
+        self.progress = None
+
+    def build(self, input_shape):
+        super().build(input_shape)
+
+        # Create progress variable (updated by callback)
+        # Initialize to 0.0 (training start)
+        self.progress = self.add_weight(
+            name='progress',
+            shape=(),
+            initializer=tf.keras.initializers.Constant(1.0),
+            trainable=False,
+            dtype=tf.float32
+        )
+
+    @tf.custom_gradient
+    def op(self, x, weight):
+        """
+        Forward pass: return input unchanged
+        Backward pass: scale gradients by weight
+        """
+
+        def grad(dy):
+            # Handle different gradient types
+            if isinstance(dy, tuple):
+                return tuple(y * weight for y in dy), None
+            elif isinstance(dy, list):
+                return [y * weight for y in dy], None
+            else:
+                return dy * weight, None
+
+        return x, grad
+
+    def call(self, inputs, training=None):
+        if not training:
+            return inputs
+        current_weight = self.get_current_weight()
+        return self.op(inputs, current_weight)
+
+    def set_progress(self, progress_value):
+        """Set global training progress [0, 1] - called by callback"""
+        self.progress.assign(tf.clip_by_value(progress_value, 0.0, 1.0))
+
+    def get_current_weight(self):
+        """Get current gradient weight"""
+        if self.progress is None:
+            return self.min_weight
+
+        # Calculate layer-specific progress
+        # Cast to float32 explicitly to handle mixed precision
+        progress_val = tf.cast(self.progress, tf.float32)
+        max_progress_val = tf.cast(self.max_progress, tf.float32)
+        layer_progress = tf.minimum(1.0, progress_val / max_progress_val)
+
+        # Interpolate from min_weight to max_weight (inverse of dropout)
+        min_weight_val = tf.cast(self.min_weight, tf.float32)
+        max_weight_val = tf.cast(self.max_weight, tf.float32)
+        current_weight = min_weight_val + (max_weight_val - min_weight_val) * layer_progress
+
+        return current_weight
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "min_weight": float(self.min_weight),
+            "max_weight": float(self.max_weight),
+            "max_progress": float(self.max_progress),
+        })
+        return config
+
+
 class StopGradient(tf.keras.layers.Layer):
     def __init__(self, name:str="StopGradient"):
         super().__init__(name=name)
