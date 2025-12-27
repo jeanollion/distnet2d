@@ -822,21 +822,21 @@ def get_gamma(activation):
 
 class ScheduledDropout(tf.keras.layers.Layer):
     """
-    Dropout layer with scheduled rate based on training progress.
+    (Spatial) dropout layer with scheduled rate based on training progress.
     """
 
     def __init__(self,
                  rate: float,  # target rate (min_rate)
                  max_rate: float,  # rate at training start
                  max_progress: float = 1.0,  # When this layer reaches rate
-                 noise_shape=None,  # Optional: for structured dropout
+                 spatial: bool = True,  # Use spatial dropout for images
                  seed=None,  # Optional: for reproducibility
                  **kwargs):
         super().__init__(**kwargs)
         self.min_rate = rate
         self.max_rate = max_rate
         self.max_progress = max_progress
-        self.noise_shape = noise_shape
+        self.spatial = spatial
         self.seed = seed
 
         # Training progress variable [0, 1] - set by callback
@@ -844,6 +844,7 @@ class ScheduledDropout(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         super().build(input_shape)
+
         # Create progress variable (updated by callback)
         self.progress = self.add_weight(
             name='progress',
@@ -852,16 +853,47 @@ class ScheduledDropout(tf.keras.layers.Layer):
             trainable=False,
             dtype=tf.float32
         )
+        self.is_3D = self.spatial and len(input_shape) == 5
+        # Validate input shape for spatial dropout
+        if self.spatial and len(input_shape) not in [4, 5]:
+            raise ValueError(
+                f"Spatial dropout requires 4D (batch, height, width, channels) or "
+                f"5D (batch, depth, height, width, channels) input, got shape {input_shape}"
+            )
 
     def call(self, inputs, training=None):
-        if training:
+        if not training:
+            return inputs
+
+        current_rate = self.get_current_rate()
+
+        # Convert to Python float to avoid issues with mixed precision
+        current_rate = float(current_rate)
+
+        if self.spatial:
+            # Use tf.nn.dropout with spatial noise_shape for spatial dropout
+            input_shape = tf.shape(inputs)
+
+            if not self.is_3D:
+                # 2D convolutions: drop (batch, 1, 1, channels)
+                noise_shape = [input_shape[0], 1, 1, input_shape[3]]
+            else:
+                # 3D convolutions: drop (batch, 1, 1, 1, channels)
+                noise_shape = [input_shape[0], 1, 1, 1, input_shape[4]]
+
             return tf.nn.dropout(
                 inputs,
-                rate=self.get_current_rate(),
-                noise_shape=self.noise_shape,
+                rate=tf.cast(current_rate, inputs.dtype),
+                noise_shape=noise_shape,
                 seed=self.seed
             )
-        return inputs
+        else:
+            # Regular dropout (no noise_shape = element-wise dropout)
+            return tf.nn.dropout(
+                inputs,
+                rate=tf.cast(current_rate, inputs.dtype),
+                seed=self.seed
+            )
 
     def set_progress(self, progress_value):
         """Set global training progress [0, 1] - called by callback"""
@@ -869,15 +901,20 @@ class ScheduledDropout(tf.keras.layers.Layer):
 
     def get_current_rate(self):
         """Get current dropout rate"""
-        # Handle case where progress hasn't been initialized yet
         if self.progress is None:
-            return self.min_rate  # Return max_rate, not self.rate
+            return self.max_rate
 
         # Calculate layer-specific progress
-        layer_progress = tf.minimum(1.0, self.progress / self.max_progress)
+        # Cast to float32 explicitly to handle mixed precision
+        progress_val = tf.cast(self.progress, tf.float32)
+        max_progress_val = tf.cast(self.max_progress, tf.float32)
+        layer_progress = tf.minimum(1.0, progress_val / max_progress_val)
 
         # Interpolate from max_rate to min_rate
-        current_rate = self.max_rate - (self.max_rate - self.min_rate) * layer_progress
+        max_rate_val = tf.cast(self.max_rate, tf.float32)
+        min_rate_val = tf.cast(self.min_rate, tf.float32)
+        current_rate = max_rate_val - (max_rate_val - min_rate_val) * layer_progress
+
         return current_rate
 
     def get_config(self):
@@ -886,10 +923,11 @@ class ScheduledDropout(tf.keras.layers.Layer):
             "rate": float(self.min_rate),
             "max_rate": float(self.max_rate),
             "max_progress": float(self.max_progress),
-            "noise_shape": self.noise_shape,
+            "spatial": self.spatial,
             "seed": self.seed,
         })
         return config
+
 
 ## Embeddings
 
