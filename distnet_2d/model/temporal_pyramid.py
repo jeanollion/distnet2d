@@ -2,7 +2,8 @@ import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import numpy as np
 
-from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, InferenceLayer, get_grad_weight_fun
+from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, InferenceLayer, get_grad_weight_fun, \
+    HybridThresholdL2Regularizer
 from .window_spatial_attention import WindowSpatialAttention
 
 class TemporalPyramid(Layer):
@@ -25,7 +26,7 @@ class TemporalPyramid(Layer):
     Output shape: (T, B, Y, X, C)
     """
 
-    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, embedding_l2_reg=1e-5, verbose=False, **kwargs):
+    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, position_encoding_l2_reg:float=1e-5, verbose=False, **kwargs):
         super(TemporalPyramid, self).__init__(**kwargs)
         self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
         self.window_spatial_attention_kwargs["layer_normalization"] = False
@@ -33,7 +34,8 @@ class TemporalPyramid(Layer):
         self.filter_increase_factor=filter_increase_factor
         self.filter_increase_mode_log=filter_increase_mode_log
         self.verbose = verbose
-        self.embedding_l2_reg=embedding_l2_reg
+        self.l2_reg=l2_reg
+        self.position_encoding_l2_reg=position_encoding_l2_reg
 
     def _precompute_indices(self):
         """Pre-compute all indices for downsampling at each level using stride-based formula."""
@@ -96,7 +98,7 @@ class TemporalPyramid(Layer):
             output_filters = self._compute_filters(i+1, self.C)
             print(f"level: {i} filters: {input_filters} -> {output_filters}")
             att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, dtype=self.dtype_policy, name=f"down_att{i}")
-            conv_layer = Combine(filters=output_filters, dtype=self.dtype_policy, name=f"down_comb{i}")
+            conv_layer = Combine(filters=output_filters, dtype=self.dtype_policy, l2_reg=self.l2_reg, name=f"down_comb{i}")
             input_layers = [tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype), tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype), tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype)]
             q = tf.keras.layers.Concatenate(axis=0, name=f"concat_q{i}", dtype=self.compute_dtype)( [input_layers[1], input_layers[0], input_layers[1], input_layers[2]] )
             kv = tf.keras.layers.Concatenate(axis=0, name=f"concat_kv{i}", dtype=self.compute_dtype)( [input_layers[0], input_layers[1], input_layers[2], input_layers[1]] )
@@ -105,7 +107,7 @@ class TemporalPyramid(Layer):
             out = conv_layer(out)
             self.down_op.append(tf.keras.Model(input_layers, out))
             self.ln.append(tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32'))
-            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.embedding_l2_reg, dtype=self.dtype_policy))
+            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.position_encoding_l2_reg, dtype=self.dtype_policy))
         super(TemporalPyramid, self).build(input_shape)
 
     def call(self, inputs, training=None):
@@ -181,23 +183,26 @@ class TemporalPyramid(Layer):
             "filter_increase_factor":self.filter_increase_factor,
             "filter_increase_mode_log":self.filter_increase_mode_log,
             "layer_normalization":self.layer_normalization,
+            "l2_reg":self.l2_reg,
+            "position_encoding_l2_reg":self.position_encoding_l2_reg,
             'verbose': self.verbose
         })
         return config
 
 # reconstruct features through independent convolutions that inputs both features, global context and level 1 features from pyramid
 class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, output_filters, inference_idx:list, compensate_gradient:bool=False, stack:bool=False, **kwargs):
+    def __init__(self, output_filters, inference_idx:list, compensate_gradient:bool=False, stack:bool=False, l2_reg:float=0, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
         self.inference_idx=[inference_idx] if isinstance(inference_idx, int) else inference_idx
         self.compensate_gradient=compensate_gradient
         self.stack=stack
+        self.l2_reg=l2_reg
         self.convs = []
 
     def get_config(self):
         config = super().get_config()
-        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx, "compensate_gradient":self.compensate_gradient, "stack":self.stack })
+        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx, "compensate_gradient":self.compensate_gradient, "stack":self.stack, "l2_reg":self.l2_reg })
         return config
 
     def build(self, input_shape):
@@ -211,6 +216,8 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
                 kernel_size=1,
                 use_bias=True,
                 dtype=self.dtype_policy,
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 name=f'frame_{i}_conv'
             )
             self.convs.append(conv)
@@ -241,16 +248,18 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
             output = self.grad_fun(output) # compensate gradients to have same level in
         return output
 
+
 class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, output_filters, inference_idx:list, **kwargs):
+    def __init__(self, output_filters, inference_idx:list, l2_reg:float=0, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
         self.inference_idx=inference_idx
+        self.l2_reg=l2_reg
         self.frame_convs = []
 
     def get_config(self):
         config = super().get_config()
-        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx })
+        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx, 'l2_reg':self.l2_reg })
         return config
 
     def build(self, input_shape):
@@ -264,6 +273,8 @@ class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
                 kernel_size=1,
                 use_bias=True,
                 dtype=self.dtype_policy,
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 name=f'frame_{i}_conv'
             )
             self.frame_convs.append(conv)
@@ -297,8 +308,9 @@ class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
             outputs.append(output_i)
         return tf.stack(outputs, axis=0)
 
+
 class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, output_filters, prev_idx:list, next_idx:list, inference_idx:list, compensate_gradient:bool, stack:bool=False, **kwargs):
+    def __init__(self, output_filters, prev_idx:list, next_idx:list, inference_idx:list, compensate_gradient:bool, stack:bool=False, l2_reg:float=0, **kwargs):
         super().__init__(**kwargs)
         self.output_filters = output_filters
         self.prev_idx=prev_idx
@@ -307,11 +319,12 @@ class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
         self.inference_idx=[inference_idx] if isinstance(inference_idx, int) else inference_idx
         self.compensate_gradient=compensate_gradient
         self.stack=stack
+        self.l2_reg=l2_reg
         self.convs = []
 
     def get_config(self):
         config = super().get_config()
-        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx, "prev_idx":self.prev_idx, "next_idx":self.next_idx, "compensate_gradient":self.compensate_gradient, "stack":self.stack })
+        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx, "prev_idx":self.prev_idx, "next_idx":self.next_idx, "compensate_gradient":self.compensate_gradient, "stack":self.stack, "l2_reg":self.l2_reg })
         return config
 
     def build(self, input_shape):
@@ -325,6 +338,8 @@ class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
                 kernel_size=1,
                 use_bias=True,
                 dtype=self.dtype_policy,
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 name=f'framepair_{i}_conv'
             )
             self.convs.append(conv)

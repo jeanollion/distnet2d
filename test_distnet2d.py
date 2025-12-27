@@ -38,7 +38,7 @@ if not seg:
         mixed_precision.set_global_policy('mixed_float16')
         fw = 2
         dn = get_distnet_2d(
-            arch=architectures.TemPyD2(frame_window=fw, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
+            arch=architectures.TemPyD4(frame_window=fw, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
                                       temporal_attention=64, attention_spatial_radius=8,
                                       skip_connections=False, early_downsampling=True, category_number=0, inference_gap_number=1,
                                       predict_edm_derivatives=False, predict_cdm_derivatives=False)
@@ -46,6 +46,8 @@ if not seg:
 
         dn.set_inference(True)
         dn.compile()
+        print(f"reg loss: {len(dn.losses)} layers: {len(dn.layers)} values: {dn.losses}")
+        print(f"variables: {len(dn.trainable_variables)} shape: {[t.shape for t in dn.trainable_variables]}")
         frame_index = tf.reshape(tf.range(fw*2+1), [1, 1, 1, fw*2+1])
         out = dn([tf.zeros(shape=(1, 64, 32, fw*2+1)), frame_index]) # frame aware case
         #out = dn([tf.zeros(shape=(1, 64, 32, 19))])

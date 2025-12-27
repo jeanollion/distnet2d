@@ -3,157 +3,11 @@ from ..utils.helpers import ensure_multiplicity
 import tensorflow as tf
 import numpy as np
 
-class StopGradient(tf.keras.layers.Layer):
-    def __init__(self, name:str="StopGradient"):
-        super().__init__(name=name)
-
-    def call(self, input):
-        return tf.stop_gradient( input, name=self.name )
-
 class InferenceLayer:
     def __init__(self, *args, **kwargs):
         self.inference_mode = False
         super().__init__(*args, **kwargs)
 
-
-class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, name: str= "NConvToBatch2D", **kwargs):
-        self.n_conv = n_conv
-        self.filters = filters
-        self.inference_idx=inference_idx
-        self.compensate_gradient=compensate_gradient
-        super().__init__(name=name, **kwargs)
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient, "inference_idx":self.inference_idx})
-        return config
-
-    def build(self, input_shape):
-        self.convs = [
-            tf.keras.layers.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", dtype=self.dtype_policy, name=f"Conv_{i}")
-        for i in range(self.n_conv)]
-
-        if self.compensate_gradient and self.n_conv>1:
-            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
-            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
-        else:
-            self.grad_fun = None
-            self.grad_fun_inv = None
-        super().build(input_shape)
-
-    def call(self, input): # (B, Y, X, F)
-        if self.inference_mode and self.inference_idx is not None:
-            if isinstance(self.inference_idx, (tuple, list)):
-                items = [self.convs[idx](input) for idx in self.inference_idx]
-                return tf.concat(items, axis=0)
-            else:
-                return self.convs[self.inference_idx](input)
-        # input = get_print_grad_fun(f"{self.name} before split")(input)
-        if self.grad_fun_inv is not None and not self.inference_mode:
-            input = self.grad_fun_inv(input)
-
-        inputs = [conv(input) for conv in self.convs] # N x (B, Y, X, F)
-        # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
-        output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
-        if self.grad_fun is not None and not self.inference_mode:
-            output = self.grad_fun(output) # compensate gradients to have same level in
-        # output = get_print_grad_fun(f"{self.name} after concat")(output)
-        return output
-
-class FusedNConvToBatch2D(tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, filters:int, compensate_gradient:bool = False, name: str= "FusedNConvToBatch2D", **kwargs):
-        self.n_conv = n_conv
-        self.filters = filters
-        self.compensate_gradient=compensate_gradient
-        super().__init__(name=name, **kwargs)
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient})
-        return config
-
-    def build(self, input_shape):
-        try:
-            input_shape = input_shape.as_list()
-        except:
-            pass
-        self.rank = len(input_shape)
-        self.conv = tf.keras.layers.Conv2D(filters=self.filters * self.n_conv, kernel_size=1, padding='same', activation="relu", dtype=self.dtype_policy, name=f"Conv")
-        self.c2b = ChannelToBatch(add_channel_axis=False)
-        if self.compensate_gradient and self.n_conv>1:
-            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
-            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
-        else:
-            self.grad_fun = None
-            self.grad_fun_inv = None
-        super().build(input_shape)
-
-    def call(self, input): # (B, Y, X, C)
-        if self.grad_fun_inv is not None:
-            input = self.grad_fun_inv(input)
-
-        output = self.conv(input) # (B, Y, X, F * N)
-        shape = tf.shape(input)
-        target_shape = tf.concat([ [shape[i] for i in range(0, self.rank-1)], [self.filters, self.n_conv] ], 0)
-        output = tf.reshape(output, target_shape) # (B, Y, X, F, N)
-        output = self.c2b(output) # (N x B, Y, X, F)
-        if self.grad_fun is not None:
-            output = self.grad_fun(output) # compensate gradients to have same level in
-        # output = get_print_grad_fun(f"{self.name} after concat")(output)
-        return output
-
-class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, inference_idx, filters:int, kernel, compensate_gradient:bool = False, name: str= "SplitNConvToBatch2D", **kwargs):
-        self.n_conv = n_conv
-        self.filters = filters
-        self.kernel = kernel
-        self.inference_idx=inference_idx if isinstance(inference_idx, (list, tuple)) else [inference_idx]
-        self.compensate_gradient=compensate_gradient
-        self.convs = None
-        self.split_layer = None
-        self.inference_split_layer = None
-        super().__init__(name=name, **kwargs)
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({"n_conv": self.n_conv, "filters":self.filters, "kernel":self.kernel, "compensate_gradient":self.compensate_gradient, "inference_idx":self.inference_idx})
-        return config
-
-    def build(self, input_shape):
-        self.convs = [
-            tf.keras.layers.Conv2D(filters=self.filters, kernel_size=1, padding='same', activation="relu", dtype=self.dtype_policy, name=f"Conv_{i}")
-        for i in range(self.n_conv)]
-        self.split_layer = SplitBatch(n_splits=self.n_conv)
-        self.inference_split_layer = SplitBatch(n_splits=len(self.inference_idx))
-
-        if self.compensate_gradient and self.n_conv>1:
-            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
-            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
-        else:
-            self.grad_fun = None
-            self.grad_fun_inv = None
-        super().build(input_shape)
-
-    def call(self, input): # (B, Y, X, F)
-        if self.inference_mode: # only produce one output
-            input_split = self.inference_split_layer(input)
-            items = [self.convs[idx](input_split[i]) for i, idx in enumerate(self.inference_idx)]
-            if len(self.inference_idx)>1:
-                return tf.concat(items, axis=0)
-            else:
-                return items[0]
-        # input = get_print_grad_fun(f"{self.name} before split")(input)
-        if self.grad_fun_inv is not None:
-            input = self.grad_fun_inv(input)
-        input_split = self.split_layer(input)
-        inputs = [conv(input_split[i]) for i, conv in enumerate(self.convs)] # N x (B, Y, X, F)
-        # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
-        output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
-        if self.grad_fun is not None:
-            output = self.grad_fun(output) # compensate gradients to have same level in
-        # output = get_print_grad_fun(f"{self.name} after concat")(output)
-        return output
 
 class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, inference_idx, name: str= "SelectFeature", **kwargs):
@@ -178,6 +32,7 @@ class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
                 return tf.concat(input_split, axis = 0)
             else:
                 return input_concat
+
 
 class InferenceAwareBatchSelector(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, inference_idx:list, train_idx:list=None, merge_batch_dim:bool=True, name: str= "SelectFeature2", **kwargs):
@@ -209,6 +64,7 @@ class InferenceAwareBatchSelector(InferenceLayer, tf.keras.layers.Layer):
                 return tf.reshape(items, [-1, shape[2], shape[3], shape[4]]) if self.merge_batch_dim else items
             else:
                 return input[self.train_idx] if self.merge_batch_dim else input[self.train_idx:self.train_idx+1]
+
 
 class ChannelToBatch(tf.keras.layers.Layer):
     def __init__(self, compensate_gradient:bool = False, add_channel_axis:bool = True, name: str="ChannelToBatch", **kwargs):
@@ -279,34 +135,6 @@ class SplitBatch(tf.keras.layers.Layer):
             return input
 
 
-class SplitReplaceConcatBatch(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_splits:int, replace_idx:int, compensate_gradient:bool = False, name:str="SplitReplaceMergeBatch2D", **kwargs):
-        self.n_splits=n_splits
-        self.replace_idx = replace_idx
-        self.compensate_gradient=compensate_gradient
-        self.split_layer = None
-        super().__init__(name=name, **kwargs)
-
-    def get_config(self):
-      config = super().get_config().copy()
-      config.update({"n_splits": self.n_splits, "compensate_gradient":self.compensate_gradient, "replace_idx":self.replace_idx})
-      return config
-
-    def build(self, input_shape):
-        relace_shape, concat_shape = input_shape
-        self.split_layer = SplitBatch(n_splits=self.n_splits, compensate_gradient=self.compensate_gradient)
-        self.split_layer.build(concat_shape)
-        super().build(input_shape)
-
-    def call(self, input): # (N x B, Y, X, C)
-        replace, concat = input
-        if self.inference_mode: # N = 1
-            return replace
-        else:
-            input_list = self.split_layer(concat)  # N x (B, Y, X, C)
-            input_list[self.replace_idx] = replace
-        return tf.concat(input_list, 0) # (N x B, Y, X, C)
-
 class BatchToChannel(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, n_splits:int, n_splits_inference:int=1, inference_idx=None, compensate_gradient:bool = False, name:str= "BatchToChannel", **kwargs):
         self.n_splits=n_splits
@@ -353,178 +181,6 @@ class BatchToChannel(InferenceLayer, tf.keras.layers.Layer):
         input = tf.transpose(input, perm=self.perm) # (B, Y, X, N, F)
         return tf.reshape(input, target_shape2) # (B, Y, X, N x F)
 
-class FrameDistanceEmbedding(tf.keras.layers.Layer):
-    def __init__(self, input_dim:int, output_dim:int, frame_prev_idx:list, frame_next_idx:list, offset:int = 0 , name:str="FrameDistanceEmbedding", **kwargs):
-        self.input_dim=input_dim
-        self.output_dim=output_dim
-        self.frame_next_idx=frame_next_idx
-        self.frame_prev_idx=frame_prev_idx
-        self.offset=offset
-        assert len(frame_prev_idx) == len(frame_next_idx)
-        self.embedding=None
-        super().__init__(name=name, **kwargs)
-
-    def get_config(self):
-      config = super().get_config().copy()
-      config.update({"input_dim": self.input_dim, "output_dim":self.output_dim, "frame_prev_idx":self.frame_prev_idx, "frame_next_idx":self.frame_next_idx, "offset":self.offset})
-      return config
-
-    def build(self, input_shape):
-        self.embedding = tf.keras.layers.Embedding(input_dim=self.input_dim, output_dim=self.output_dim, dtype=self.dtype_policy)
-        super().build(input_shape)
-
-    def call(self, frame_index): # (B, 1, 1, FW)
-        offset = tf.cast(self.offset, tf.int32)
-        frame_distance = tf.cast( tf.gather(frame_index[:, 0, 0], self.frame_next_idx, axis=-1) - tf.gather(frame_index[:, 0, 0], self.frame_prev_idx, axis=-1), tf.int32 ) + offset # (B, N)
-        frame_distance_emb = self.embedding(frame_distance) # (B, N, C)
-        frame_distance_emb = tf.transpose(frame_distance_emb, perm=[1, 0, 2]) # (N, B, C)
-        frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim]) # ( N x B, 1, 1, C )
-        return frame_distance_emb
-
-
-def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
-    """
-    Compute sinusoidal encoding for temporal distances.
-    Similar to Transformer positional encoding but for temporal distance.
-
-    Args:
-        distances: [..., T] tensor of temporal distances from center
-        embedding_dim: dimension of encoding
-
-    Returns:
-        encoding: [..., T, embedding_dim]
-    """
-    distances = tf.cast(distances, tf.float32)
-    distances = tf.expand_dims(distances, -1)  # [..., T, 1]
-
-    # Position encoding dimensions
-    dim_idx = tf.range(embedding_dim, dtype=tf.float32)
-    dim_idx = dim_idx[None, None, :]  # [1, 1, embedding_dim]
-
-    # Compute frequencies
-    freq = 1.0 / tf.pow(10000.0, (2 * (dim_idx // 2)) / embedding_dim)
-
-    # Compute encoding
-    angle = distances * freq  # [..., T, embedding_dim]
-
-    # Apply sin to even indices, cos to odd
-    encoding = tf.where(
-        tf.equal(dim_idx % 2, 0),
-        tf.sin(angle),
-        tf.cos(angle)
-    )
-
-    return tf.cast(encoding, dtype=dtype)
-
-
-class RelativeTemporalEmbedding(tf.keras.layers.Layer):
-
-    def __init__(self, embedding_dim:int, hidden_dim:int=256, multiplicative:bool=True, l2_reg=1e-5,
-                 **kwargs):
-        self.embedding_dim = embedding_dim
-        self.hidden_dim = hidden_dim
-        self.multiplicative = multiplicative
-        self.l2_reg = l2_reg
-        super().__init__(**kwargs)
-
-    def build(self, input_shape):
-        self.expand_axis = [0, -1] if len(input_shape)==1 else [-1]
-        self.add_embedding = tf.keras.Sequential([
-            tf.keras.layers.Dense(
-                units=self.hidden_dim,
-                activation='tanh',
-                dtype=self.dtype_policy,
-                kernel_initializer='glorot_uniform',
-                bias_initializer=tf.keras.initializers.Zeros(),
-                kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
-            ),
-            tf.keras.layers.Dense(
-                units=self.embedding_dim,
-                activation=None,
-                dtype=self.dtype_policy,
-                kernel_initializer=tf.keras.initializers.Zeros(),
-                bias_initializer=tf.keras.initializers.Zeros(),
-                kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
-            ),
-        ], name="additive_embedding")
-
-        if self.multiplicative:
-            self.mult_embedding = tf.keras.Sequential([
-                tf.keras.layers.Dense(
-                    self.hidden_dim,
-                    activation='tanh',
-                    dtype=self.dtype_policy,
-                    bias_initializer=tf.keras.initializers.Zeros(),
-                    kernel_initializer='glorot_uniform',
-                    kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
-                    name='mult_hidden'
-                ),
-                tf.keras.layers.Dense(
-                    self.embedding_dim,
-                    activation='tanh',
-                    dtype=self.dtype_policy,
-                    bias_initializer=tf.keras.initializers.Zeros(),
-                    kernel_initializer=tf.keras.initializers.Zeros(),
-                    kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg > 0 else None,
-                    name='mult_gate'
-                ),
-                tf.keras.layers.Lambda(lambda x : x + 1)
-            ], name='multiplicative_embedding')
-
-        super().build(input_shape)
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({
-            "hidden_dim": self.hidden_dim,
-            "embedding_dim": self.embedding_dim,
-            "l2_reg": self.l2_reg,
-            "multiplicative": self.multiplicative
-        })
-        return config
-
-    def call(self, distances):
-        """
-        Args:
-            distances: (B, T) or (T) - temporal distances (can be negative for backward)
-
-        Returns:
-            if multiplicative: returns multiplicative and additive embedding (B, T, D) or (T, D)
-            else returns additive embedding only (B, T, D) or (T, D)
-        """
-        distances = tf.expand_dims(tf.cast(distances, self.compute_dtype), axis=self.expand_axis) # B, T, 1
-        additive_emb = self.add_embedding(distances)
-        if self.multiplicative:
-            mult_embedding = self.mult_embedding(distances)
-            return mult_embedding, additive_emb
-        else:
-            return additive_emb
-
-def get_grad_weight_fun(weight):
-    @tf.custom_gradient
-    def wgrad(x):
-        def grad(dy):
-            if isinstance(dy, tuple): #and len(dy)>1
-                #print(f"gradient is tuple of length: {len(dy)}")
-                return (y * weight for y in dy)
-            elif isinstance(dy, list):
-                #print(f"gradient is list of length: {len(dy)}")
-                return [y * weight for y in dy]
-            else:
-                return dy * weight
-        return x, grad
-    return wgrad
-
-def get_print_grad_fun(message):
-    @tf.custom_gradient
-    def wgrad(x):
-        def grad(dy):
-                g_flat = tf.reshape(tf.math.abs(dy), [-1])
-                g_flat = tf.boolean_mask(g_flat, tf.greater(g_flat, 0))
-                print(f"{message} gradient shape: {dy.shape}, non-null: {100 * g_flat.shape[0]/tf.size(dy)}%, value: {tf.math.reduce_mean(g_flat)}")
-                return dy
-        return x, grad
-    return wgrad
 
 class Stack(tf.keras.layers.Layer):
     def __init__(self, axis=-1, **kwargs):
@@ -597,7 +253,8 @@ class Combine(tf.keras.layers.Layer):
                 dtype=self.dtype_policy,
                 padding='same',
                 activation=self.activation,
-                kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 name=self.name+"_conv1x1")
         else:
             self.combine_conv = Conv2DWithDtype(
@@ -606,7 +263,8 @@ class Combine(tf.keras.layers.Layer):
                 dtype=self.dtype_policy,
                 padding='same',
                 activation=self.activation,
-                kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 output_dtype=self.output_dtype,
                 name=self.name+"_conv1x1")
         if self.compensate_gradient:
@@ -625,22 +283,124 @@ class Combine(tf.keras.layers.Layer):
         return x
 
 
-class WeigthedGradient(tf.keras.layers.Layer):
-    def __init__(self, weight, name: str="WeigthedGradient", **kwargs):
+
+class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
+    def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, name: str= "NConvToBatch2D", l2_reg=None, **kwargs):
+        self.n_conv = n_conv
+        self.filters = filters
+        self.inference_idx=inference_idx
+        self.compensate_gradient=compensate_gradient
+        self.l2_reg=l2_reg
         super().__init__(name=name, **kwargs)
-        self.weight = weight
 
-    def call(self, x):
-        return self.op(x)
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient, "inference_idx":self.inference_idx, "l2_reg":self.l2_reg})
+        return config
 
-    @tf.custom_gradient
-    def op(self, x):
-        def grad(*dy):
-            if isinstance(dy, tuple): #and len(dy)>1
-                return (y * self.weight for y in dy)
+    def build(self, input_shape):
+        self.convs = [
+            tf.keras.layers.Conv2D(
+                filters=self.filters,
+                kernel_size=1,
+                padding='same',
+                activation="relu",
+                dtype=self.dtype_policy,
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                name=f"Conv_{i}"
+            )
+        for i in range(self.n_conv)]
+
+        if self.compensate_gradient and self.n_conv>1:
+            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
+            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
+        else:
+            self.grad_fun = None
+            self.grad_fun_inv = None
+        super().build(input_shape)
+
+    def call(self, input): # (B, Y, X, F)
+        if self.inference_mode and self.inference_idx is not None:
+            if isinstance(self.inference_idx, (tuple, list)):
+                items = [self.convs[idx](input) for idx in self.inference_idx]
+                return tf.concat(items, axis=0)
             else:
-                return dy * self.weight
-        return x, grad
+                return self.convs[self.inference_idx](input)
+        # input = get_print_grad_fun(f"{self.name} before split")(input)
+        if self.grad_fun_inv is not None and not self.inference_mode:
+            input = self.grad_fun_inv(input)
+
+        inputs = [conv(input) for conv in self.convs] # N x (B, Y, X, F)
+        # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
+        output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
+        if self.grad_fun is not None and not self.inference_mode:
+            output = self.grad_fun(output) # compensate gradients to have same level in
+        # output = get_print_grad_fun(f"{self.name} after concat")(output)
+        return output
+
+
+class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
+    def __init__(self, n_conv:int, inference_idx, filters:int, kernel, compensate_gradient:bool = False, name: str= "SplitNConvToBatch2D", l2_reg=None, **kwargs):
+        self.n_conv = n_conv
+        self.filters = filters
+        self.kernel = kernel
+        self.inference_idx=inference_idx if isinstance(inference_idx, (list, tuple)) else [inference_idx]
+        self.compensate_gradient=compensate_gradient
+        self.convs = None
+        self.split_layer = None
+        self.inference_split_layer = None
+        self.l2_reg=l2_reg
+        super().__init__(name=name, **kwargs)
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({"n_conv": self.n_conv, "filters":self.filters, "kernel":self.kernel, "compensate_gradient":self.compensate_gradient, "inference_idx":self.inference_idx, "l2_reg":self.l2_reg})
+        return config
+
+    def build(self, input_shape):
+        self.convs = [
+            tf.keras.layers.Conv2D(
+                filters=self.filters,
+                kernel_size=1,
+                padding='same',
+                activation="relu",
+                dtype=self.dtype_policy,
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                name=f"Conv_{i}"
+            )
+        for i in range(self.n_conv)]
+        self.split_layer = SplitBatch(n_splits=self.n_conv)
+        self.inference_split_layer = SplitBatch(n_splits=len(self.inference_idx))
+
+        if self.compensate_gradient and self.n_conv>1:
+            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
+            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
+        else:
+            self.grad_fun = None
+            self.grad_fun_inv = None
+        super().build(input_shape)
+
+    def call(self, input): # (B, Y, X, F)
+        if self.inference_mode: # only produce one output
+            input_split = self.inference_split_layer(input)
+            items = [self.convs[idx](input_split[i]) for i, idx in enumerate(self.inference_idx)]
+            if len(self.inference_idx)>1:
+                return tf.concat(items, axis=0)
+            else:
+                return items[0]
+        # input = get_print_grad_fun(f"{self.name} before split")(input)
+        if self.grad_fun_inv is not None:
+            input = self.grad_fun_inv(input)
+        input_split = self.split_layer(input)
+        inputs = [conv(input_split[i]) for i, conv in enumerate(self.convs)] # N x (B, Y, X, F)
+        # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
+        output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
+        if self.grad_fun is not None:
+            output = self.grad_fun(output) # compensate gradients to have same level in
+        # output = get_print_grad_fun(f"{self.name} after concat")(output)
+        return output
 
 
 class ResConv2D(tf.keras.layers.Layer):
@@ -655,7 +415,6 @@ class ResConv2D(tf.keras.layers.Layer):
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
-            split_conv:bool = False,
             name: str="ResConv2D",
             **kwargs
     ):
@@ -669,16 +428,15 @@ class ResConv2D(tf.keras.layers.Layer):
         self.weighted_sum = weighted_sum
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
-        self.split_conv=split_conv
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype, "split_conv":self.split_conv})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
         input_channels = int(input_shape[-1])
-        conv_fun = WSConv2D if self.weight_scaled else (SplitConv2D if self.split_conv else tf.keras.layers.Conv2D)
+        conv_fun = WSConv2D if self.weight_scaled else  tf.keras.layers.Conv2D
         self.conv1 = conv_fun(
             filters=input_channels,
             kernel_size=self.kernel_size,
@@ -687,7 +445,8 @@ class ResConv2D(tf.keras.layers.Layer):
             name=f"Conv1_{ker_size_to_string(self.kernel_size)}",
             dtype=self.dtype_policy,
             activation="linear",
-            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
+            kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
         )
         self.conv2 = conv_fun(
             filters=input_channels,
@@ -698,7 +457,8 @@ class ResConv2D(tf.keras.layers.Layer):
             dtype=self.dtype_policy,
             name=f"Conv2_{ker_size_to_string(self.kernel_size)}",
             activation="linear",
-            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
+            kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
         )
         self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
         self.activation_layer = tf.keras.activations.get(self.activation)
@@ -771,7 +531,8 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             dtype=self.dtype_policy,
             name=f"Conv",
             activation="linear",
-            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None
+            kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
@@ -792,9 +553,12 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
 
 
 class Conv2DWithDtype(tf.keras.layers.Conv2D):
-    def __init__(self, *args, output_dtype:str=None, **kwargs):
+    def __init__(self, *args, l2_reg:float=0, output_dtype:str=None, **kwargs):
         self._activation = kwargs.pop('activation', None)
-        super(Conv2DWithDtype, self).__init__(*args, activation=None, **kwargs)
+        self.l2_reg = l2_reg
+        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
+        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
+        super(Conv2DWithDtype, self).__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, **kwargs)
         self.output_dtype = output_dtype
         self.activation = None  # Will be set in build()
 
@@ -815,6 +579,7 @@ class Conv2DWithDtype(tf.keras.layers.Conv2D):
         config = super(Conv2DWithDtype, self).get_config()
         config.update({
             'output_dtype': self.output_dtype,
+            'l2_reg':self.l2_reg,
             'activation': self._activation if isinstance(self._activation, str) else tf.keras.activations.serialize(self._activation)
         })
         return config
@@ -857,7 +622,8 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             padding='same',
             dtype=self.dtype_policy,
             activation="linear",
-            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None,
+            kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             name=f"tConv{ker_size_to_string(self.kernel_size)}",
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
@@ -880,9 +646,12 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
 
 
 class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
-    def __init__(self, *args, output_dtype=None, **kwargs):
+    def __init__(self, *args, output_dtype=None, l2_reg:float=0, **kwargs):
         self._activation = kwargs.pop('activation', None)
-        super(Conv2DTransposeWithDtype, self).__init__(*args, activation=None, **kwargs)
+        self.l2_reg = l2_reg
+        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
+        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
+        super(Conv2DTransposeWithDtype, self).__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, **kwargs)
         self.output_dtype = output_dtype
         self.activation = None  # Will be set in build()
 
@@ -903,6 +672,7 @@ class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
         config = super(Conv2DTransposeWithDtype, self).get_config()
         config.update({
             'output_dtype': self.output_dtype,
+            'l2_reg':self.l2_reg,
             'activation': self._activation if isinstance(self._activation, str) else tf.keras.activations.serialize(self._activation)
         })
         return config
@@ -924,96 +694,6 @@ class UpSampling2DWithDtype(tf.keras.layers.UpSampling2D):
         config.update({'output_dtype': self.output_dtype})
         return config
 
-
-class SplitConv2D(tf.keras.layers.Layer):
-    def __init__(
-            self,
-            filters:int=0,
-            kernel_size: int=3,
-            dilation_rate: int = 1,
-            strides: int = 1,
-            dropout_rate:float = 0,
-            batch_norm : bool = False,
-            activation:str = "relu",
-            padding:str = "same",
-            kernel_regularizer = None,
-            name: str="SplitConv2D",
-            **kwargs
-    ):
-        super().__init__(name=name, **kwargs)
-        self.kernel_size = kernel_size
-        self.dilation = dilation_rate
-        self.activation=activation
-        self.dropout_rate=dropout_rate
-        self.batch_norm=batch_norm
-        self.strides=strides
-        self.padding=padding
-        self.kernel_regularizer = kernel_regularizer
-
-    def get_config(self):
-      config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "padding":self.padding, "l2_reg":self.l2_reg})
-      return config
-
-    def build(self, input_shape):
-        try:
-            input_shape = input_shape.as_list()
-        except:
-            pass
-        input_filters = input_shape[-1]
-        assert input_filters % 3==0, f"number of filters must be divisible by 3"
-        self.filters = input_filters // 3
-        conv_fun = lambda name: tf.keras.layers.Conv2D(
-            filters=self.filters,
-            kernel_size=self.kernel_size,
-            dilation_rate = self.dilation,
-            strides=self.strides,
-            padding=self.padding,
-            dtype=self.dtype_policy,
-            name=name,
-            activation="linear",
-            kernel_regularizer=self.kernel_regularizer
-        )
-        self.convs = [conv_fun(f"Conv{i}") for i in range(3)]
-        self.activation_layer = tf.keras.activations.get(self.activation)
-        if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
-        if self.batch_norm:
-            self.bn = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-        super().build(input_shape)
-
-    def call(self, input, training=None):
-        inputs = tf.split(input, 3, axis=-1)
-        x = tf.concat([ self.convs[i](tf.concat([inputs[i], inputs[(i+1)%3]], -1)) for i in range(3) ], -1)
-        if self.batch_norm:
-            x = self.bn(x, training = training)
-        if self.dropout_rate>0:
-            x = self.drop(x, training = training)
-        return self.activation_layer(x)
-
-
-def _standardize_weight(weight, gain, eps):
-    mean = tf.math.reduce_mean(weight, axis=(0, 1, 2), keepdims=True)
-    var = tf.math.reduce_mean(tf.math.square(weight-mean), axis=(0, 1, 2), keepdims=True)
-    fan_in = np.prod(weight.shape[:-1])
-    #scale = tf.math.sqrt(tf.math.maximum(var * fan_in, eps))
-    scale = tf.math.sqrt(var * fan_in + eps)
-    weight = (weight - mean) / scale
-    if gain is not None:
-        weight = weight * gain
-    return weight
-
-def get_gamma(activation):
-    if activation.lower()=="relu":
-        return 1.
-        return 1. / ( (0.5 * (1 - 1 / np.pi)) ** 0.5)
-    elif activation.lower()=="sliu":
-        return .5595
-    elif activation.lower()=="linear":
-        return 1.
-    else:
-        return 1.
-        #raise ValueError(f"activation {activation} not supported yet")
 
 class WSConv2D(tf.keras.layers.Conv2D):
     def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, kernel_initializer="he_normal", output_dtype:str=None, **kwargs):
@@ -1075,6 +755,7 @@ class WSConv2D(tf.keras.layers.Conv2D):
             x = self.activation_layer(x) #* self.gamma
         return x
 
+
 class WeightedSum(tf.keras.layers.Layer):
     def __init__(self, per_channel=True, **kwargs):
         super().__init__(**kwargs)
@@ -1107,10 +788,323 @@ class WeightedSum(tf.keras.layers.Layer):
         mul = tf.math.multiply(tf.stack(inputs, axis = -1), weights)
         return tf.math.reduce_sum(mul, axis=-1, keepdims = False)
 
+
 def ker_size_to_string(ker_size, dims=2):
     if not isinstance(ker_size, (list, tuple)):
         ker_size = ensure_multiplicity(dims, ker_size)
     return 'x'.join([str(k) for k in ker_size])
+
+
+def _standardize_weight(weight, gain, eps):
+    mean = tf.math.reduce_mean(weight, axis=(0, 1, 2), keepdims=True)
+    var = tf.math.reduce_mean(tf.math.square(weight-mean), axis=(0, 1, 2), keepdims=True)
+    fan_in = np.prod(weight.shape[:-1])
+    #scale = tf.math.sqrt(tf.math.maximum(var * fan_in, eps))
+    scale = tf.math.sqrt(var * fan_in + eps)
+    weight = (weight - mean) / scale
+    if gain is not None:
+        weight = weight * gain
+    return weight
+
+
+def get_gamma(activation):
+    if activation.lower()=="relu":
+        return 1.
+        return 1. / ( (0.5 * (1 - 1 / np.pi)) ** 0.5)
+    elif activation.lower()=="sliu":
+        return .5595
+    elif activation.lower()=="linear":
+        return 1.
+    else:
+        return 1.
+        #raise ValueError(f"activation {activation} not supported yet")
+
+
+class ScheduledDropout(tf.keras.layers.Layer):
+    """
+    Dropout layer with scheduled rate based on training progress.
+    """
+
+    def __init__(self,
+                 rate: float,  # target rate (min_rate)
+                 max_rate: float,  # rate at training start
+                 max_progress: float = 1.0,  # When this layer reaches rate
+                 noise_shape=None,  # Optional: for structured dropout
+                 seed=None,  # Optional: for reproducibility
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.min_rate = rate
+        self.max_rate = max_rate
+        self.max_progress = max_progress
+        self.noise_shape = noise_shape
+        self.seed = seed
+
+        # Training progress variable [0, 1] - set by callback
+        self.progress = None
+
+    def build(self, input_shape):
+        super().build(input_shape)
+        # Create progress variable (updated by callback)
+        self.progress = self.add_weight(
+            name='progress',
+            shape=(),
+            initializer=tf.keras.initializers.Constant(1.0),
+            trainable=False,
+            dtype=tf.float32
+        )
+
+    def call(self, inputs, training=None):
+        if training:
+            return tf.nn.dropout(
+                inputs,
+                rate=self.get_current_rate(),
+                noise_shape=self.noise_shape,
+                seed=self.seed
+            )
+        return inputs
+
+    def set_progress(self, progress_value):
+        """Set global training progress [0, 1] - called by callback"""
+        self.progress.assign(tf.clip_by_value(progress_value, 0.0, 1.0))
+
+    def get_current_rate(self):
+        """Get current dropout rate"""
+        # Handle case where progress hasn't been initialized yet
+        if self.progress is None:
+            return self.min_rate  # Return max_rate, not self.rate
+
+        # Calculate layer-specific progress
+        layer_progress = tf.minimum(1.0, self.progress / self.max_progress)
+
+        # Interpolate from max_rate to min_rate
+        current_rate = self.max_rate - (self.max_rate - self.min_rate) * layer_progress
+        return current_rate
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "rate": float(self.min_rate),
+            "max_rate": float(self.max_rate),
+            "max_progress": float(self.max_progress),
+            "noise_shape": self.noise_shape,
+            "seed": self.seed,
+        })
+        return config
+
+## Embeddings
+
+class FrameDistanceEmbedding(tf.keras.layers.Layer):
+    def __init__(self, input_dim:int, output_dim:int, frame_prev_idx:list, frame_next_idx:list, offset:int = 0, l2_reg:float=1e-5 , name:str="FrameDistanceEmbedding", **kwargs):
+        self.input_dim=input_dim
+        self.output_dim=output_dim
+        self.frame_next_idx=frame_next_idx
+        self.frame_prev_idx=frame_prev_idx
+        self.offset=offset
+        self.l2_reg=l2_reg
+        assert len(frame_prev_idx) == len(frame_next_idx)
+        self.embedding=None
+        super().__init__(name=name, **kwargs)
+
+    def get_config(self):
+      config = super().get_config().copy()
+      config.update({"input_dim": self.input_dim, "output_dim":self.output_dim, "frame_prev_idx":self.frame_prev_idx, "frame_next_idx":self.frame_next_idx, "offset":self.offset, "l2_reg":self.l2_reg})
+      return config
+
+    def build(self, input_shape):
+        self.embedding = tf.keras.layers.Embedding(
+            input_dim=self.input_dim,
+            output_dim=self.output_dim,
+            embeddings_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg, axis=1) if self.l2_reg > 0 else None,
+            dtype=self.dtype_policy
+        )
+        super().build(input_shape)
+
+    def call(self, frame_index): # (B, 1, 1, FW)
+        offset = tf.cast(self.offset, tf.int32)
+        frame_distance = tf.cast( tf.gather(frame_index[:, 0, 0], self.frame_next_idx, axis=-1) - tf.gather(frame_index[:, 0, 0], self.frame_prev_idx, axis=-1), tf.int32 ) + offset # (B, N)
+        frame_distance_emb = self.embedding(frame_distance) # (B, N, C)
+        frame_distance_emb = tf.transpose(frame_distance_emb, perm=[1, 0, 2]) # (N, B, C)
+        frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim]) # ( N x B, 1, 1, C )
+        return frame_distance_emb
+
+
+def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
+    """
+    Compute sinusoidal encoding for temporal distances.
+    Similar to Transformer positional encoding but for temporal distance.
+
+    Args:
+        distances: [..., T] tensor of temporal distances from center
+        embedding_dim: dimension of encoding
+
+    Returns:
+        encoding: [..., T, embedding_dim]
+    """
+    distances = tf.cast(distances, tf.float32)
+    distances = tf.expand_dims(distances, -1)  # [..., T, 1]
+
+    # Position encoding dimensions
+    dim_idx = tf.range(embedding_dim, dtype=tf.float32)
+    dim_idx = dim_idx[None, None, :]  # [1, 1, embedding_dim]
+
+    # Compute frequencies
+    freq = 1.0 / tf.pow(10000.0, (2 * (dim_idx // 2)) / embedding_dim)
+
+    # Compute encoding
+    angle = distances * freq  # [..., T, embedding_dim]
+
+    # Apply sin to even indices, cos to odd
+    encoding = tf.where(
+        tf.equal(dim_idx % 2, 0),
+        tf.sin(angle),
+        tf.cos(angle)
+    )
+
+    return tf.cast(encoding, dtype=dtype)
+
+
+class RelativeTemporalEmbedding(tf.keras.layers.Layer):
+    def __init__(self, embedding_dim:int, hidden_dim:int=256, multiplicative:bool=True, l2_reg=1e-5, **kwargs):
+        self.embedding_dim = embedding_dim
+        self.hidden_dim = hidden_dim
+        self.multiplicative = multiplicative
+        self.l2_reg = l2_reg
+        super().__init__(**kwargs)
+
+    def build(self, input_shape):
+        self.expand_axis = [0, -1] if len(input_shape)==1 else [-1]
+        self.add_embedding = tf.keras.Sequential([
+            tf.keras.layers.Dense(
+                units=self.hidden_dim,
+                activation='tanh',
+                dtype=self.dtype_policy,
+                kernel_initializer='glorot_uniform',
+                bias_initializer=tf.keras.initializers.Zeros(),
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            ),
+            tf.keras.layers.Dense(
+                units=self.embedding_dim,
+                activation=None,
+                dtype=self.dtype_policy,
+                kernel_initializer=tf.keras.initializers.Zeros(),
+                bias_initializer=tf.keras.initializers.Zeros(),
+                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            ),
+        ], name="additive_embedding")
+
+        if self.multiplicative:
+            self.mult_embedding = tf.keras.Sequential([
+                tf.keras.layers.Dense(
+                    self.hidden_dim,
+                    activation='tanh',
+                    dtype=self.dtype_policy,
+                    bias_initializer=tf.keras.initializers.Zeros(),
+                    kernel_initializer='glorot_uniform',
+                    kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                    bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                    name='mult_hidden'
+                ),
+                tf.keras.layers.Dense(
+                    self.embedding_dim,
+                    activation='tanh',
+                    dtype=self.dtype_policy,
+                    bias_initializer=tf.keras.initializers.Zeros(),
+                    kernel_initializer=tf.keras.initializers.Zeros(),
+                    kernel_regularizer=HybridThresholdL2Regularizer(directional_strength = self.l2_reg * 10, elementwise_strength = self.l2_reg) if self.l2_reg > 0 else None,
+                    bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                    name='mult_gate'
+                ),
+                tf.keras.layers.Lambda(lambda x : x + 1)
+            ], name='multiplicative_embedding')
+
+        super().build(input_shape)
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "hidden_dim": self.hidden_dim,
+            "embedding_dim": self.embedding_dim,
+            "l2_reg": self.l2_reg,
+            "multiplicative": self.multiplicative
+        })
+        return config
+
+    def call(self, distances):
+        """
+        Args:
+            distances: (B, T) or (T) - temporal distances (can be negative for backward)
+
+        Returns:
+            if multiplicative: returns multiplicative and additive embedding (B, T, D) or (T, D)
+            else returns additive embedding only (B, T, D) or (T, D)
+        """
+        distances = tf.expand_dims(tf.cast(distances, self.compute_dtype), axis=self.expand_axis) # B, T, 1
+        additive_emb = self.add_embedding(distances)
+        if self.multiplicative:
+            mult_embedding = self.mult_embedding(distances)
+            return mult_embedding, additive_emb
+        else:
+            return additive_emb
+
+
+# Gradient manipulation
+class StopGradient(tf.keras.layers.Layer):
+    def __init__(self, name:str="StopGradient"):
+        super().__init__(name=name)
+
+    def call(self, input):
+        return tf.stop_gradient( input, name=self.name )
+
+
+class WeigthedGradient(tf.keras.layers.Layer):
+    def __init__(self, weight, name: str="WeigthedGradient", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.weight = weight
+
+    def call(self, x):
+        return self.op(x)
+
+    @tf.custom_gradient
+    def op(self, x):
+        def grad(*dy):
+            if isinstance(dy, tuple): #and len(dy)>1
+                return (y * self.weight for y in dy)
+            else:
+                return dy * self.weight
+        return x, grad
+
+
+
+def get_grad_weight_fun(weight):
+    @tf.custom_gradient
+    def wgrad(x):
+        def grad(dy):
+            if isinstance(dy, tuple): #and len(dy)>1
+                #print(f"gradient is tuple of length: {len(dy)}")
+                return (y * weight for y in dy)
+            elif isinstance(dy, list):
+                #print(f"gradient is list of length: {len(dy)}")
+                return [y * weight for y in dy]
+            else:
+                return dy * weight
+        return x, grad
+    return wgrad
+
+
+def get_print_grad_fun(message):
+    @tf.custom_gradient
+    def wgrad(x):
+        def grad(dy):
+                g_flat = tf.reshape(tf.math.abs(dy), [-1])
+                g_flat = tf.boolean_mask(g_flat, tf.greater(g_flat, 0))
+                print(f"{message} gradient shape: {dy.shape}, non-null: {100 * g_flat.shape[0]/tf.size(dy)}%, value: {tf.math.reduce_mean(g_flat)}")
+                return dy
+        return x, grad
+    return wgrad
+
+
 
 # util class to avoid that a tf.Variable is saved into the model weights
 class HideVariableWrapper:
@@ -1154,3 +1148,44 @@ class HideVariableWrapper:
 
     def __array__(self):
         return self.value.numpy()
+
+
+@tf.keras.utils.register_keras_serializable(package='Custom', name='HybridThresholdL2Regularizer')
+class HybridThresholdL2Regularizer(tf.keras.regularizers.Regularizer):
+    def __init__(self,
+                 directional_threshold:float=2.,
+                 directional_strength:float=1e-3,
+                 elementwise_threshold:float=10.0,
+                 elementwise_strength:float=1e-4,
+                 axis=None):
+        self.directional_threshold = directional_threshold
+        self.directional_strength = directional_strength
+        self.elementwise_threshold = elementwise_threshold
+        self.elementwise_strength = elementwise_strength
+        self.axis=axis
+
+    def __call__(self, weights):
+        norm_axis = tuple(range(weights.shape.rank - 1)) if self.axis is None else (self.axis if isinstance(self.axis, (tuple, list)) else (self.axis,) )
+        if self.directional_strength > 0 and len(norm_axis) > 0:
+            norms = tf.sqrt(tf.reduce_sum(tf.square(weights), axis=norm_axis))
+            directional_excess = tf.nn.relu(norms - self.directional_threshold)
+            directional_penalty = tf.reduce_sum(tf.square(directional_excess))
+        else:
+            directional_penalty = 0
+        if self.elementwise_strength > 0:
+            abs_weights = tf.abs(weights)
+            elementwise_excess = tf.nn.relu(abs_weights - self.elementwise_threshold)
+            elementwise_penalty = tf.reduce_sum(tf.square(elementwise_excess))
+        else:
+            elementwise_penalty = 0
+        return self.directional_strength * directional_penalty + self.elementwise_strength * elementwise_penalty
+
+    def get_config(self):
+        return {
+            "directional_threshold":self.directional_threshold,
+            "directional_strength":self.directional_strength,
+            "elementwise_threshold":self.elementwise_threshold,
+            "elementwise_strength":self.elementwise_strength,
+            "axis":self.axis
+        }
+

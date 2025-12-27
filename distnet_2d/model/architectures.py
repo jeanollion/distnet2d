@@ -55,7 +55,7 @@ class ArchBase:
                  early_downsampling:bool = True,
                  self_attention: int = 0,
                  scale_edm:bool = False,
-                 batch_norm:bool = True, dropout:float=0.2, l2_reg:float=0,
+                 batch_norm:bool = True, dropout:float=0.2, l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",  #conv, wsconv
                  attention_filters:int = 0, attention:int = 0, attention_positional_encoding:str="2d",
                  skip_connections=[-1], skip_stop_gradient:bool = False,
@@ -88,6 +88,7 @@ class ArchBase:
         self.batch_norm = batch_norm
         self.dropout = dropout
         self.l2_reg=l2_reg
+        self.position_encoding_l2_reg=position_encoding_l2_reg
         self.predict_fw=predict_fw
         self.predict_edm_derivatives=predict_edm_derivatives
         self.predict_cdm_derivatives=predict_cdm_derivatives
@@ -332,11 +333,11 @@ class Blend(ArchBase):
         self.blending_filter_factor = blending_filter_factor
         self.feature_blending_settings = [
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
-             "batch_norm": False, "split_conv": False},
+             "batch_norm": False},
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
-             "batch_norm": False, "split_conv": False},
+             "batch_norm": False},
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
-             "batch_norm": False, "split_conv": False}
+             "batch_norm": False}
         ]
 
 
@@ -401,11 +402,11 @@ class TemPy(ArchBase):
         ker4_fd = self.feature_decoder_settings[0]["kernel_size"]
         self.feature_blending_settings = [
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
-             "batch_norm": False, "split_conv": False},
+             "batch_norm": False},
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
-             "batch_norm": False, "split_conv": False},
+             "batch_norm": False},
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
-             "batch_norm": False, "split_conv": False}
+             "batch_norm": False}
         ]
         # to be defined:
         self.attention_spatial_radius = None

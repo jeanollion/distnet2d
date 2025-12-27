@@ -7,7 +7,8 @@ from collections import defaultdict
 
 from tensorflow.keras.optimizers.schedules import CosineDecay, LearningRateSchedule
 
-from distnet_2d.model.layers import HideVariableWrapper
+from distnet_2d.model.layers import HideVariableWrapper, ScheduledDropout
+
 
 class CosineDecayResume(LearningRateSchedule):
     def __init__(
@@ -210,3 +211,78 @@ class GradientMonitorCallback(tf.keras.callbacks.Callback):
             self.epoch_stats[layer_name]['max_norm'].assign(-float('inf'))
             self.epoch_stats[layer_name]['min_norm'].assign(float('inf'))
             self.epoch_stats[layer_name]['mean_norm'].assign(0.0)
+
+
+class ScheduledDropoutCallback(tf.keras.callbacks.Callback):
+    """
+    Automatically discovers ScheduledDropout layers and updates their progress
+    based on training epochs. Each layer handles its own schedule via max_progress.
+    """
+
+    def __init__(self, n_epochs, verbose=1):
+        """
+        Args:
+            n_epochs: Total number of training epochs
+            verbose: 0, 1, or 2 for logging level
+        """
+        super().__init__()
+        self.n_epochs = n_epochs
+        self.verbose = verbose
+
+        self.dropout_layers = []
+
+    @staticmethod
+    def _find_dropout_layers(layer):
+        """
+        Recursively find all ScheduledDropout layers in a model.
+
+        Args:
+            layer: A Keras layer or model
+
+        Returns:
+            List of ScheduledDropout layers
+        """
+        if isinstance(layer, ScheduledDropout):
+            return [layer]
+
+        # Handle nested models/layers
+        layers = []
+        if hasattr(layer, 'layers'):
+            for sublayer in layer.layers:
+                layers.extend(ScheduledDropoutCallback._find_dropout_layers(sublayer))
+        return layers
+
+    def on_train_begin(self, logs=None):
+        """Scan model and register all ScheduledDropout layers"""
+        self.dropout_layers = self._find_dropout_layers(self.model)
+
+        if self.verbose > 0:
+            print(f"\n{'=' * 70}")
+            print(f"CurriculumDropoutScheduler initialized")
+            print(f"{'=' * 70}")
+            print(f"Found {len(self.dropout_layers)} ScheduledDropout layer(s)")
+            print(f"Total epochs: {self.n_epochs}")
+            print(f"\nLayer configurations:")
+
+            for i, layer in enumerate(self.dropout_layers):
+                completion_epoch = int(layer.max_progress * self.n_epochs)
+                print(f"  {layer.name}:")
+                print(f"    min_rate={layer.min_rate:.3f}, max_rate={layer.max_rate:.3f}")
+                print(f"    max_progress={layer.max_progress:.3f} → completes at epoch {completion_epoch}")
+
+            print(f"{'=' * 70}\n")
+
+    def on_epoch_begin(self, epoch, logs=None):
+        """Update global progress at the beginning of each epoch"""
+        if not self.dropout_layers:
+            return
+
+        # Global training progress [0, 1]
+        global_progress = epoch / self.n_epochs if self.n_epochs > 0 else 1.
+
+        # Update all layers with the same global progress
+        # Each layer will compute its own rate based on its max_progress
+        for layer in self.dropout_layers:
+            layer.set_progress(global_progress)
+            if self.verbose > 0 and epoch % 100  == 0:
+                print(f"epoch: {epoch} layer: {layer.name} dropout rate: {layer.get_current_rate()}")

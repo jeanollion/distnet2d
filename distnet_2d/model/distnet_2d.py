@@ -12,13 +12,13 @@ from .architectures import ArchBase, Blend, TemA, TemPy
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, \
     HideVariableWrapper, \
-    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, SplitReplaceConcatBatch, SplitNConvToBatch2D, \
-    InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, FusedNConvToBatch2D
+    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
+    InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, HybridThresholdL2Regularizer, \
+    ScheduledDropout
 import numpy as np
 
 from .local_spatial_attention import LocalSpatialAttention
 from .spatial_attention import SpatialAttention2D
-from .local_spatio_temporal_attention import LocalSpatioTemporalAttention, LocalSpatioTemporalAttentionPatch
 from .temporal_attention import TemporalAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives, \
@@ -257,7 +257,7 @@ class DiSTNetModel(tf.keras.Model):
 
             losses["loss"] = loss
 
-            # print(f"reg loss: {len(self.losses)} values: {self.losses}")
+            #print(f"reg loss: {len(self.losses)} values: {self.losses}")
             if len(self.losses)>0:
                 loss += tf.add_n(self.losses) # regularizers
 
@@ -461,7 +461,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         no_residual_layer = []
         last_input_filters = arch.n_inputs
         for l_idx, param_list in enumerate(arch.encoder_settings):
-            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window), downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx)
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window), downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx, total_layers=len(arch.encoder_settings))
             last_input_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
@@ -570,12 +570,12 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                         fidx_prev.append(arch.frame_window)
                         fidx_next.append(c)
             if arch.frame_aware:
-                frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next)(frame_index)
+                frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next, l2_reg=arch.position_encoding_l2_reg)(frame_index)
 
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
         if isinstance(arch, TemPy) and arch.frame_window > 0:
             watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
-                               window_size=arch.attention_spatial_radius,
+                               window_size=arch.attention_spatial_radius, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg,
                                add_distance_embedding=True, skip_connection=True)
             v7 = True
             sa = True
@@ -584,14 +584,14 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
                 features_batch = sa(features_batch) # T x B, Y, X, C
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
-            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, verbose=False)
+            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
             blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
             feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
             for op in feature_blending_convs:
                 blended_features = op(blended_features)
             if v7: # TODO USE MODIFIED VERSION FOR V7
-                features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True)([features_batch_r, blended_features])
-                feature_pairs_batch = TemporalFeaturePairReconstructor(feature_filters, prev_idx=fidx_prev, next_idx=fidx_next, inference_idx=inference_pair_idx, compensate_gradient=True)([features_batch_r, blended_features_level1_r, blended_features])
+                features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True, l2_reg=arch.l2_reg)([features_batch_r, blended_features])
+                feature_pairs_batch = TemporalFeaturePairReconstructor(feature_filters, prev_idx=fidx_prev, next_idx=fidx_next, inference_idx=inference_pair_idx, compensate_gradient=True, l2_reg=arch.l2_reg)([features_batch_r, blended_features_level1_r, blended_features])
             else: # v6
                 inference_feature_idx = list( set([fidx_prev[pidx] for pidx in inference_pair_idx] + [fidx_next[pidx] for pidx in inference_pair_idx]))
                 inference_feature_idx.sort()
@@ -694,8 +694,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 for op in feature_blending_convs:
                     combined_features = op(combined_features)
 
-                blended_features_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
-                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
+                blended_features_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, l2_reg=arch.l2_reg, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
+                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters, l2_reg=arch.l2_reg,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
             else:
                 blended_features_batch = combined_features
 
@@ -745,7 +745,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 outputs.extend(output_per_dec.values())
         return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if getattr(arch, "attention", 0) > 0 or arch.self_attention > 0 else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=arch.predict_cdm_derivatives, predict_edm_derivatives=arch.predict_edm_derivatives, category_number=arch.category_number, **kwargs)
 
-def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=1):
+
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, total_layers:int=2):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
@@ -770,6 +771,8 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
             res = x
             if skip_stop_gradient:
                 res = stop_gradient(res, parent_name = name)
+            max_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx) / (total_layers - 1) # deepest skip reaches minimal rate before shallowest skip
+            res = ScheduledDropout(rate=0.05, max_rate=0.9, max_progress=max_progress)(res) # pushes the network to use deepest features
             n_splits, inference_idx = skip_parameters
             assert inference_idx<n_splits, f"invalid inference idx: {inference_idx} must be lower than n_splits: {n_splits}"
             feature_skip = InferenceAwareSelector(inference_idx=inference_idx, name=f"{name}_SelectFeature")
@@ -779,6 +782,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
             res = None
         return down, res
     return op, total_contraction, residual_filters, out_filters
+
 
 def decoder_op(
             filters: int,
@@ -834,7 +838,7 @@ def decoder_op(
             elif batch_norm or dropout_rate>0:
                 convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==n_conv-1 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}"if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
             else:
-                convs = [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
+                convs = [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
         wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
         def op(input):
             down, res = input
@@ -876,8 +880,7 @@ def upsampling_op(
             elif batch_norm or dropout_rate>0:
                 upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
             else:
-                kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None
-                upsample = Conv2DTransposeWithDtype(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, kernel_regularizer=kernel_regularizer, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
+                upsample = Conv2DTransposeWithDtype(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, l2_reg = l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
@@ -885,7 +888,7 @@ def upsampling_op(
             if batch_norm:
                 conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation )
             else:
-                conv = Conv2DWithDtype(filters=filters, kernel_size=kernel_size, strides=1, padding='same', output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, use_bias=use_bias, activation=activation, kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None )
+                conv = Conv2DWithDtype(filters=filters, kernel_size=kernel_size, strides=1, padding='same', output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, use_bias=use_bias, activation=activation, l2_reg=l2_reg )
         def op(input):
             x = upsample(input)
             if conv is not None:
@@ -946,12 +949,12 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="2D", attention_filters:int=None, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, split_conv:bool = False, num_attention_heads:int=1, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="2D", attention_filters:int=None, dropout_rate:float=0, weight_scaled:bool=False, batch_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, num_attention_heads:int=1, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
         raise NotImplementedError("ResConv1D is not implemented")
     elif op =="res2d" or op == "resconv2d":
-        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, split_conv=split_conv, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
+        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, weight_scaled=weight_scaled, batch_norm=batch_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
         self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, attention_filters=attention_filters, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
@@ -965,5 +968,6 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
     elif batch_norm or dropout_rate>0:
         return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
     else:
-        kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg>0 else None
-        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
+        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=l2_reg * 10, elementwise_strength=l2_reg) if l2_reg > 0 else None
+        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=l2_reg) if l2_reg > 0 else None
+        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
