@@ -256,7 +256,7 @@ class ScheduledDropoutCallback(tf.keras.callbacks.Callback):
         """Scan model and register all ScheduledDropout layers"""
         self.dropout_layers = self._find_dropout_layers(self.model)
 
-        if self.verbose > 0:
+        if self.verbose > 1:
             print(f"\n{'=' * 70}")
             print(f"CurriculumDropoutScheduler initialized")
             print(f"{'=' * 70}")
@@ -331,7 +331,7 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
         """Scan model and register all ScheduledGradientWeight layers"""
         self.gradient_layers = self._find_gradient_layers(self.model)
 
-        if self.verbose > 0:
+        if self.verbose > 1:
             print(f"\n{'=' * 70}")
             print(f"ScheduledGradientCallback initialized")
             print(f"{'=' * 70}")

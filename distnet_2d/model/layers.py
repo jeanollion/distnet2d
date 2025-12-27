@@ -1131,11 +1131,11 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
         def grad(dy):
             # Handle different gradient types
             if isinstance(dy, tuple):
-                return tuple(y * weight for y in dy), None
+                return tuple(y * tf.cast(weight, y.dtype) for y in dy), None
             elif isinstance(dy, list):
-                return [y * weight for y in dy], None
+                return [y * tf.cast(weight, y.dtype) for y in dy], None
             else:
-                return dy * weight, None
+                return dy * tf.cast(weight, dy.dtype), None
 
         return x, grad
 

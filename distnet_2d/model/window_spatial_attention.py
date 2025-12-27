@@ -1,7 +1,8 @@
 import tensorflow as tf
 import numpy as np
-from skfmm import distance
 from distnet_2d.model.layers import InferenceLayer, HybridThresholdL2Regularizer
+import warnings
+warnings.filterwarnings("ignore", message="Skipping loop optimization for Merge node with control input")
 
 
 class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
