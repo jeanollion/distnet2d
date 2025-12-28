@@ -14,7 +14,7 @@ from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2D
     HideVariableWrapper, \
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
     InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, HybridThresholdL2Regularizer, \
-    ScheduledDropout, ScheduledGradientWeight
+    ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter
 import numpy as np
 
 from .local_spatial_attention import LocalSpatialAttention
@@ -772,8 +772,9 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
             if skip_stop_gradient:
                 res = stop_gradient(res, parent_name = name)
             max_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx) / (total_layers - 1) # deepest skip reaches minimal rate before shallowest skip
-            res = ScheduledGradientWeight(max_progress = max_progress, name=f"res_grad_weight{layer_idx}")(res)
             res = ScheduledDropout(rate=0.05, max_rate=0.9, max_progress=max_progress, spatial=True, name=f"res_dropout{layer_idx}")(res) # pushes the network to use deepest features
+            res = ScheduledGradientWeight(max_progress=max_progress, name=f"res_grad_weight{layer_idx}")(res)
+            res, down = ResidualGradientLimiter(name=f"res_grad_limiter{layer_idx}")([res, down])
             n_splits, inference_idx = skip_parameters
             assert inference_idx<n_splits, f"invalid inference idx: {inference_idx} must be lower than n_splits: {n_splits}"
             feature_skip = InferenceAwareSelector(inference_idx=inference_idx, name=f"{name}_SelectFeature")

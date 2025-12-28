@@ -1088,6 +1088,136 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
 
 
 # Gradient manipulation
+class ResidualGradientLimiter(tf.keras.layers.Layer):
+    """
+    Limits skip path gradients relative to main path gradients.
+    Only reduces skip gradients (never amplifies them).
+    Tracks gradient magnitudes via EMA.
+
+    Usage:
+        limiter = ResidualGradientLimiter()
+        limited_skip, main = limiter([skip_path, main_path], training=True)
+    """
+
+    def __init__(self,
+                 ema_momentum: float = 0.99,  # EMA decay for gradient tracking
+                 epsilon: float = 1e-5,  # Numerical stability
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.ema_momentum = ema_momentum
+        self.epsilon = epsilon
+
+        # Gradient EMAs
+        self.skip_grad_ema = None
+        self.main_grad_ema = None
+
+    def build(self, input_shape):
+        """
+        input_shape is a list: [skip_shape, main_shape]
+        """
+        super().build(input_shape)
+
+        if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
+            raise ValueError(
+                f"ResidualGradientLimiter expects exactly 2 inputs [skip, main], "
+                f"got {len(input_shape) if isinstance(input_shape, list) else 1}"
+            )
+
+        # EMA for skip path gradient magnitude
+        self.skip_grad_ema = self.add_weight(
+            name='skip_grad_ema',
+            shape=(),
+            initializer=tf.keras.initializers.Constant(1.0),
+            trainable=False,
+            dtype=tf.float32
+        )
+
+        # EMA for main path gradient magnitude
+        self.main_grad_ema = self.add_weight(
+            name='main_grad_ema',
+            shape=(),
+            initializer=tf.keras.initializers.Constant(1.0),
+            trainable=False,
+            dtype=tf.float32
+        )
+
+    def get_ema_values(self):
+        return self.skip_grad_ema.numpy(), self.main_grad_ema.numpy()
+
+    @tf.custom_gradient
+    def _limit_gradients(self, x):
+        skip, main = x
+        """
+        Forward: return inputs unchanged
+        Backward: limit skip gradients to match main gradient magnitude (only reduce)
+
+        Args:
+            skip: skip connection tensor
+            main: main path tensor
+        """
+
+        def grad(dy):
+            dy_skip, dy_main = dy
+            # Access self attributes
+            eps = tf.cast(self.epsilon, dy_main.dtype)
+            momentum = self.ema_momentum
+
+            # Compute gradient norms (L2)
+            skip_grad_norm = tf.sqrt(tf.maximum(tf.reduce_sum(dy_skip ** 2), eps))
+            main_grad_norm = tf.sqrt(tf.maximum(tf.reduce_sum(dy_main ** 2), eps))
+
+            # Update EMAs
+            new_skip_ema = momentum * self.skip_grad_ema + (1.0 - momentum) * skip_grad_norm
+            new_main_ema = momentum * self.main_grad_ema + (1.0 - momentum) * main_grad_norm
+            self.skip_grad_ema.assign(new_skip_ema)
+            self.main_grad_ema.assign(new_main_ema)
+
+            # Compute scaling factor to achieve target ratio = 1.0 (at most)
+            # We want: ||dy_skip_scaled|| <= ||dy_main||
+            scale_factor = tf.minimum(new_main_ema / (tf.maximum(new_skip_ema, eps)), 1.0) # only limit
+            return dy_skip * scale_factor, dy_main
+        return [skip, main], grad
+
+    def call(self, inputs, training=None):
+        """
+        Args:
+            inputs: list of [skip_tensor, main_tensor]
+            training: whether in training mode
+
+        Returns:
+            list of [limited_skip, main]
+        """
+        if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
+            raise ValueError(
+                f"ResidualGradientLimiter expects a list/tuple of 2 tensors [skip, main], "
+                f"got {type(inputs)}"
+            )
+
+        if not training: # During inference, no gradient limiting
+            return inputs
+        # Apply gradient limiting
+        return self._limit_gradients(inputs)
+
+    def get_ema_stats(self):
+        """Get current EMA values for monitoring"""
+        skip_ema = float(self.skip_grad_ema.numpy())
+        main_ema = float(self.main_grad_ema.numpy())
+        return {
+            'skip_grad_ema': skip_ema,
+            'main_grad_ema': main_ema,
+            'current_ratio': skip_ema / (main_ema + self.epsilon),
+        }
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "ema_momentum": float(self.ema_momentum),
+            "epsilon": float(self.epsilon),
+        })
+        return config
+
+
+
 class ScheduledGradientWeight(tf.keras.layers.Layer):
     """
     Layer that applies scheduled gradient weighting to skip connections.

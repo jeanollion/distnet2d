@@ -7,7 +7,8 @@ from collections import defaultdict
 
 from tensorflow.keras.optimizers.schedules import CosineDecay, LearningRateSchedule
 
-from distnet_2d.model.layers import HideVariableWrapper, ScheduledDropout, ScheduledGradientWeight
+from distnet_2d.model.layers import HideVariableWrapper, ScheduledDropout, ScheduledGradientWeight, \
+    ResidualGradientLimiter
 
 
 class CosineDecayResume(LearningRateSchedule):
@@ -305,6 +306,7 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
         self.verbose = verbose
 
         self.gradient_layers = []
+        self.gradient_limiter_layers = []
 
     @staticmethod
     def _find_gradient_layers(layer):
@@ -327,6 +329,27 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
                 layers.extend(ScheduledGradientCallback._find_gradient_layers(sublayer))
         return layers
 
+    @staticmethod
+    def _find_gradient_limiter_layers(layer):
+        """
+        Recursively find all ScheduledGradientWeight layers in a model.
+
+        Args:
+            layer: A Keras layer or model
+
+        Returns:
+            List of ScheduledGradientWeight layers
+        """
+        if isinstance(layer, ResidualGradientLimiter):
+            return [layer]
+
+        # Handle nested models/layers
+        layers = []
+        if hasattr(layer, 'layers'):
+            for sublayer in layer.layers:
+                layers.extend(ScheduledGradientCallback._find_gradient_limiter_layers(sublayer))
+        return layers
+
     def on_train_begin(self, logs=None):
         """Scan model and register all ScheduledGradientWeight layers"""
         self.gradient_layers = self._find_gradient_layers(self.model)
@@ -347,6 +370,8 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
 
             print(f"{'=' * 70}\n")
 
+        self.gradient_limiter_layers = self._find_gradient_limiter_layers(self.model)
+
     def on_epoch_begin(self, epoch, logs=None):
         """Update global progress at the beginning of each epoch"""
         if not self.gradient_layers:
@@ -362,3 +387,6 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
             if self.verbose > 0 and epoch % 100 == 0:
                 print(f"epoch: {epoch} layer: {layer.name} gradient weight: {layer.get_current_weight()}")
 
+        if self.verbose > 0 and epoch % 100 == 1:
+            for layer in self.gradient_limiter_layers:
+                print(f"epoch: {epoch} limiter: {layer.name} EMA : {layer.get_ema_values()}")
