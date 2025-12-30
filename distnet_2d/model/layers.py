@@ -830,6 +830,7 @@ class ScheduledDropout(tf.keras.layers.Layer):
                  max_rate: float,  # rate at training start
                  max_progress: float = 1.0,  # When this layer reaches rate
                  spatial: bool = True,  # Use spatial dropout for images
+                 power_law: float = 2.0,
                  seed=None,  # Optional: for reproducibility
                  **kwargs):
         super().__init__(**kwargs)
@@ -837,6 +838,7 @@ class ScheduledDropout(tf.keras.layers.Layer):
         self.max_rate = max_rate
         self.max_progress = max_progress
         self.spatial = spatial
+        self.power_law = power_law
         self.seed = seed
 
         # Training progress variable [0, 1] - set by callback
@@ -913,7 +915,7 @@ class ScheduledDropout(tf.keras.layers.Layer):
         # Interpolate from max_rate to min_rate
         max_rate_val = tf.cast(self.max_rate, tf.float32)
         min_rate_val = tf.cast(self.min_rate, tf.float32)
-        current_rate = max_rate_val - (max_rate_val - min_rate_val) * layer_progress
+        current_rate = max_rate_val - (max_rate_val - min_rate_val) * tf.math.pow(layer_progress, self.power_law)
 
         return current_rate
 
@@ -924,13 +926,13 @@ class ScheduledDropout(tf.keras.layers.Layer):
             "max_rate": float(self.max_rate),
             "max_progress": float(self.max_progress),
             "spatial": self.spatial,
-            "seed": self.seed,
+            "power_law": self.power_law,
+            "seed": self.seed
         })
         return config
 
 
 ## Embeddings
-
 class FrameDistanceEmbedding(tf.keras.layers.Layer):
     def __init__(self, input_dim:int, output_dim:int, frame_prev_idx:list, frame_next_idx:list, offset:int = 0, l2_reg:float=1e-5 , name:str="FrameDistanceEmbedding", **kwargs):
         self.input_dim=input_dim
@@ -1092,7 +1094,6 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
     """
     Limits skip path gradients relative to main path gradients.
     Only reduces skip gradients (never amplifies them).
-    Tracks gradient magnitudes via EMA.
 
     Usage:
         limiter = ResidualGradientLimiter()
@@ -1100,16 +1101,12 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
     """
 
     def __init__(self,
-                 ema_momentum: float = 0.99,  # EMA decay for gradient tracking
+                 max_ratio: float = 1.0,
                  epsilon: float = 1e-5,  # Numerical stability
                  **kwargs):
         super().__init__(**kwargs)
-        self.ema_momentum = ema_momentum
+        self.max_ratio=max_ratio
         self.epsilon = epsilon
-
-        # Gradient EMAs
-        self.skip_grad_ema = None
-        self.main_grad_ema = None
 
     def build(self, input_shape):
         """
@@ -1123,27 +1120,6 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
                 f"got {len(input_shape) if isinstance(input_shape, list) else 1}"
             )
 
-        # EMA for skip path gradient magnitude
-        self.skip_grad_ema = self.add_weight(
-            name='skip_grad_ema',
-            shape=(),
-            initializer=tf.keras.initializers.Constant(1.0),
-            trainable=False,
-            dtype=tf.float32
-        )
-
-        # EMA for main path gradient magnitude
-        self.main_grad_ema = self.add_weight(
-            name='main_grad_ema',
-            shape=(),
-            initializer=tf.keras.initializers.Constant(1.0),
-            trainable=False,
-            dtype=tf.float32
-        )
-
-    def get_ema_values(self):
-        return self.skip_grad_ema.numpy(), self.main_grad_ema.numpy()
-
     @tf.custom_gradient
     def _limit_gradients(self, x):
         skip, main = x
@@ -1155,27 +1131,15 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
             skip: skip connection tensor
             main: main path tensor
         """
+        def grad(dy_skip, dy_main):
+            main_grad_norm = tf.sqrt(tf.maximum(tf.reduce_sum(tf.cast(dy_main, tf.float32) ** 2), self.epsilon))
+            if dy_skip is None:
+                return dy_skip, dy_main
+            skip_grad_norm = tf.sqrt(tf.maximum(tf.reduce_sum(tf.cast(dy_skip, tf.float32) ** 2), self.epsilon))
 
-        def grad(dy):
-            dy_skip, dy_main = dy
-            # Access self attributes
-            eps = tf.cast(self.epsilon, dy_main.dtype)
-            momentum = self.ema_momentum
-
-            # Compute gradient norms (L2)
-            skip_grad_norm = tf.sqrt(tf.maximum(tf.reduce_sum(dy_skip ** 2), eps))
-            main_grad_norm = tf.sqrt(tf.maximum(tf.reduce_sum(dy_main ** 2), eps))
-
-            # Update EMAs
-            new_skip_ema = momentum * self.skip_grad_ema + (1.0 - momentum) * skip_grad_norm
-            new_main_ema = momentum * self.main_grad_ema + (1.0 - momentum) * main_grad_norm
-            self.skip_grad_ema.assign(new_skip_ema)
-            self.main_grad_ema.assign(new_main_ema)
-
-            # Compute scaling factor to achieve target ratio = 1.0 (at most)
-            # We want: ||dy_skip_scaled|| <= ||dy_main||
-            scale_factor = tf.minimum(new_main_ema / (tf.maximum(new_skip_ema, eps)), 1.0) # only limit
-            return dy_skip * scale_factor, dy_main
+            # Compute scaling factor to limit res path gradient to the scale of main path i.e. |dy_skip_scaled|| <= max_ratio * ||dy_main||
+            scale_factor = tf.minimum(  self.max_ratio * main_grad_norm / tf.maximum(skip_grad_norm, self.epsilon), 1.0 ) # only limit
+            return dy_skip * tf.cast(scale_factor, dy_skip.dtype), dy_main
         return [skip, main], grad
 
     def call(self, inputs, training=None):
@@ -1195,27 +1159,15 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
 
         if not training: # During inference, no gradient limiting
             return inputs
-        # Apply gradient limiting
         return self._limit_gradients(inputs)
-
-    def get_ema_stats(self):
-        """Get current EMA values for monitoring"""
-        skip_ema = float(self.skip_grad_ema.numpy())
-        main_ema = float(self.main_grad_ema.numpy())
-        return {
-            'skip_grad_ema': skip_ema,
-            'main_grad_ema': main_ema,
-            'current_ratio': skip_ema / (main_ema + self.epsilon),
-        }
 
     def get_config(self):
         config = super().get_config()
         config.update({
-            "ema_momentum": float(self.ema_momentum),
+            "max_ratio": float(self.max_ratio),
             "epsilon": float(self.epsilon),
         })
         return config
-
 
 
 class ScheduledGradientWeight(tf.keras.layers.Layer):
@@ -1229,11 +1181,13 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
                  min_weight: float = 0.0,  # Initial gradient weight (training start)
                  max_weight: float = 1.0,  # Final gradient weight (target)
                  max_progress: float = 1.0,  # When this layer reaches max_weight
+                 power_law: float = 2.0,
                  **kwargs):
         super().__init__(**kwargs)
         self.min_weight = min_weight
         self.max_weight = max_weight
         self.max_progress = max_progress
+        self.power_law=power_law
 
         # Training progress variable [0, 1] - set by callback
         self.progress = None
@@ -1252,7 +1206,7 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
         )
 
     @tf.custom_gradient
-    def op(self, x, weight):
+    def _weight_gradient(self, x, weight):
         """
         Forward pass: return input unchanged
         Backward pass: scale gradients by weight
@@ -1273,7 +1227,7 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
         if not training:
             return inputs
         current_weight = self.get_current_weight()
-        return self.op(inputs, current_weight)
+        return self._weight_gradient(inputs, current_weight)
 
     def set_progress(self, progress_value):
         """Set global training progress [0, 1] - called by callback"""
@@ -1293,7 +1247,7 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
         # Interpolate from min_weight to max_weight (inverse of dropout)
         min_weight_val = tf.cast(self.min_weight, tf.float32)
         max_weight_val = tf.cast(self.max_weight, tf.float32)
-        current_weight = min_weight_val + (max_weight_val - min_weight_val) * layer_progress
+        current_weight = min_weight_val + (max_weight_val - min_weight_val) * tf.math.pow(layer_progress, self.power_law)
 
         return current_weight
 
@@ -1303,6 +1257,7 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
             "min_weight": float(self.min_weight),
             "max_weight": float(self.max_weight),
             "max_progress": float(self.max_progress),
+            "power_law": float(self.power_law)
         })
         return config
 
@@ -1352,16 +1307,44 @@ def get_grad_weight_fun(weight):
 
 def get_print_grad_fun(message):
     @tf.custom_gradient
-    def wgrad(x):
+    def op(x):
         def grad(dy):
                 g_flat = tf.reshape(tf.math.abs(dy), [-1])
                 g_flat = tf.boolean_mask(g_flat, tf.greater(g_flat, 0))
                 print(f"{message} gradient shape: {dy.shape}, non-null: {100 * g_flat.shape[0]/tf.size(dy)}%, value: {tf.math.reduce_mean(g_flat)}")
                 return dy
         return x, grad
-    return wgrad
+    return op
 
 
+class LogGradientMagnitude(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.grad_accum = None
+
+    def build(self, input_shape):
+        self.grad_accum = self.add_weight(
+            name='grad_accum',
+            shape=(),
+            initializer=tf.keras.initializers.Constant(0.),
+            trainable=False,
+            dtype=tf.float32
+        )
+
+    def call(self, x):
+        return self.op(x)
+
+    @tf.custom_gradient
+    def op(self, x):
+        def grad(dy):
+            self.grad_accum.assign_add(tf.sqrt(tf.reduce_sum(tf.square(tf.cast(dy, tf.float32)))))
+            return dy
+        return x, grad
+
+    def get_value(self):
+        value = float(self.grad_accum.numpy())
+        self.grad_accum.assign(0.0)
+        return value
 
 # util class to avoid that a tf.Variable is saved into the model weights
 class HideVariableWrapper:

@@ -8,7 +8,7 @@ from collections import defaultdict
 from tensorflow.keras.optimizers.schedules import CosineDecay, LearningRateSchedule
 
 from distnet_2d.model.layers import HideVariableWrapper, ScheduledDropout, ScheduledGradientWeight, \
-    ResidualGradientLimiter
+    ResidualGradientLimiter, LogGradientMagnitude
 
 
 class CosineDecayResume(LearningRateSchedule):
@@ -304,9 +304,7 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
         super().__init__()
         self.n_epochs = n_epochs
         self.verbose = verbose
-
-        self.gradient_layers = []
-        self.gradient_limiter_layers = []
+        self.gradient_layers = None
 
     @staticmethod
     def _find_gradient_layers(layer):
@@ -329,27 +327,6 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
                 layers.extend(ScheduledGradientCallback._find_gradient_layers(sublayer))
         return layers
 
-    @staticmethod
-    def _find_gradient_limiter_layers(layer):
-        """
-        Recursively find all ScheduledGradientWeight layers in a model.
-
-        Args:
-            layer: A Keras layer or model
-
-        Returns:
-            List of ScheduledGradientWeight layers
-        """
-        if isinstance(layer, ResidualGradientLimiter):
-            return [layer]
-
-        # Handle nested models/layers
-        layers = []
-        if hasattr(layer, 'layers'):
-            for sublayer in layer.layers:
-                layers.extend(ScheduledGradientCallback._find_gradient_limiter_layers(sublayer))
-        return layers
-
     def on_train_begin(self, logs=None):
         """Scan model and register all ScheduledGradientWeight layers"""
         self.gradient_layers = self._find_gradient_layers(self.model)
@@ -361,7 +338,6 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
             print(f"Found {len(self.gradient_layers)} ScheduledGradientWeight layer(s)")
             print(f"Total epochs: {self.n_epochs}")
             print(f"\nLayer configurations:")
-
             for i, layer in enumerate(self.gradient_layers):
                 completion_epoch = int(layer.max_progress * self.n_epochs)
                 print(f"  {layer.name}:")
@@ -370,23 +346,52 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
 
             print(f"{'=' * 70}\n")
 
-        self.gradient_limiter_layers = self._find_gradient_limiter_layers(self.model)
-
     def on_epoch_begin(self, epoch, logs=None):
         """Update global progress at the beginning of each epoch"""
         if not self.gradient_layers:
             return
-
-        # Global training progress [0, 1]
         global_progress = epoch / self.n_epochs if self.n_epochs > 0 else 1.
-
-        # Update all layers with the same global progress
-        # Each layer will compute its own weight based on its max_progress
+        # Update all layers with the same global progress, each layer will compute its own weight based on its max_progress
         for layer in self.gradient_layers:
             layer.set_progress(global_progress)
-            if self.verbose > 0 and epoch % 100 == 0:
+            if self.verbose > 0 and epoch % 100 == 0: # and epoch % 100 == 0
                 print(f"epoch: {epoch} layer: {layer.name} gradient weight: {layer.get_current_weight()}")
 
-        if self.verbose > 0 and epoch % 100 == 1:
-            for layer in self.gradient_limiter_layers:
-                print(f"epoch: {epoch} limiter: {layer.name} EMA : {layer.get_ema_values()}")
+
+class LogGradientCallback(tf.keras.callbacks.Callback):
+
+    def __init__(self, step_number:int):
+        super().__init__()
+        self.step_number = step_number
+        self.log_gradient_layers = []
+
+    @staticmethod
+    def _find_log_gradient_layers(layer):
+        """
+        Recursively find all ScheduledGradientWeight layers in a model.
+
+        Args:
+            layer: A Keras layer or model
+
+        Returns:
+            List of ScheduledGradientWeight layers
+        """
+        if isinstance(layer, LogGradientMagnitude):
+            return [layer]
+
+        # Handle nested models/layers
+        layers = []
+        if hasattr(layer, 'layers'):
+            for sublayer in layer.layers:
+                layers.extend(LogGradientCallback._find_log_gradient_layers(sublayer))
+        return layers
+
+    def on_train_begin(self, logs=None):
+        """Scan model and register all ScheduledGradientWeight layers"""
+        self.log_gradient_layers = self._find_log_gradient_layers(self.model)
+
+    def on_epoch_end(self, epoch, logs=None):
+        if not self.log_gradient_layers:
+            return
+        for layer in self.log_gradient_layers:
+            print(f"epoch: {epoch} layer: {layer.name} gradient: {layer.get_value()/float(self.step_number)}")

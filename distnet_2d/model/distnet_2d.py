@@ -14,7 +14,7 @@ from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2D
     HideVariableWrapper, \
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
     InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, HybridThresholdL2Regularizer, \
-    ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter
+    ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter, LogGradientMagnitude
 import numpy as np
 
 from .local_spatial_attention import LocalSpatialAttention
@@ -455,13 +455,17 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                     inference_pair_sel_fw.append(len(inference_pair_idx))
                     inference_pair_idx.append(idx_future)
         #print(f"central_pair_idx: {central_pair_idx} inference_pair_idx {inference_pair_idx} bw: {inference_pair_sel_bw}={[inference_pair_idx[i] for i in inference_pair_sel_bw]} fw: {inference_pair_sel_fw}=={[inference_pair_idx[i] for i in inference_pair_sel_fw]}")
+        decoder_layers = {"Seg": [], "Center": [], "Track": [], "LinkMultiplicity": []} if tracking else {"Seg": [],  "Center": []}
+        if arch.category_number > 1:
+            decoder_layers["Cat"] = []
+        task_with_skip_prop = 1. / len(decoder_layers) # only segmentation has decoder
         # define encoder operations
         encoder_layers = []
         contraction_per_layer = []
         no_residual_layer = []
         last_input_filters = arch.n_inputs
         for l_idx, param_list in enumerate(arch.encoder_settings):
-            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window), downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx, total_layers=len(arch.encoder_settings))
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window), downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx, total_layers=len(arch.encoder_settings), task_with_skip_prop=task_with_skip_prop)
             last_input_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
@@ -474,9 +478,6 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             feature_pair_skip_op = Combine(filters=feature_filters, l2_reg=arch.l2_reg, name="FeaturePairSkip")
 
         # define decoder operations
-        decoder_layers={"Seg":[], "Center":[], "Track":[], "LinkMultiplicity":[]} if tracking else {"Seg":[], "Center":[]}
-        if arch.category_number > 1:
-            decoder_layers["Cat"] = []
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
         decoder_feature_op={n: get_seq_and_filters(parse_param_list(arch.feature_decoder_settings, f"Features{n}", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
         decoder_out={name:{} for name in decoder_layers.keys()}
@@ -746,7 +747,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if getattr(arch, "attention", 0) > 0 or arch.self_attention > 0 else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=arch.predict_cdm_derivatives, predict_edm_derivatives=arch.predict_edm_derivatives, category_number=arch.category_number, **kwargs)
 
 
-def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, total_layers:int=2):
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, total_layers:int=2, task_with_skip_prop:float=1.):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
@@ -762,19 +763,23 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
         if sequence is not None:
             for l in sequence:
                 x=l(x)
-        down = [l(x) for l in down_sequence]
-        if len(down)>1:
-            down = down_concat(down)
-        else:
-            down = down[0]
         if (sequence is not None or layer_idx>0) and skip_parameters is not None:
-            res = x
+            #x = LogGradientMagnitude(name=f"main_res{layer_idx}")(x)
+            res = tf.identity(x, f"residual{layer_idx}")
+            x = tf.identity(x)  # tf.identity(x) to split path so that input of ResidualGradientLimiter do not contain residual gradient (gradient merging happens before tf.identity)
+            max_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx) / (total_layers - 1) # deepest skip reaches minimal rate before shallowest skip
+            if layer_idx == 0:
+                res = LogGradientMagnitude(name=f"res_weighted{layer_idx}")(res)
+            res = ScheduledGradientWeight(max_progress=max_progress, name=f"res_grad_weight{layer_idx}")(res)
+            #res = LogGradientMagnitude(name=f"res_limited{layer_idx}")(res)
+            res, x = ResidualGradientLimiter(max_ratio=task_with_skip_prop, name=f"res_grad_limiter{layer_idx}")([res, x])
+            #x = LogGradientMagnitude(name=f"main{layer_idx}")(x)
+            if layer_idx == 0:
+                res = LogGradientMagnitude(name=f"res{layer_idx}")(res)
             if skip_stop_gradient:
                 res = stop_gradient(res, parent_name = name)
-            max_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx) / (total_layers - 1) # deepest skip reaches minimal rate before shallowest skip
             res = ScheduledDropout(rate=0.05, max_rate=0.9, max_progress=max_progress, spatial=True, name=f"res_dropout{layer_idx}")(res) # pushes the network to use deepest features
-            res = ScheduledGradientWeight(max_progress=max_progress, name=f"res_grad_weight{layer_idx}")(res)
-            res, down = ResidualGradientLimiter(name=f"res_grad_limiter{layer_idx}")([res, down])
+            #res = LogGradientMagnitude(name=f"res_before_dropout{layer_idx}")(res)
             n_splits, inference_idx = skip_parameters
             assert inference_idx<n_splits, f"invalid inference idx: {inference_idx} must be lower than n_splits: {n_splits}"
             feature_skip = InferenceAwareSelector(inference_idx=inference_idx, name=f"{name}_SelectFeature")
@@ -782,6 +787,11 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
             res = feature_skip([res, feature_split(res)])
         else:
             res = None
+        down = [l(x) for l in down_sequence]
+        if len(down) > 1:
+            down = down_concat(down)
+        else:
+            down = down[0]
         return down, res
     return op, total_contraction, residual_filters, out_filters
 
