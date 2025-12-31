@@ -828,14 +828,16 @@ class ScheduledDropout(tf.keras.layers.Layer):
     def __init__(self,
                  rate: float,  # target rate (min_rate)
                  max_rate: float,  # rate at training start
+                 min_progress: float = 0.0,
                  max_progress: float = 1.0,  # When this layer reaches rate
                  spatial: bool = True,  # Use spatial dropout for images
-                 power_law: float = 2.0,
+                 power_law: float = 1.0,
                  seed=None,  # Optional: for reproducibility
                  **kwargs):
         super().__init__(**kwargs)
         self.min_rate = rate
         self.max_rate = max_rate
+        self.min_progress = min_progress
         self.max_progress = max_progress
         self.spatial = spatial
         self.power_law = power_law
@@ -905,9 +907,9 @@ class ScheduledDropout(tf.keras.layers.Layer):
 
         # Calculate layer-specific progress
         # Cast to float32 explicitly to handle mixed precision
-        progress_val = tf.cast(self.progress, tf.float32)
+        progress_val = tf.cast(self.progress, tf.float32) - tf.cast(self.min_progress, tf.float32)
         max_progress_val = tf.cast(self.max_progress, tf.float32)
-        layer_progress = tf.minimum(1.0, progress_val / max_progress_val)
+        layer_progress = tf.maximum(0.0, tf.minimum(1.0, progress_val / max_progress_val))
 
         # Interpolate from max_rate to min_rate
         max_rate_val = tf.cast(self.max_rate, tf.float32)
@@ -921,6 +923,7 @@ class ScheduledDropout(tf.keras.layers.Layer):
         config.update({
             "rate": float(self.min_rate),
             "max_rate": float(self.max_rate),
+            "min_progress": float(self.min_progress),
             "max_progress": float(self.max_progress),
             "spatial": self.spatial,
             "power_law": self.power_law,
@@ -1086,6 +1089,46 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
             return additive_emb
 
 
+class Identity(tf.keras.layers.Layer):
+    def __init__(self, name:str=None):
+        super().__init__(name=name)
+
+    def call(self, input, training=None):
+        if not training:
+            return input
+        return tf.identity( input, name=self.name )
+
+class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
+    def __init__(self, *args, inference_idx=None, output_dtype:str=None, **kwargs):
+        self.output_dtype = output_dtype
+        self.inference_idx = inference_idx
+        super().__init__(*args, **kwargs)
+
+    def build(self, input_shape):
+        super().build(input_shape)
+
+    def call(self, inputs):
+        if self.inference_mode:
+            if isinstance(self.inference_idx, int):
+                output = inputs[self.inference_idx]
+            elif self.inference_idx is not None:
+                inputs = [inputs[i] for i in self.inference_idx]
+                output = super().call(inputs)
+            else:
+                output = super().call(inputs)
+        else:
+            output = super().call(inputs)
+        if self.output_dtype is not None:
+            output = tf.cast(output, dtype=self.output_dtype)
+        return output
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'output_dtype': self.output_dtype})
+        return config
+
+
+
 # Gradient manipulation
 class ResidualGradientLimiter(tf.keras.layers.Layer):
     """
@@ -1177,12 +1220,14 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
     def __init__(self,
                  min_weight: float = 0.0,  # Initial gradient weight (training start)
                  max_weight: float = 1.0,  # Final gradient weight (target)
+                 min_progress: float = 0.0,
                  max_progress: float = 1.0,  # When this layer reaches max_weight
-                 power_law: float = 2.0,
+                 power_law: float = 1.0,
                  **kwargs):
         super().__init__(**kwargs)
         self.min_weight = min_weight
         self.max_weight = max_weight
+        self.min_progress = min_progress
         self.max_progress = max_progress
         self.power_law=power_law
 
@@ -1237,9 +1282,9 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
 
         # Calculate layer-specific progress
         # Cast to float32 explicitly to handle mixed precision
-        progress_val = tf.cast(self.progress, tf.float32)
+        progress_val = tf.cast(self.progress, tf.float32) -  tf.cast(self.min_progress, tf.float32)
         max_progress_val = tf.cast(self.max_progress, tf.float32)
-        layer_progress = tf.minimum(1.0, progress_val / max_progress_val)
+        layer_progress = tf.maximum(0.0, tf.minimum(1.0, progress_val / max_progress_val))
 
         # Interpolate from min_weight to max_weight (inverse of dropout)
         min_weight_val = tf.cast(self.min_weight, tf.float32)
@@ -1253,6 +1298,7 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
         config.update({
             "min_weight": float(self.min_weight),
             "max_weight": float(self.max_weight),
+            "min_progress": float(self.min_progress),
             "max_progress": float(self.max_progress),
             "power_law": float(self.power_law)
         })
@@ -1263,7 +1309,9 @@ class StopGradient(tf.keras.layers.Layer):
     def __init__(self, name:str="StopGradient"):
         super().__init__(name=name)
 
-    def call(self, input):
+    def call(self, input, training=None):
+        if not training:
+            return input
         return tf.stop_gradient( input, name=self.name )
 
 

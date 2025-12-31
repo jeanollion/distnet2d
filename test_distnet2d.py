@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 from pathlib import Path
 import sys
 from scipy.ndimage import gaussian_filter
@@ -30,7 +31,6 @@ from dataset_iterator.image_data_generator import IlluminationImageGenerator, Sc
 from dataset_iterator.datasetIO import get_datasetIO, MemoryIO
 from distnet_2d.model import get_distnet_2d, architectures, get_distnet_2d_seg
 
-
 seg = False
 if not seg:
     if True:
@@ -40,7 +40,7 @@ if not seg:
         dn = get_distnet_2d(
             arch=architectures.TemPyD4(frame_window=fw, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
                                       temporal_attention=64, attention_spatial_radius=8,
-                                      skip_connections=False, early_downsampling=True, category_number=0, inference_gap_number=1,
+                                      skip_connections=True, early_downsampling=False, category_number=0, inference_gap_number=1,
                                       predict_edm_derivatives=False, predict_cdm_derivatives=False)
         )
 
@@ -52,7 +52,7 @@ if not seg:
         out = dn([tf.zeros(shape=(1, 64, 32, fw*2+1)), frame_index]) # frame aware case
         #out = dn([tf.zeros(shape=(1, 64, 32, 19))])
         print(f"{[o.shape for o in out]}")
-        #tf.keras.utils.plot_model(dn, "/data/model.png", dpi=64, show_shapes=True)
+        tf.keras.utils.plot_model(dn, "/data/model.png", dpi=64, show_shapes=True)
         #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
         print(dn.summary())
 

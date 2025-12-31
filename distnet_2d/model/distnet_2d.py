@@ -14,7 +14,8 @@ from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2D
     HideVariableWrapper, \
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
     InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, HybridThresholdL2Regularizer, \
-    ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter, LogGradientMagnitude
+    ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter, LogGradientMagnitude, Identity, \
+    ConcatenateWithDtype
 import numpy as np
 
 from .local_spatial_attention import LocalSpatialAttention
@@ -35,7 +36,7 @@ class DiSTNetModel(tf.keras.Model):
                  displacement_loss_weight:float=1, # increase to 0.5 ? no simultaneously with lm
                  link_multiplicity_loss_weight:float=1, # increase to  0.25 ? no simultaneously with dis
                  category_loss_weight: float = 1, # reduce ?
-                 edm_loss=PseudoHuber(1), edm_derivative_loss:bool=False,
+                 edm_loss=PseudoHuber(1), edm_derivative_loss:bool=False, edm_aux_decoder:bool=False,
                  cdm_loss=PseudoHuber(1), cdm_derivative_loss:bool=False,
                  cdm_loss_radius:float = 0,
                  displacement_loss=PseudoHuber(1),
@@ -56,6 +57,7 @@ class DiSTNetModel(tf.keras.Model):
         if edm_class_weights is not None:
             assert len(edm_class_weights) == 2 , "edm_class_weights must be a list of len 2"
         self.edm_class_weights = HideVariableWrapper(tf.Variable(np.asarray(edm_class_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="edm_class_weights")) if edm_class_weights is not None else None
+        self.edm_aux_decoder = edm_aux_decoder
         self.center_weight = center_loss_weight
         self.cdm_loss_radius = float(cdm_loss_radius)
         self.displacement_weight = displacement_loss_weight
@@ -183,9 +185,17 @@ class DiSTNetModel(tf.keras.Model):
         with self.maybe_gradient_tape(training) as tape:
             y_pred = self(x, training=training)  # Forward pass
             if self.predict_edm_derivatives:
-                edm, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=3, axis=-1)
+                if self.edm_aux_decoder:
+                    edm, edm_aux, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=4, axis=-1)
+                else:
+                    edm, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=3, axis=-1)
+                    edm_aux = None
             else:
                 edm, edm_dy, edm_dx = y_pred[0], None, None
+                if self.edm_aux_decoder:
+                    edm, edm_aux = tf.split(edm, num_or_size_splits=2, axis=-1)
+                else:
+                    edm_aux = None
             if self.predict_edm_derivatives or self.edm_derivative_loss:
                 true_edm, true_edm_dy, true_edm_dx = tf.split(y[0], num_or_size_splits=3, axis=-1)
             else:
@@ -209,7 +219,9 @@ class DiSTNetModel(tf.keras.Model):
                 edm_loss = tf.reduce_mean(edm_loss)
                 losses["EDM"] = edm_loss
                 loss_weights["EDM"] = edm_weight
-
+                if self.edm_aux_decoder:
+                    edm_aux_loss = compute_loss_derivatives(true_edm, edm_aux, self.edm_loss, weight_map=weight_map)
+                    losses["EDM"] = losses["EDM"] + tf.reduce_mean(edm_aux_loss)
             # center
             if center_weight>0:
                 cdm_true = y[1]
@@ -424,9 +436,11 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         if arch.frame_window<=1:
             long_term = False
         n_frames = arch.frame_window * (2 if arch.future_frames else 1) + 1
+        edm_aux_decoder = arch.edm_aux_decoder
         skip_connections = arch.skip_connections
         if skip_connections == False:
             skip_connections = [len(arch.encoder_settings)] # only at feature level
+            edm_aux_decoder = False
         elif skip_connections == True:
             skip_connections = [i for i in range(len(arch.encoder_settings) + 1)]
         else:
@@ -502,12 +516,16 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         if arch.category_number > 1:
             decoder_is_segmentation["Cat"] = True
         skip_per_decoder = {"Seg": skip_connections, "Center": [], "Track": [], "LinkMultiplicity": [], "Cat":[]}
+        aux_decoder_head = defaultdict(lambda: defaultdict(lambda: False))
+        aux_decoder_head["Seg"]["EDM"] = arch.edm_aux_decoder
+        aux_decoder = defaultdict(lambda: False)
+        aux_decoder["Seg"] = arch.edm_aux_decoder
 
         for l_idx, param_list in enumerate(arch.decoder_settings):
             if l_idx==0:
                 for dSegName in output_per_decoder["Seg"].keys():
                     output_name = None if arch.frame_window > 0 or arch.predict_edm_derivatives else decoder_output_names["Seg"][dSegName]
-                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
+                    decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name, aux_decoder=aux_decoder_head["Seg"][dSegName])
                 for dCenterName in output_per_decoder["Center"].keys():
                     output_name = None if arch.frame_window > 0 or arch.predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
                     decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
@@ -522,7 +540,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                         decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower(), aux_decoder=aux_decoder[decoder_name]))
 
         # Create GRAPH
         if arch.n_inputs == 1:
@@ -744,7 +762,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                     output_name = "CDM"
                     output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
                 outputs.extend(output_per_dec.values())
-        return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if getattr(arch, "attention", 0) > 0 or arch.self_attention > 0 else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=arch.predict_cdm_derivatives, predict_edm_derivatives=arch.predict_edm_derivatives, category_number=arch.category_number, **kwargs)
+        return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if getattr(arch, "attention", 0) > 0 or arch.self_attention > 0 else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=arch.predict_cdm_derivatives, predict_edm_derivatives=arch.predict_edm_derivatives, category_number=arch.category_number, edm_aux_decoder=edm_aux_decoder, **kwargs)
 
 
 def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, total_layers:int=2, task_with_skip_prop:float=1.):
@@ -765,12 +783,13 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
                 x=l(x)
         if (sequence is not None or layer_idx>0) and skip_parameters is not None:
             #x = LogGradientMagnitude(name=f"main_res{layer_idx}")(x)
-            res = tf.identity(x, f"residual{layer_idx}")
-            x = tf.identity(x)  # tf.identity(x) to split path so that input of ResidualGradientLimiter do not contain residual gradient (gradient merging happens before tf.identity)
+            res = Identity(name=f"residual{layer_idx}")(x)
+            x = Identity()(x)  # tf.identity(x) to split path so that input of ResidualGradientLimiter do not contain residual gradient (gradient merging happens before tf.identity)
+            min_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx - 1) / (total_layers - 1) if layer_idx < total_layers - 1 else 0.
             max_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx) / (total_layers - 1) # deepest skip reaches minimal rate before shallowest skip
             if layer_idx == 0:
                 res = LogGradientMagnitude(name=f"res_weighted{layer_idx}")(res)
-            res = ScheduledGradientWeight(max_progress=max_progress, name=f"res_grad_weight{layer_idx}")(res)
+            res = ScheduledGradientWeight(min_progress=min_progress, max_progress=max_progress, name=f"res_grad_weight{layer_idx}")(res)
             #res = LogGradientMagnitude(name=f"res_limited{layer_idx}")(res)
             res, x = ResidualGradientLimiter(max_ratio=task_with_skip_prop, name=f"res_grad_limiter{layer_idx}")([res, x])
             #x = LogGradientMagnitude(name=f"main{layer_idx}")(x)
@@ -778,7 +797,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
                 res = LogGradientMagnitude(name=f"res{layer_idx}")(res)
             if skip_stop_gradient:
                 res = stop_gradient(res, parent_name = name)
-            res = ScheduledDropout(rate=0.05, max_rate=0.9, max_progress=max_progress, spatial=True, name=f"res_dropout{layer_idx}")(res) # pushes the network to use deepest features
+            res = ScheduledDropout(rate=0.05, max_rate=0.9, min_progress=min_progress, max_progress=max_progress, spatial=True, name=f"res_dropout{layer_idx}")(res) # pushes the network to use deepest features
             #res = LogGradientMagnitude(name=f"res_before_dropout{layer_idx}")(res)
             n_splits, inference_idx = skip_parameters
             assert inference_idx<n_splits, f"invalid inference idx: {inference_idx} must be lower than n_splits: {n_splits}"
@@ -816,11 +835,11 @@ def decoder_op(
             op:str = "conv", # conv, resconv2d, resconv2d
             weighted_sum:bool=False, # in case op = resconv2d, resconv2d
             n_conv:int = 1,
-            window_self_attention_kwargs = None,
             l2_reg:float=0,
             name: str="DecoderLayer",
             output_name: str = None,
             layer_idx:int=1,
+            aux_decoder:bool = False # auxiliary decoder without residual connections to push the network to use the blended features
         ):
         if layer_idx > 0:
             name=f"{name}{layer_idx}"
@@ -833,40 +852,83 @@ def decoder_op(
         if n_conv>0 and filters_out is None:
             filters_out = filters
 
-        up_op = upsampling_op(filters=filters, parent_name=name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg)
-        up_op_out = upsampling_op(filters=filters_out, parent_name=None if output_name is not None else name, name = output_name, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 else None)
+        up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg)
+        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None and not aux_decoder else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, weight_scaled = weight_scaled_up, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 and not aux_decoder else None)
         if skip_combine_mode.lower()=="conv" or skip_combine_mode.lower()=="wsconv":
-            combine = Combine(name = output_name if output_name is not None and n_conv==0 else name+"_combine", output_dtype="float32" if layer_idx==0 and n_conv==0 else None, filters=filters if filters_out is None or n_conv>0 else filters_out, kernel_size = combine_kernel_size, l2_reg=l2_reg, weight_scaled=skip_combine_mode.lower()=="wsconv")
+            combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_conv==0 and not aux_decoder else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_conv == 0 and not aux_decoder else None, filters=filters if filters_out is None or n_conv > 0 else filters_out, kernel_size = combine_kernel_size, l2_reg=l2_reg, weight_scaled=skip_combine_mode.lower() == "wsconv")
         else:
             combine = None
         op = op.lower().replace("_", "")
         if op == "res1d" or op=="resconv1d":
             raise NotImplementedError("ResConv1D are not implemented")
         elif op == "res2d" or op=="resconv2d":
-            convs = [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}") for i in range(n_conv)]
+            convs =lambda suffix: [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}") for i in range(n_conv)]
         else:
             if weight_scaled:
-                convs = [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
+                convs = lambda suffix: [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 and not aux_decoder else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_conv - 1 or output_name or aux_decoder is None else output_name + suffix) for i in range(n_conv)]
             elif batch_norm or dropout_rate>0:
-                convs = [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==n_conv-1 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}"if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
+                convs = lambda suffix: [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==n_conv-1 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 and not aux_decoder else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_conv - 1 or output_name is None or aux_decoder else output_name + suffix) for i in range(n_conv)]
             else:
-                convs = [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}" if i < n_conv-1 or output_name is None else output_name) for i in range(n_conv)]
-        wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
-        def op(input):
-            down, res = input
-            up = up_op_out(down) if n_conv==0 and res is None else up_op(down)
-            if res is not None:
-                if combine is not None:
-                    up = combine([up, res])
+                convs = lambda suffix: [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 and not aux_decoder else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_conv - 1 or output_name is None or aux_decoder else output_name + suffix) for i in range(n_conv)]
+        if not aux_decoder:
+            def op(input):
+                down, res = input
+                if isinstance(down, tuple): # down is from path with aux network, but this head has no aux
+                    down = down[0]
+                up = up_op_out("")(down) if n_conv==0 and res is None else up_op("")(down)
+                if res is not None:
+                    if combine is not None:
+                        up = combine("")([up, res])
+                    else:
+                        res = tf.cast(res, up.dtype)
+                        up = up + res
+                for c in convs(""):
+                    up = c(up)
+                return up
+            return op
+
+        else:
+            def op(input):
+                down, res = input
+                if not isinstance(down, tuple): # deepest decoder layer: down is the time-blended feature: only used by the aux path
+                    down_aux = down
+                    down = None
                 else:
-                    res = tf.cast(res, up.dtype)
-                    up = up + res
-            if wsa is not None:
-                up = wsa(up)
-            for c in convs:
-                up = c(up)
-            return up
-        return op
+                    down, down_aux = down
+                up_aux = up_op_out("_aux")(down_aux) if n_conv == 0 else up_op("_aux")(down_aux)
+                for c in convs("_aux"):
+                    up_aux = c(up_aux)
+                up_aux_sg = stop_gradient(up_aux, parent_name=name, name=f"aux_sg{layer_idx}") if res is not None or n_conv > 0 and layer_idx > 0 else None # residual gradient do not go in the aux path
+                if down is not None:
+                    up = up_op_out("")(down) if n_conv == 0 and res is None else up_op("")(down)
+                    if res is not None:
+                        if combine is not None:
+                            up = combine("")([up, res, up_aux_sg])
+                        else:
+                            res = tf.cast(res, up.dtype)
+                            up = up + res + up_aux_sg
+                    elif layer_idx > 0 or n_conv > 0:
+                        if combine is not None:
+                            up = combine("")([up, up_aux_sg])
+                        else:
+                            up = up + up_aux
+                else: # deepest decoder layer do not use the blended features
+                    if res is not None:
+                        if combine is not None:
+                            up = combine("")([res, up_aux_sg])
+                        else:
+                            res = tf.cast(res, up_aux_sg.dtype)
+                            up = res + up_aux_sg
+                    else:
+                        raise ValueError(f"Invalid Path layer{layer_idx}") # gradients cannot flow from this layer into the rest of the network
+                for c in convs(""):
+                    up = c(up)
+
+                if layer_idx == 0: # concatenate
+                    return ConcatenateWithDtype(axis=-1, inference_idx=0, output_dtype="float32" if layer_idx==0 else None)([up, up_aux])
+                else:
+                    return up, up_aux
+            return op
 
 def upsampling_op(
             filters: int,

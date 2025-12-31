@@ -60,7 +60,7 @@ class ArchBase:
                  attention_filters:int = 0, attention:int = 0, attention_positional_encoding:str="2d",
                  skip_connections=[-1], skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
-                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False,
+                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False, edm_aux_decoder:bool=False
                  ):
         if attention > 0 or self_attention:
             assert spatial_dimensions is not None and min(spatial_dimensions) > 0, f"for attention mechanism, spatial dim must be provided. Got {spatial_dimensions}"
@@ -92,6 +92,9 @@ class ArchBase:
         self.predict_fw=predict_fw
         self.predict_edm_derivatives=predict_edm_derivatives
         self.predict_cdm_derivatives=predict_cdm_derivatives
+        self.edm_aux_decoder=edm_aux_decoder
+        if self.skip_connections == False or self.skip_connections == -1 or (isinstance(self.skip_connections, (list, tuple)) and (len(self.skip_connections)==0 or (len(self.skip_connections)==1 and -1 in self.skip_connections))):
+            self.edm_aux_decoder = False
         # to be defined in ArchDepth
         self.encoder_settings = None
         self.feature_settings = None
