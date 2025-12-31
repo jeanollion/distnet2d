@@ -869,9 +869,6 @@ class ScheduledDropout(tf.keras.layers.Layer):
 
         current_rate = self.get_current_rate()
 
-        # Convert to Python float to avoid issues with mixed precision
-        current_rate = float(current_rate)
-
         if self.spatial:
             # Use tf.nn.dropout with spatial noise_shape for spatial dropout
             input_shape = tf.shape(inputs)
