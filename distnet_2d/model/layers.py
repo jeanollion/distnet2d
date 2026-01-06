@@ -1089,15 +1089,6 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
             return additive_emb
 
 
-class Identity(tf.keras.layers.Layer):
-    def __init__(self, name:str=None):
-        super().__init__(name=name)
-
-    def call(self, input, training=None):
-        if not training:
-            return input
-        return tf.identity( input, name=self.name )
-
 class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
     def __init__(self, *args, inference_idx=None, output_dtype:str=None, **kwargs):
         self.output_dtype = output_dtype
@@ -1306,8 +1297,8 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
 
 
 class StopGradient(tf.keras.layers.Layer):
-    def __init__(self, name:str="StopGradient"):
-        super().__init__(name=name)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def call(self, input, training=None):
         if not training:
@@ -1316,8 +1307,8 @@ class StopGradient(tf.keras.layers.Layer):
 
 
 class WeigthedGradient(tf.keras.layers.Layer):
-    def __init__(self, weight, name: str="WeigthedGradient", **kwargs):
-        super().__init__(name=name, **kwargs)
+    def __init__(self, weight, **kwargs):
+        super().__init__(**kwargs)
         self.weight = weight
 
     def call(self, x):

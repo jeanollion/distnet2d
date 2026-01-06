@@ -49,7 +49,8 @@ class ArchBase:
                  frame_window:int = 3,
                  category_number: int = 0,  # category for each cell instance (segmentation level), <=1 means do not predict category
                  inference_gap_number: int = 0,
-                 tracking:bool = True,  # if false: outputs are only EDM and CDM
+                 segmentation:bool = True, # if false: do not output EDM and CDM
+                 tracking:bool = True,  # if false: do not output dY, dX & LM
                  long_term: bool = True,
                  next: bool = True,
                  early_downsampling:bool = True,
@@ -60,13 +61,14 @@ class ArchBase:
                  attention_filters:int = 0, attention:int = 0, attention_positional_encoding:str="2d",
                  skip_connections=[-1], skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
-                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False, edm_aux_decoder:bool=False
+                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False, edm_aux_decoder:bool=True
                  ):
         if attention > 0 or self_attention:
             assert spatial_dimensions is not None and min(spatial_dimensions) > 0, f"for attention mechanism, spatial dim must be provided. Got {spatial_dimensions}"
         self.spatial_dimensions=spatial_dimensions
         self.n_inputs = n_inputs
         self.frame_window = frame_window
+        self.segmentation = segmentation
         self.long_term=long_term
         self.category_number=category_number
         self.tracking=tracking

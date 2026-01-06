@@ -46,8 +46,9 @@ class DyDxIterator(TrackingIterator):
                  center_distance_mode = "GEODESIC",  # GEODESIC, EUCLIDEAN
                  input_label_center_idx:int = -1,  # center of target label are centers of the input label of this index
                  return_label_rank = False,
-                 long_term:bool = True,
+                 segmentation:bool = True,
                  tracking:bool = True,
+                 long_term: bool = True,
                  return_next_displacement:bool = True,
                  frame_aware:bool=False,  # return actual frame (relative to central frame)
                  **kwargs):
@@ -63,6 +64,11 @@ class DyDxIterator(TrackingIterator):
         assert center_distance_mode.upper() in CENTER_DISTANCE_MODE, f"invalid center distance mode: {center_distance_mode} should be in {CENTER_DISTANCE_MODE}"
         self.category_array_idx = next((i for i, s in enumerate(array_keywords) if "category" in s), -1)
         self.tracking = tracking
+        self.segmentation=segmentation
+        if not segmentation:
+            return_center = False
+            return_edm_derivatives = False
+            scale_edm = False
         if not tracking:
             return_link_multiplicity = False
             return_next_displacement = False
@@ -293,10 +299,11 @@ class DyDxIterator(TrackingIterator):
         object_slices = {}
         for b, c in itertools.product(range(labelIms.shape[0]), range(labelIms.shape[-1])):
             object_slices[(b, c)] = find_objects(labelIms[b,...,c])
-        edm = np.zeros(shape=labelIms.shape, dtype=np.float32)
-        for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
-            edm[b,...,c] = edt_smooth(labelIms[b,...,c], object_slices[(b, c)])
-            #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
+        edm = np.zeros(shape=labelIms.shape, dtype=np.float32) if self.segmentation or ("edm" in self.center_mode and self.input_label_center_idx < 0) else None
+        if edm is not None:
+            for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
+                edm[b,...,c] = edt_smooth(labelIms[b,...,c], object_slices[(b, c)])
+                #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
         n_motion = 2 * frame_window if return_next else frame_window
         if long_term:
             n_motion = n_motion + (2 * ( frame_window - 1 ) if return_next else frame_window -1)
@@ -332,7 +339,7 @@ class DyDxIterator(TrackingIterator):
         labels_and_centers = {}
         for b,c in itertools.product(range(labelIms.shape[0]), range(labelIms.shape[-1])):
             input_centers = batch_by_channel["input_centers"][self.input_label_center_idx][(b, c)] if self.input_label_center_idx >= 0 else None
-            labels_and_centers[(b, c)] = _get_labels_and_centers(labelIms[b][...,c], edm[b][...,c], self.center_mode, input_centers=input_centers)
+            labels_and_centers[(b, c)] = _get_labels_and_centers(labelIms[b][...,c], edm[b][...,c] if edm is not None else None, self.center_mode, input_centers=input_centers)
         for i in range(labelIms.shape[0]):
             bidx = get_idx(i)
             if self.frame_window > 0:
@@ -365,7 +372,8 @@ class DyDxIterator(TrackingIterator):
                 o_s = [object_slices[(i, 0)]]
                 _compute_outputs(l_c, labelIms[i][...,0:1], None, o_s, None, None, cdmIm=centerIm[i,...,0], edmIm = edm[i,...,0] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,0] if self.category_array_idx>0 else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>0 else None, rankIm=rankIm[i,...,0] if self.return_label_rank else None, centerArr=centerArr[i,0] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
 
-        edm[edm == 0] = -1
+        if edm is not None:
+            edm[edm == 0] = -1
         if self.return_edm_derivatives:
             der_y, der_x = np.zeros_like(edm), np.zeros_like(edm)
             c_range = range(edm.shape[-1]) if not self.output_central_only else range(frame_window, frame_window - 1)
@@ -376,8 +384,8 @@ class DyDxIterator(TrackingIterator):
                 der_x = der_x[..., 1:-1]
 
         if self.output_central_only: # select only central frame for edm / center and only displacement / link multiplicity related to central frame
-            edm = edm[..., 1:-1]
-            centerIm = centerIm[..., 1:-1]
+            edm = edm[..., 1:-1] if edm is not None else None
+            centerIm = centerIm[..., 1:-1] if self.return_center else None
             dyIm = dyIm[..., :1] if self.tracking else None
             dxIm = dxIm[..., :1] if self.tracking else None
             if self.return_link_multiplicity:
@@ -397,7 +405,11 @@ class DyDxIterator(TrackingIterator):
                     nextLabelArr = nextLabelArr[:, 1:]
         if self.return_edm_derivatives:
             edm = np.concatenate([edm, der_y, der_x], -1)
-        all_channels = [edm]
+        all_channels = []
+        if edm is not None:
+            all_channels.append(edm)
+        else:
+            all_channels.append(labelIms.astype(np.float32)) # useful for mask
         if self.return_center:
             all_channels.append(centerIm)
         downscale_factor = 1./self.downscale if self.downscale>1 else 0

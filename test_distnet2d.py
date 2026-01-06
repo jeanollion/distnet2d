@@ -38,9 +38,9 @@ if not seg:
         mixed_precision.set_global_policy('mixed_float16')
         fw = 2
         dn = get_distnet_2d(
-            arch=architectures.TemPyD4(frame_window=fw, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
+            arch=architectures.TemPyD4(segmentation=False, tracking=False, frame_window=fw, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
                                       temporal_attention=64, attention_spatial_radius=8,
-                                      skip_connections=True, early_downsampling=False, category_number=0, inference_gap_number=1,
+                                      skip_connections=True, early_downsampling=False, category_number=2, inference_gap_number=1,
                                       predict_edm_derivatives=False, predict_cdm_derivatives=False)
         )
 
