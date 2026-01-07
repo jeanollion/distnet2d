@@ -570,7 +570,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                         output_name = None if arch.frame_window > 0 or predict_edm_derivatives else decoder_output_names["Seg"][dSegName]
                         if 0 in skip_connections:
                             param_list_seg = copy.deepcopy(param_list)
-                            param_list_seg["n_conv"] = 2
+                            param_list_seg["n_conv"] = max(2, param_list.get("n_conv", 0))
                         else:
                             param_list_seg = param_list
                         decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name, aux_decoder=aux_decoder_head["Seg"][dSegName])

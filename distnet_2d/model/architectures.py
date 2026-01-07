@@ -59,7 +59,7 @@ class ArchBase:
                  batch_norm:bool = True, dropout:float=0.2, l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",  #conv, wsconv
                  attention_filters:int = 0, attention:int = 0, attention_positional_encoding:str="2d",
-                 skip_connections=[-1], skip_stop_gradient:bool = False,
+                 skip_connections=True, skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
                  predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False, edm_aux_decoder:bool=True
                  ):
@@ -168,7 +168,7 @@ class D2(ArchDepth):
              "batch_norm": self.batch_norm}
         ]
         self.decoder_settings = [
-            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": 4, "up_kernel_size": 4,
+            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": ker0, "up_kernel_size": 4,
              "weight_scaled_up": False, "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 32, "op": "res2d", "conv_kernel_size":ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
              "weight_scaled_up": False, "weight_scaled": False, "batch_norm": last_bn, "dropout_rate": 0}
@@ -237,7 +237,7 @@ class D3(ArchDepth):
              "batch_norm": self.batch_norm}
         ]
         self.decoder_settings = [
-            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": 4, "up_kernel_size": 4,
+            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": ker0, "up_kernel_size": 4,
              "weight_scaled_up": False, "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 32, "op": "res2d", "conv_kernel_size" : ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
              "weight_scaled_up": False, "weight_scaled": False, "batch_norm": last_bn, "dropout_rate": 0},
@@ -320,7 +320,7 @@ class D4(ArchDepth):
              "batch_norm": self.batch_norm}
         ]
         self.decoder_settings = [
-            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": 4, "up_kernel_size": 4,
+            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": ker0, "up_kernel_size": 4,
              "weight_scaled_up": False, "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 16, "op": "res2d", "conv_kernel_size": ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
              "weight_scaled_up": False, "weight_scaled": False, "batch_norm": last_bn, "dropout_rate": 0},
