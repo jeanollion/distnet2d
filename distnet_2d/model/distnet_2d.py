@@ -1,4 +1,5 @@
 import contextlib
+import copy
 from collections import defaultdict
 
 from pyexpat import features
@@ -567,7 +568,12 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 if arch.segmentation:
                     for dSegName in output_per_decoder["Seg"].keys():
                         output_name = None if arch.frame_window > 0 or predict_edm_derivatives else decoder_output_names["Seg"][dSegName]
-                        decoder_out["Seg"][dSegName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name, aux_decoder=aux_decoder_head["Seg"][dSegName])
+                        if 0 in skip_connections:
+                            param_list_seg = copy.deepcopy(param_list)
+                            param_list_seg["n_conv"] = 2
+                        else:
+                            param_list_seg = param_list
+                        decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name, aux_decoder=aux_decoder_head["Seg"][dSegName])
                     for dCenterName in output_per_decoder["Center"].keys():
                         output_name = None if arch.frame_window > 0 or predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
                         decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
@@ -839,7 +845,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
             #    res = LogGradientMagnitude(name=f"res{layer_idx}")(res)
             if skip_stop_gradient:
                 res = stop_gradient(res, parent_name = name)
-            #res = ScheduledDropout(rate=0.05, max_rate=0.9, min_progress=min_progress, max_progress=max_progress, spatial=True, name=f"res_dropout{layer_idx}")(res) # pushes the network to use deepest features
+            #res = ScheduledDropout(rate=0.0, max_rate=0.9, min_progress=min_progress, max_progress=max_progress, spatial=True, name=f"res_dropout{layer_idx}")(res) # pushes the network to use deepest features
             #res = LogGradientMagnitude(name=f"res_before_dropout{layer_idx}")(res)
             n_splits, inference_idx = skip_parameters
             assert inference_idx<n_splits, f"invalid inference idx: {inference_idx} must be lower than n_splits: {n_splits}"
