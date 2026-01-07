@@ -1,12 +1,6 @@
 import tensorflow as tf
 import numpy as np
 from distnet_2d.model.layers import InferenceLayer, HybridThresholdL2Regularizer
-import logging
-
-class SkipLoopOptimizationFilter(logging.Filter):
-    def filter(self, record):
-        return "Skipping loop optimization for Merge node with control input" not in record.getMessage()
-logging.getLogger('tensorflow').addFilter(SkipLoopOptimizationFilter())
 
 
 class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):

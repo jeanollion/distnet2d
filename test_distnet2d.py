@@ -3,17 +3,20 @@ from collections import defaultdict
 from pathlib import Path
 import sys
 from scipy.ndimage import gaussian_filter
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-from distnet_2d.model.architectures import BlendD2
-from distnet_2d.utils.objectwise_computation_tf import circular_kernel, _erode_mask
 
 path_root = Path(__file__).parents[1]
+print(f"path {path_root}")
 sys.path.append(path_root.joinpath("dataset_iterator").__str__())
 sys.path.append(path_root.joinpath("distne2d").__str__())
 #print(f"root={path_root} pixmclass {path_root.joinpath('pix_mclass')}")
 import tensorflow as tf
 
 
+from distnet_2d.model.architectures import BlendD2
+from distnet_2d.utils.objectwise_computation_tf import circular_kernel, _erode_mask
 import numpy as np
 from dataset_iterator.tile_utils import extract_tiles
 #a = np.zeros(shape=(10, 256, 250, 2))
@@ -38,9 +41,9 @@ if not seg:
         mixed_precision.set_global_policy('mixed_float16')
         fw = 2
         dn = get_distnet_2d(
-            arch=architectures.TemPyD4(segmentation=False, tracking=False, frame_window=fw, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
+            arch=architectures.TemPyD4(segmentation=True, tracking=False, frame_window=fw, spatial_dimensions=(64, 32), filters=192, self_attention=16, attention_filters=64,
                                       temporal_attention=64, attention_spatial_radius=8,
-                                      skip_connections=True, early_downsampling=False, category_number=2, inference_gap_number=1,
+                                      skip_connections=True, early_downsampling=False, category_number=0, inference_gap_number=1,
                                       predict_edm_derivatives=False, predict_cdm_derivatives=False)
         )
 

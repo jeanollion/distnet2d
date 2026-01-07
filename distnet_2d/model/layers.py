@@ -1088,6 +1088,15 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
         else:
             return additive_emb
 
+# for compat with tf2.7
+class Identity(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def call(self, input, training=None):
+        if not training:
+            return input
+        return tf.identity( input, name=self.name )
 
 class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
     def __init__(self, *args, inference_idx=None, output_dtype:str=None, **kwargs):

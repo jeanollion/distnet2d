@@ -17,7 +17,7 @@ from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2D
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
     InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, HybridThresholdL2Regularizer, \
     ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter, LogGradientMagnitude, \
-    ConcatenateWithDtype
+    ConcatenateWithDtype, Identity
 import numpy as np
 
 from .local_spatial_attention import LocalSpatialAttention
@@ -436,7 +436,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             kwargs["displacement_loss_weight"] = 0
             kwargs["link_multiplicity_loss_weight"] = 0
 
-        print(f"edm activation: {'tanh' if arch.scale_edm else 'linear'}")
+        print(f"edm activation: {'tanh' if arch.scale_edm else 'linear'} l2_reg: {arch.l2_reg} l2_reg_emb: {arch.position_encoding_l2_reg}")
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in arch.encoder_settings])
         assert len(arch.encoder_settings) == len(arch.decoder_settings), "decoder should have same length as encoder"
         if spatial_dimensions is None:
@@ -831,8 +831,9 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
                 x=l(x)
         if (sequence is not None or layer_idx>0) and skip_parameters is not None:
             #x = LogGradientMagnitude(name=f"main_res{layer_idx}")(x)
-            res = tf.keras.layers.Identity(name=f"residual{layer_idx}")(x)
-            x = tf.keras.layers.Identity()(x)  # tf.identity(x) to split path so that input of ResidualGradientLimiter do not contain residual gradient (gradient merging happens before tf.identity)
+            Id = tf.keras.layers.Identity if hasattr(tf.keras.layers, 'Identity') else Identity
+            res = Id(name=f"residual{layer_idx}")(x)
+            x =Id()(x)  # tf.identity(x) to split path so that input of ResidualGradientLimiter do not contain residual gradient (gradient merging happens before tf.identity)
             min_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx - 1) / (total_layers - 1) if layer_idx < total_layers - 1 else 0.
             max_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx) / (total_layers - 1) # deepest skip reaches minimal rate before shallowest skip
             #if layer_idx == 0:
@@ -910,7 +911,8 @@ def decoder_op(
         if op == "res1d" or op=="resconv1d":
             raise NotImplementedError("ResConv1D are not implemented")
         elif op == "res2d" or op=="resconv2d":
-            convs =lambda suffix: [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}") for i in range(n_conv)]
+            convs =lambda suffix: [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, weight_scaled=weight_scaled, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}") if filters_out==filters or i < n_conv-1
+                                   else Conv2DBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and not aux_decoder else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None or aux_decoder else output_name + suffix) for i in range(n_conv)]
         else:
             if weight_scaled:
                 convs = lambda suffix: [WSConv2D(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, dropout_rate=dropout_rate, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 and not aux_decoder else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_conv - 1 or output_name or aux_decoder is None else output_name + suffix) for i in range(n_conv)]
@@ -942,19 +944,27 @@ def decoder_op(
                     down_aux = down
                 else:
                     down, down_aux = down
-                up_aux = up_op_out("_aux")(down_aux) if n_conv == 0 else up_op("_aux")(down_aux)
-                for c in convs("_aux"):
-                    up_aux = c(up_aux)
+                up_aux = up_op_out("_aux")(down_aux) if (n_conv == 0 or layer_idx==0) else up_op("_aux")(down_aux)
+                if layer_idx > 0:
+                    for c in convs("_aux"):
+                        up_aux = c(up_aux)
                 #up_aux_sg = StopGradient(name=f"aux_sg{layer_idx}")(up_aux) if res is not None or n_conv > 0 and layer_idx > 0 else None # residual gradient do not go in the aux path
                 up_aux_sg = up_aux
                 up = up_op_out("")(down) if n_conv == 0 and res is None else up_op("")(down)
                 if res is not None:
-                    if combine is not None:
-                        up = combine("")([up, res, up_aux_sg])
+                    if layer_idx > 0:
+                        if combine is not None:
+                            up = combine("")([up, res, up_aux_sg])
+                        else:
+                            res = tf.cast(res, up.dtype)
+                            up = up + res + up_aux_sg
                     else:
-                        res = tf.cast(res, up.dtype)
-                        up = up + res + up_aux_sg
-                elif layer_idx > 0 or n_conv > 0:
+                        if combine is not None:
+                            up = combine("")([up, res])
+                        else:
+                            res = tf.cast(res, up.dtype)
+                            up = up + res
+                elif layer_idx > 0:
                     if combine is not None:
                         up = combine("")([up, up_aux_sg])
                     else:
