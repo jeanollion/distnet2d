@@ -558,17 +558,17 @@ class Conv2DWithDtype(tf.keras.layers.Conv2D):
         self.l2_reg = l2_reg
         kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
         bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
-        super(Conv2DWithDtype, self).__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, **kwargs)
+        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, **kwargs)
         self.output_dtype = output_dtype
         self.activation = None  # Will be set in build()
 
     def build(self, input_shape):
-        super(Conv2DWithDtype, self).build(input_shape)
+        super().build(input_shape)
         if self._activation is not None:
             self.activation = tf.keras.activations.get(self._activation)
 
     def call(self, inputs):
-        output = super(Conv2DWithDtype, self).call(inputs)
+        output = super().call(inputs)
         if self.output_dtype is not None:
             output = tf.cast(output, dtype=self.output_dtype)
         if self.activation is not None:
@@ -576,7 +576,9 @@ class Conv2DWithDtype(tf.keras.layers.Conv2D):
         return output
 
     def get_config(self):
-        config = super(Conv2DWithDtype, self).get_config()
+        config = super().get_config()
+        config.pop("kernel_regularizer", None)
+        config.pop("bias_regularizer", None)
         config.update({
             'output_dtype': self.output_dtype,
             'l2_reg':self.l2_reg,
@@ -651,17 +653,17 @@ class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
         self.l2_reg = l2_reg
         kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
         bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
-        super(Conv2DTransposeWithDtype, self).__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, **kwargs)
+        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, **kwargs)
         self.output_dtype = output_dtype
         self.activation = None  # Will be set in build()
 
     def build(self, input_shape):
-        super(Conv2DTransposeWithDtype, self).build(input_shape)
+        super().build(input_shape)
         if self._activation is not None:
             self.activation = tf.keras.activations.get(self._activation)
 
     def call(self, inputs):
-        output = super(Conv2DTransposeWithDtype, self).call(inputs)
+        output = super().call(inputs)
         if self.output_dtype is not None:
             output = tf.cast(output, dtype=self.output_dtype)
         if self.activation is not None:
@@ -669,7 +671,9 @@ class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
         return output
 
     def get_config(self):
-        config = super(Conv2DTransposeWithDtype, self).get_config()
+        config = super().get_config()
+        config.pop("kernel_regularizer", None)
+        config.pop("bias_regularizer", None)
         config.update({
             'output_dtype': self.output_dtype,
             'l2_reg':self.l2_reg,
@@ -834,7 +838,7 @@ class ScheduledDropout(tf.keras.layers.Layer):
                  power_law: float = 1.0,
                  seed=None,  # Optional: for reproducibility
                  **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(autocast=False, **kwargs)
         self.min_rate = rate
         self.max_rate = max_rate
         self.min_progress = min_progress
@@ -1090,19 +1094,20 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
 
 # for compat with tf2.7
 class Identity(tf.keras.layers.Layer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, autocast=False, **kwargs):
+        super().__init__(autocast=autocast **kwargs)
 
     def call(self, input, training=None):
         if not training:
             return input
         return tf.identity( input, name=self.name )
 
+
 class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
-    def __init__(self, *args, inference_idx=None, output_dtype:str=None, **kwargs):
+    def __init__(self, *args, inference_idx=None, output_dtype:str=None, autocast=False, **kwargs):
         self.output_dtype = output_dtype
         self.inference_idx = inference_idx
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, autocast=autocast, **kwargs)
 
     def build(self, input_shape):
         super().build(input_shape)
@@ -1124,7 +1129,7 @@ class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
 
     def get_config(self):
         config = super().get_config()
-        config.update({'output_dtype': self.output_dtype})
+        config.update({'output_dtype': self.output_dtype, "inference_idx": self.inference_idx})
         return config
 
 
@@ -1144,7 +1149,7 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
                  max_ratio: float = 1.0,
                  epsilon: float = 1e-5,  # Numerical stability
                  **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(autocast=False, **kwargs)
         self.max_ratio=max_ratio
         self.epsilon = epsilon
 
@@ -1224,7 +1229,7 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
                  max_progress: float = 1.0,  # When this layer reaches max_weight
                  power_law: float = 1.0,
                  **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(autocast=False, **kwargs)
         self.min_weight = min_weight
         self.max_weight = max_weight
         self.min_progress = min_progress
@@ -1364,7 +1369,7 @@ def get_print_grad_fun(message):
 
 class LogGradientMagnitude(tf.keras.layers.Layer):
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(autocast=False, **kwargs)
         self.grad_accum = None
 
     def build(self, input_shape):

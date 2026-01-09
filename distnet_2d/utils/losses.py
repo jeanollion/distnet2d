@@ -29,7 +29,7 @@ class PseudoHuber(tf.keras.losses.Loss):
 
 
 class TemperedFocalCrossEntropy(tf.keras.losses.Loss):
-    def __init__(self, temperature: float = 2.0, gamma: float = 2.0, **kwargs):
+    def __init__(self, temperature: float = 1.0, gamma: float = 0.0, **kwargs):
         """
         Tempered Focal Cross-Entropy for multi-class classification.
         Combines gradient stability (tempering) with hard example mining (focal).
@@ -61,15 +61,19 @@ class TemperedFocalCrossEntropy(tf.keras.losses.Loss):
         epsilon = tf.keras.backend.epsilon()
         y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
 
-        t = self.temperature
-
         # Tempered log: (p^(1-t) - 1) / (1-t)
         # Bounds gradients: ∂L/∂p ∝ p^(-t) instead of p^(-1)
-        tempered_log = (tf.pow(y_pred, 1. - t) - 1.) / (1. - t)
+        if self.temperature > 1:
+            tempered_log = (tf.pow(y_pred, 1. - self.temperature) - 1.) / (1. - self.temperature)
+        else:
+            tempered_log = tf.math.log(y_pred)
 
         # Focal weight: (1 - p)^gamma
         # Down-weights easy examples (high confidence correct predictions)
-        focal_weight = tf.pow(1. - y_pred, self.gamma)
+        if self.gamma > 0:
+            focal_weight = tf.pow(1. - y_pred, self.gamma)
+        else:
+            focal_weight = tf.cast(1, y_true.dtype)
 
         # Combined loss: alpha * focal_weight * y_true * tempered_log
         # Sum over classes (categorical), mean over batch

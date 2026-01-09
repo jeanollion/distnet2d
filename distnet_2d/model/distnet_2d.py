@@ -92,8 +92,10 @@ class DiSTNetModel(tf.keras.Model):
                 self.category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), self.category_class_weights.value, remove_background=True)
             else:
                 self.category_loss = balanced_category_loss(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
+            self.fgbg_category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, temperature=1, gamma=0), [1., 1.], remove_background=False)
         else:
             self.category_loss = None
+
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
         self.long_term = long_term
         self.use_grad_acc = accum_steps>1
@@ -119,11 +121,13 @@ class DiSTNetModel(tf.keras.Model):
             self.center_loss_metric = tf.keras.metrics.Mean(name="CDM")
         if self.category_weight > 0 and self.category_number > 1:
             self.category_loss_metric = tf.keras.metrics.Mean(name="category")
+            self.fgbg_category_loss_metric = tf.keras.metrics.Mean(name="FgBg")
         if self.displacement_weight > 0:
             self.dx_loss_metric = tf.keras.metrics.Mean(name="dX")
             self.dy_loss_metric = tf.keras.metrics.Mean(name="dY")
         if self.link_multiplicity_weight > 0:
             self.link_multiplicity_loss_metric = tf.keras.metrics.Mean(name="link_multiplicity")
+
         self.loss_scales = tf.Variable(tf.ones(shape=(len(self.get_sub_losses_names()),), dtype=tf.float32), trainable=False, name="loss_scales") if scale_losses else False
         self.loss_metric = tf.keras.metrics.Mean(name="loss")
         self.perform_test_step=perform_test_step
@@ -135,13 +139,15 @@ class DiSTNetModel(tf.keras.Model):
             losses.append("EDM")
         if self.center_weight > 0:
             losses.append("CDM")
-        if self.category_weight > 0 and self.category_number > 1:
-            losses.append("category")
         if self.displacement_weight > 0:
             losses.append("dX")
             losses.append("dY")
         if self.link_multiplicity_weight > 0:
             losses.append("link_multiplicity")
+        if self.category_weight > 0 and self.category_number > 1:
+            losses.append("category")
+            if len(losses) == 1:
+                losses.append("FgBg")
         return losses
 
     @staticmethod
@@ -165,27 +171,29 @@ class DiSTNetModel(tf.keras.Model):
         if self.use_grad_acc and training:
             self.gradient_accumulator.init_train_step()
 
+        mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
+        x, y = data
+        batch_dim = tf.shape(y[0])[0]
+
         fw = self.frame_window
         n_frames = fw * (2 if self.future_frames else 1) + 1
         n_frame_pairs = fw * (2 if self.future_frames else 1)
         n_fp_mul = 2 if self.predict_fw else 1
         if self.long_term:
             n_frame_pairs += (fw - 1) * (2 if self.future_frames else 1)
-        mixed_precision = tf.keras.mixed_precision.global_policy().name == "mixed_float16"
-        x, y = data
-        batch_dim = tf.shape(y[0])[0]
-        displacement_weight = self.displacement_weight / (2. * n_fp_mul) if fw > 0 else 0 # y & x
-        link_multiplicity_weight = self.link_multiplicity_weight / (n_fp_mul * float(n_frame_pairs)) if fw > 0 else 0
-        edm_weight = self.edm_weight / float(n_frames) # divide by channel number ?
-        center_weight = self.center_weight / float(n_frames)# divide by channel number ?
-        category_weight = self.category_weight / float(n_frames)
-        expected_true_outputs = 1 + int(center_weight>0) + 2*int(displacement_weight>0) + int(link_multiplicity_weight>0) + int(category_weight>0)
+        # TODO : measure gradients and fix norms
+        displacement_weight = self.displacement_weight if fw > 0 else 0 # div was 2 * n_fp_mul
+        link_multiplicity_weight = self.link_multiplicity_weight / (n_fp_mul * float(n_frame_pairs)) if fw > 0 else 0 # manual sum at loss computation so no mean reduction
+        edm_weight = self.edm_weight #/ was float(n_frames)
+        center_weight = self.center_weight #/ was float(n_frames)# divide by channel number ?
+        category_weight = self.category_weight / float(n_frames) # manual sum at loss computation so no mean reduction
+        fgbg_category_weight = self.category_weight
+        expected_true_outputs = int(edm_weight>0) + int(center_weight>0) + 2*int(displacement_weight>0) + int(link_multiplicity_weight>0) + int(category_weight>0)
         assert len(y) == expected_true_outputs , f"invalid number of output. Expected: {expected_true_outputs} actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity, 5=category
 
         cdm_idx = int(edm_weight > 0)
         lm_idx = cdm_idx + int(center_weight > 0) + 2 * int(displacement_weight > 0)
         cat_idx = lm_idx + int(link_multiplicity_weight > 0)
-
         with self.maybe_gradient_tape(training) as tape:
             y_pred = self(x, training=training)  # Forward pass
             if edm_weight > 0:
@@ -201,10 +209,10 @@ class DiSTNetModel(tf.keras.Model):
                         edm, edm_aux = tf.split(edm, num_or_size_splits=2, axis=-1)
                     else:
                         edm_aux = None
-                if self.predict_edm_derivatives or self.edm_derivative_loss:
-                    true_edm, true_edm_dy, true_edm_dx = tf.split(y[0], num_or_size_splits=3, axis=-1)
-                else:
-                    true_edm, true_edm_dy, true_edm_dx = y[0], None, None
+            if self.predict_edm_derivatives or self.edm_derivative_loss:
+                true_edm, true_edm_dy, true_edm_dx = tf.split(y[0], num_or_size_splits=3, axis=-1)
+            else:
+                true_edm, true_edm_dy, true_edm_dx = y[0], None, None
             if center_weight > 0:
                 if self.predict_cdm_derivatives:
                     cdm, cdm_dy, cdm_dx = tf.split(y_pred[1], num_or_size_splits=3, axis=-1)
@@ -246,9 +254,16 @@ class DiSTNetModel(tf.keras.Model):
                 loss_weights["CDM"] = center_weight
 
             if category_weight > 0:
-                cat_loss = self._compute_category_loss(y[cat_idx], y_pred[cat_idx], cell_mask, n_frames)
-                cat_loss = tf.reduce_mean(cat_loss)
-                losses["category"] = cat_loss
+                if cat_idx == 0: # if !segmentation & !tracking: also predicts foreground/background as a training auxilary output
+                    cat_pred = y_pred[..., :-2]
+                    fg_bg_pred = y_pred[..., -2:]
+                    fg_bg_true = tf.cast(cell_mask, fg_bg_pred.dtype)
+                    losses["FgBg"] = tf.reduce_mean(self.fgbg_category_loss(fg_bg_true, fg_bg_pred))
+                    loss_weights["FgBg"] = fgbg_category_weight
+                else:
+                    cat_pred = y_pred[cat_idx]
+                cat_loss = self._compute_category_loss(y[cat_idx], cat_pred, cell_mask, n_frames)
+                losses["category"] = tf.reduce_mean(cat_loss)
                 loss_weights["category"] = category_weight
 
             # regression displacement loss
@@ -314,7 +329,7 @@ class DiSTNetModel(tf.keras.Model):
             if hasattr(self, "log_gradients"):
                 self.log_gradients(gradients, loss)
             if self.use_agc:
-                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords)
+                gradients = adaptive_clip_grad(self.trainable_variables, gradients, clip_factor=self.agc_clip_factor, eps=self.agc_eps, exclude_keywords=self.agc_exclude_keywords, monitor=False) # monitor only in eager mode
             if not self.use_grad_acc:
                 self.optimizer.apply_gradients(zip(gradients, self.trainable_variables)) #Update weights
             else:
@@ -340,8 +355,11 @@ class DiSTNetModel(tf.keras.Model):
         if self.category_weight > 0 and self.category_number > 1:
             self.category_loss_metric.update_state(losses["category"], sample_weight=batch_dim)
             sub_losses.append(losses["category"])
+            if len(sub_losses) == 1:
+                self.fgbg_category_loss_metric.update_state(losses["FgBg"], sample_weight=batch_dim)
+                sub_losses.append(losses["FgBg"])
         if self.loss_scales is not None:
-            normalized_loss = tf.reduce_mean(sub_losses / (self.loss_scales + tf.keras.backend.epsilon()))
+            normalized_loss = tf.reduce_mean(tf.stack(sub_losses) / (self.loss_scales + tf.keras.backend.epsilon()))
             self.loss_metric.update_state(normalized_loss, sample_weight=batch_dim)
             losses["loss"] = normalized_loss
         else:
@@ -380,11 +398,11 @@ class DiSTNetModel(tf.keras.Model):
 
     def _compute_category_loss(self, y, y_pred, cell_mask, n_frames): # TODO use split instead of loop
         cn = self.category_number
-        lm_loss = 0.
+        cat_loss = 0.
         for i in range(n_frames):
             cat_pred_inside = tf.where(cell_mask[..., i:i + 1], y_pred[..., cn * i:cn * i + cn], 1)
-            lm_loss = lm_loss + self.category_loss(y[..., i:i + 1], cat_pred_inside)
-        return lm_loss
+            cat_loss = cat_loss + self.category_loss(y[..., i:i + 1], cat_pred_inside)
+        return cat_loss
 
     def _compute_link_multiplicity_loss(self, y, y_pred, n_frame_pairs, n_fp_mul): # TODO use split instead of loop
         lm_loss = 0.
@@ -540,6 +558,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 output_per_decoder["LinkMultiplicity"]["LinkMultiplicityFW"] = output_per_decoder["LinkMultiplicity"]["LinkMultiplicityBW"]
         if arch.category_number > 1:
             output_per_decoder["Cat"] = {"Category": ++oidx}
+            if not tracking and not arch.segmentation:
+                output_per_decoder["Cat"]["FgBg"] = oidx
         decoder_output_names = dict()
         for n, o_ns in output_per_decoder.items():
             decoder_output_names[n] = dict()
@@ -579,8 +599,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                         decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
                 if arch.category_number > 1:
                     for dCatName in output_per_decoder["Cat"].keys():
-                        output_name = None if arch.frame_window > 0 else decoder_output_names["Cat"][dCatName]
-                        decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
+                        if dCatName == "Category":
+                            output_name = None if arch.frame_window > 0 or len(output_per_decoder["Cat"])>1 else decoder_output_names["Cat"][dCatName]
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
+                        elif dCatName == "FgBg":
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None)
+                        else:
+                            raise ValueError(f"Unknown category name: {dCatName}")
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
                         decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
@@ -640,7 +665,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next, l2_reg=arch.position_encoding_l2_reg)(frame_index)
 
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
-        if isinstance(arch, TemPy) and arch.frame_window > 0:
+        if isinstance(arch, TemPy):
             watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                window_size=arch.attention_spatial_radius, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg,
                                add_distance_embedding=True, skip_connection=True)
@@ -650,23 +675,24 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 # self-attention with distance embedding for EDM / CDM prediction
                 sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
                 features_batch = sa(features_batch) # T x B, Y, X, C
-            features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
-            blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
-            blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
-            feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
-            for op in feature_blending_convs:
-                blended_features = op(blended_features)
-            if v7:
-                features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True, l2_reg=arch.l2_reg)([features_batch_r, blended_features])
-                feature_pairs_batch = TemporalFeaturePairReconstructor(feature_filters, prev_idx=fidx_prev, next_idx=fidx_next, inference_idx=inference_pair_idx, compensate_gradient=True, l2_reg=arch.l2_reg)([features_batch_r, blended_features_level1_r, blended_features])
-            else: # v6
-                inference_feature_idx = list( set([fidx_prev[pidx] for pidx in inference_pair_idx] + [fidx_next[pidx] for pidx in inference_pair_idx]))
-                inference_feature_idx.sort()
-                features_batch_r = TemporalFeatureReconstructorV6(feature_filters, inference_idx=inference_feature_idx)([features_batch_r, blended_features_level1_r, blended_features])
-                feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev,  inference_idx=[inference_feature_idx.index(fidx_prev[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairPrev")(features_batch_r)  # Tp x B, Y, X, C
-                feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=[inference_feature_idx.index(fidx_next[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairNext")(features_batch_r)
-                feature_pairs_batch = pair_combine_op([feature_prev, feature_next])  # Tp x B, Y, X, C
-                features_batch = InferenceAwareBatchSelector(inference_idx=inference_feature_idx.index(arch.frame_window), name="SelectFeature")( features_batch_r)
+            if arch.frame_window > 0:
+                features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
+                blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
+                blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
+                feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
+                for op in feature_blending_convs:
+                    blended_features = op(blended_features)
+                if v7:
+                    features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True, l2_reg=arch.l2_reg)([features_batch_r, blended_features])
+                    feature_pairs_batch = TemporalFeaturePairReconstructor(feature_filters, prev_idx=fidx_prev, next_idx=fidx_next, inference_idx=inference_pair_idx, compensate_gradient=True, l2_reg=arch.l2_reg)([features_batch_r, blended_features_level1_r, blended_features])
+                else: # v6
+                    inference_feature_idx = list( set([fidx_prev[pidx] for pidx in inference_pair_idx] + [fidx_next[pidx] for pidx in inference_pair_idx]))
+                    inference_feature_idx.sort()
+                    features_batch_r = TemporalFeatureReconstructorV6(feature_filters, inference_idx=inference_feature_idx)([features_batch_r, blended_features_level1_r, blended_features])
+                    feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev,  inference_idx=[inference_feature_idx.index(fidx_prev[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairPrev")(features_batch_r)  # Tp x B, Y, X, C
+                    feature_next = InferenceAwareBatchSelector(train_idx=fidx_next, inference_idx=[inference_feature_idx.index(fidx_next[pidx]) for pidx in inference_pair_idx], name="SelectFeaturePairNext")(features_batch_r)
+                    feature_pairs_batch = pair_combine_op([feature_prev, feature_next])  # Tp x B, Y, X, C
+                    features_batch = InferenceAwareBatchSelector(inference_idx=inference_feature_idx.index(arch.frame_window), name="SelectFeature")( features_batch_r)
         elif isinstance(arch, TemA) and arch.frame_window > 0:
             features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch) # T, B, Y, X, C
             feature_prev = InferenceAwareBatchSelector(train_idx=fidx_prev, inference_idx=fidx_prev,  name="SelectFeaturePairPrev")( features_batch_r) # Tp x B, Y, X, C
@@ -809,6 +835,9 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 if decoder_name=="Center" and predict_cdm_derivatives:
                     output_name = "CDM"
                     output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
+                if decoder_name=="Cat" and len(output_per_decoder["Cat"])>1:
+                    output_name = "Category"
+                    output_per_dec[output_name] = ConcatenateWithDtype(inference_idx=0, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("FgBg")])
                 outputs.extend(output_per_dec.values())
         return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if getattr(arch, "attention", 0) > 0 or arch.self_attention > 0 else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=arch.category_number, edm_aux_decoder=edm_aux_decoder, **kwargs)
 
@@ -823,7 +852,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
         down_sequence = []
     if maxpool or maxpool_and_stride:
         down_sequence = down_sequence+[tf.keras.layers.MaxPool2D(pool_size=total_contraction, name=f"{name}_Maxpool{total_contraction}x{total_contraction}")]
-        down_concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}_DownConcat", dtype="float32")
+        down_concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}_DownConcat")
     def op(input):
         x = input
         if sequence is not None:
@@ -832,8 +861,8 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
         if (sequence is not None or layer_idx>0) and skip_parameters is not None:
             #x = LogGradientMagnitude(name=f"main_res{layer_idx}")(x)
             Id = tf.keras.layers.Identity if hasattr(tf.keras.layers, 'Identity') else Identity
-            res = Id(name=f"residual{layer_idx}")(x)
-            x =Id()(x)  # tf.identity(x) to split path so that input of ResidualGradientLimiter do not contain residual gradient (gradient merging happens before tf.identity)
+            res = Id(name=f"residual{layer_idx}", autocast=False)(x)
+            x =Id(autocast=False)(x)  # tf.identity(x) to split path so that input of ResidualGradientLimiter do not contain residual gradient (gradient merging happens before tf.identity)
             min_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx - 1) / (total_layers - 1) if layer_idx < total_layers - 1 else 0.
             max_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx) / (total_layers - 1) # deepest skip reaches minimal rate before shallowest skip
             #if layer_idx == 0:
@@ -934,6 +963,7 @@ def decoder_op(
                         up = up + res
                 for c in convs(""):
                     up = c(up)
+                #up = LogGradientMagnitude(name=f"{f'dec{layer_idx}' if name is None else name}_grad")(up)
                 return up
             return op
 
