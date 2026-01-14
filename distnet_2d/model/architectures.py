@@ -405,7 +405,6 @@ class TemPy(ArchBase):
         self.temporal_attention = temporal_attention
         if self.frame_window > 0:
             assert temporal_attention > 0
-        super().__init__(frame_aware=True, **kwargs)
         self.feature_blending_settings = [
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},
