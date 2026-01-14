@@ -401,10 +401,11 @@ class TemAD4(TemA, D4):
 
 class TemPy(ArchBase):
     def __init__(self, temporal_attention:int, **kwargs):
-        self.temporal_attention = temporal_attention
-        assert temporal_attention > 0
         super().__init__(frame_aware=True, **kwargs)
-        ker4_fd = self.feature_decoder_settings[0]["kernel_size"]
+        self.temporal_attention = temporal_attention
+        if self.frame_window > 0:
+            assert temporal_attention > 0
+        super().__init__(frame_aware=True, **kwargs)
         self.feature_blending_settings = [
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},

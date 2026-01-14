@@ -29,27 +29,59 @@ class PseudoHuber(tf.keras.losses.Loss):
 
 
 class TemperedFocalCrossEntropy(tf.keras.losses.Loss):
-    def __init__(self, temperature: float = 1.0, gamma: float = 0.0, **kwargs):
+    def __init__(self, temperature: float = 2.0, focal_weight = 2.0,
+                 label_smoothing: float = 0, **kwargs):
         """
-        Tempered Focal Cross-Entropy for multi-class classification.
-        Combines gradient stability (tempering) with hard example mining (focal).
+        Tempered Focal Cross-Entropy with Label Smoothing for multi-class classification.
+        Combines gradient stability (tempering), hard example mining (focal),
+        and regularization (label smoothing).
 
         Args:
-            temperature: Tempering parameter (t > 1). Controls gradient bounding.
+            temperature: Tempering parameter (t ≥ 1). Controls gradient bounding.
                         t=1.0 → standard focal loss (unbounded gradients)
                         t=2.0 → moderate bounding (recommended start)
                         t=3.0+ → strong bounding (very stable, may slow learning)
 
-            gamma: Focusing parameter (γ ≥ 0). Controls hard example emphasis.
+            focal_weight: Focusing parameter (γ ≥ 0). Controls hard example emphasis. can be a list / tuple -> one value for each class
                    γ=0.0 → tempered CE (no focal effect)
                    γ=1.0 → mild focus on hard examples
                    γ=2.0 → standard focal (recommended start)
                    γ=5.0 → extreme focus (for very imbalanced data)
+
+            label_smoothing: Smoothing parameter (0 ≤ ε < 1). Regularization strength.
+                            ε=0.0 → no smoothing (hard labels)
+                            ε=0.1 → typical for ImageNet (recommended start)
+                            ε=0.2 → stronger regularization
+                            Effect: y_smooth = y * (1-ε) + ε/K where K=num_classes
+
+                            Benefits:
+                            - Prevents overconfidence (probabilities ≠ 0 or 1)
+                            - Improves calibration (predicted probs match true frequencies)
+                            - Acts as regularization (reduces overfitting)
+                            - Better generalization on test data
+
+                            When useful:
+                            - Models prone to overconfidence
+                            - Limited training data
+                            - Noisy labels
+                            - When calibration matters (e.g., medical, finance)
+
+                            Trade-offs:
+                            - May slightly hurt training accuracy
+                            - Improves test accuracy & calibration
+                            - Can conflict with focal loss (both modify targets)
         """
         self.temperature = float(temperature)
-        self.gamma = float(gamma)
-        assert temperature >=1, f"temperature must be >=1 got {temperature}"
-        assert gamma >=0, f"gamma must be >=0 got {gamma}"
+        if focal_weight is None or (isinstance(focal_weight, (float, int)) and focal_weight == 0):
+            self.focal_weight = None
+        else:
+            self.focal_weight = np.atleast_1d(np.array(focal_weight, dtype=np.float32))
+        self.label_smoothing = float(label_smoothing)
+
+        assert temperature >= 1, f"temperature must be >=1, got {temperature}"
+        assert focal_weight is None or np.all(focal_weight >= 0), f"gamma must be >=0, got {focal_weight}"
+        assert 0 <= label_smoothing < 1, f"label_smoothing must be in [0,1), got {label_smoothing}"
+
         super().__init__(**kwargs)
 
     def call(self, y_true, y_pred):
@@ -61,33 +93,44 @@ class TemperedFocalCrossEntropy(tf.keras.losses.Loss):
         epsilon = tf.keras.backend.epsilon()
         y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
 
+        # Apply label smoothing: y_smooth = y * (1-ε) + ε/K
+        if self.label_smoothing > 0:
+            num_classes = tf.cast(tf.shape(y_true)[-1], y_true.dtype)
+            y_true = y_true * (1. - self.label_smoothing) + self.label_smoothing / num_classes
+
         # Tempered log: (p^(1-t) - 1) / (1-t)
-        # Bounds gradients: ∂L/∂p ∝ p^(-t) instead of p^(-1)
         if self.temperature > 1:
             tempered_log = (tf.pow(y_pred, 1. - self.temperature) - 1.) / (1. - self.temperature)
         else:
             tempered_log = tf.math.log(y_pred)
 
         # Focal weight: (1 - p)^gamma
-        # Down-weights easy examples (high confidence correct predictions)
-        if self.gamma > 0:
-            focal_weight = tf.pow(1. - y_pred, self.gamma)
+        # Note: With label smoothing, focal effect is slightly reduced
+        # since targets are no longer pure 0/1
+        if self.focal_weight is not None:
+            if len(self.focal_weight) == 1:
+                focal_weight = tf.pow(1. - y_pred, tf.constant(self.focal_weight[0], dtype=y_pred.dtype))
+            else: # per class gamma
+                weight_tensor = tf.constant(self.focal_weight, dtype=y_pred.dtype)
+                weight_tensor = tf.reshape(weight_tensor, [1] * (len(y_pred.shape) - 1) + [-1])
+                focal_weight = tf.pow(1. - y_pred, weight_tensor)
         else:
             focal_weight = tf.cast(1, y_true.dtype)
 
-        # Combined loss: alpha * focal_weight * y_true * tempered_log
-        # Sum over classes (categorical), mean over batch
+        # Combined loss
         loss = - focal_weight * y_true * tempered_log
 
-        return tf.reduce_sum(loss, axis=-1)  # Sum over classes
+        return tf.reduce_sum(loss, axis=-1)
 
     def get_config(self):
         config = super().get_config()
         config.update({
             'temperature': self.temperature,
-            'gamma': self.gamma
+            'focal_weight': list(self.focal_weight) if self.focal_weight is not None else None,
+            'label_smoothing': self.label_smoothing
         })
         return config
+
 
 def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, pred_dy=None, pred_dx=None, pred_lap=None, mask=None, der_mask=None, derivative_loss: bool = False, laplacian_loss: bool = False, weight_map=None):
     loss = loss_fun(true, tf.where(mask, pred, 0) if mask is not None else pred)
@@ -179,3 +222,53 @@ def balanced_category_loss(original_loss_func, n_classes, max_class_frequency=10
             class_weights = sample_weight * class_weights
         return original_loss_func(y_true, y_pred, sample_weight=class_weights)
     return loss_func
+
+
+def compute_focal_weights(class_counts,
+                          base_value=1.0,
+                          range=(0.25, 10.0),
+                          power_law = 0.4):
+    """
+    Compute per-class focal weight values based on class frequencies.
+
+    INTUITION:
+    - Rare classes need higher gamma (more aggressive focusing)
+    - Common classes need lower gamma (less aggressive, avoid noise)
+
+    Args:
+        class_counts: Array of sample counts per class, shape (num_classes,)
+        base_value: Baseline gamma value (typically 2.0)
+        range: (min_gamma, max_gamma) to clip results
+        power_law: float
+            power_law 0.2 (conservative) to 0.4 (aggressive)
+
+    Returns:
+        per_class_gamma: Array of shape (num_classes,)
+
+    STRATEGY DETAILS:
+       gamma_i = base_gamma × (max_freq / freq_i)^α
+
+       Example with α=0.25: [10000, 1000, 100, 10] samples
+       → gamma ≈ [2.0, 2.4, 2.8, 3.6]
+
+       Properties:
+       - α controls aggressiveness (0.2-0.3 typical)
+       - More aggressive than log for extreme imbalance
+       - Risk of overfitting rare classes if α too high
+
+    """
+    class_counts = np.array(class_counts, dtype=np.float32)
+    class_counts = np.maximum(class_counts, 1.0)
+    mean_freq = class_counts.mean()
+    min_gamma, max_gamma = range
+
+    # gamma_i = base × (max_freq / freq_i)^α
+    # Rationale: Power law for more aggressive rare class boosting
+    freq_ratios = mean_freq / class_counts
+    gamma_multipliers = np.power(freq_ratios, power_law)
+    per_class_gamma = base_value * gamma_multipliers
+
+    # Clip to reasonable range
+    per_class_gamma = np.clip(per_class_gamma, min_gamma, max_gamma)
+
+    return per_class_gamma

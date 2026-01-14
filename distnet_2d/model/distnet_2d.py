@@ -49,7 +49,7 @@ class DiSTNetModel(tf.keras.Model):
                  long_term:bool=True,
                  predict_fw:bool=True,
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
-                 category_number:int=0, category_class_weights = None, category_max_class_weight=10,
+                 category_number:int=0, category_class_weights = None, category_focal_weight = 2.0, category_max_class_weight=10,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  accum_steps=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False, scale_losses:bool = True,
@@ -89,10 +89,10 @@ class DiSTNetModel(tf.keras.Model):
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
                 self.category_class_weights = HideVariableWrapper(tf.Variable(np.asarray(category_class_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="category_class_weights"))
-                self.category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), self.category_class_weights.value, remove_background=True)
+                self.category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight), self.category_class_weights.value, remove_background=True)
             else:
                 self.category_loss = balanced_category_loss(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
-            self.fgbg_category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, temperature=1, gamma=0), [1., 1.], remove_background=False)
+            self.fgbg_category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, temperature=1, focal_weight=0), [1., 1.], remove_background=False)
         else:
             self.category_loss = None
 
@@ -671,7 +671,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                                add_distance_embedding=True, skip_connection=True)
             v7 = True
             sa = True
-            if sa:
+            if sa and arch.temporal_attention > 0 and attention_filters > 0:
                 # self-attention with distance embedding for EDM / CDM prediction
                 sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
                 features_batch = sa(features_batch) # T x B, Y, X, C
