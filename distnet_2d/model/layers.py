@@ -255,6 +255,8 @@ class Combine(tf.keras.layers.Layer):
                 activation=self.activation,
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                kernel_constraint=ClipMaxValue(),
+                bias_constraint=ClipMaxValue(),
                 name=self.name+"_conv1x1")
         else:
             self.combine_conv = Conv2DWithDtype(
@@ -263,8 +265,7 @@ class Combine(tf.keras.layers.Layer):
                 dtype=self.dtype_policy,
                 padding='same',
                 activation=self.activation,
-                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                l2_reg=self.l2_reg,
                 output_dtype=self.output_dtype,
                 name=self.name+"_conv1x1")
         if self.compensate_gradient:
@@ -308,6 +309,8 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
                 dtype=self.dtype_policy,
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                kernel_constraint=ClipMaxValue(),
+                bias_constraint=ClipMaxValue(),
                 name=f"Conv_{i}"
             )
         for i in range(self.n_conv)]
@@ -368,6 +371,8 @@ class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
                 dtype=self.dtype_policy,
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                kernel_constraint=ClipMaxValue(),
+                bias_constraint = ClipMaxValue(),
                 name=f"Conv_{i}"
             )
         for i in range(self.n_conv)]
@@ -447,6 +452,8 @@ class ResConv2D(tf.keras.layers.Layer):
             activation="linear",
             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            kernel_constraint=ClipMaxValue(),
+            bias_constraint = ClipMaxValue()
         )
         self.conv2 = conv_fun(
             filters=input_channels,
@@ -459,6 +466,8 @@ class ResConv2D(tf.keras.layers.Layer):
             activation="linear",
             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            kernel_constraint=ClipMaxValue(),
+            bias_constraint = ClipMaxValue()
         )
         self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
         self.activation_layer = tf.keras.activations.get(self.activation)
@@ -497,7 +506,7 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             kernel_size: int=3,
             dilation: int = 1,
             strides: int = 1,
-            dropout_rate:float = 0.3,
+            dropout_rate:float = 0.2,
             batch_norm : bool = True,
             activation:str = "relu",
             l2_reg:float = 0,
@@ -533,6 +542,8 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             activation="linear",
             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            kernel_constraint=ClipMaxValue(),
+            bias_constraint = ClipMaxValue()
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
@@ -558,7 +569,9 @@ class Conv2DWithDtype(tf.keras.layers.Conv2D):
         self.l2_reg = l2_reg
         kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
         bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
-        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, **kwargs)
+        kernel_constraint = ClipMaxValue()
+        bias_constraint = ClipMaxValue()
+        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
         self.output_dtype = output_dtype
         self.activation = None  # Will be set in build()
 
@@ -579,6 +592,8 @@ class Conv2DWithDtype(tf.keras.layers.Conv2D):
         config = super().get_config()
         config.pop("kernel_regularizer", None)
         config.pop("bias_regularizer", None)
+        config.pop("kernel_constraint", None)
+        config.pop("bias_constraint", None)
         config.update({
             'output_dtype': self.output_dtype,
             'l2_reg':self.l2_reg,
@@ -626,6 +641,8 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             activation="linear",
             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            kernel_constraint=ClipMaxValue(),
+            bias_constraint = ClipMaxValue(),
             name=f"tConv{ker_size_to_string(self.kernel_size)}",
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
@@ -653,7 +670,9 @@ class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
         self.l2_reg = l2_reg
         kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
         bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
-        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, **kwargs)
+        kernel_constraint = ClipMaxValue()
+        bias_constraint = ClipMaxValue()
+        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
         self.output_dtype = output_dtype
         self.activation = None  # Will be set in build()
 
@@ -674,6 +693,8 @@ class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
         config = super().get_config()
         config.pop("kernel_regularizer", None)
         config.pop("bias_regularizer", None)
+        config.pop("kernel_constraint", None)
+        config.pop("bias_constraint", None)
         config.update({
             'output_dtype': self.output_dtype,
             'l2_reg':self.l2_reg,
@@ -959,6 +980,7 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
             input_dim=self.input_dim,
             output_dim=self.output_dim,
             embeddings_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg, axis=1) if self.l2_reg > 0 else None,
+            embeddings_constraint=ClipMaxValue(),
             dtype=self.dtype_policy
         )
         super().build(input_shape)
@@ -1026,6 +1048,8 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 bias_initializer=tf.keras.initializers.Zeros(),
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                kernel_constraint=ClipMaxValue(),
+                bias_constraint=ClipMaxValue(),
             ),
             tf.keras.layers.Dense(
                 units=self.embedding_dim,
@@ -1035,6 +1059,8 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 bias_initializer=tf.keras.initializers.Zeros(),
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                kernel_constraint=ClipMaxValue(),
+                bias_constraint=ClipMaxValue(),
             ),
         ], name="additive_embedding")
 
@@ -1048,6 +1074,8 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                     kernel_initializer='glorot_uniform',
                     kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                     bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                    kernel_constraint=ClipMaxValue(),
+                    bias_constraint=ClipMaxValue(),
                     name='mult_hidden'
                 ),
                 tf.keras.layers.Dense(
@@ -1058,6 +1086,8 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                     kernel_initializer=tf.keras.initializers.Zeros(),
                     kernel_regularizer=HybridThresholdL2Regularizer(directional_strength = self.l2_reg * 10, elementwise_strength = self.l2_reg) if self.l2_reg > 0 else None,
                     bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                    kernel_constraint=ClipMaxValue(),
+                    bias_constraint=ClipMaxValue(),
                     name='mult_gate'
                 ),
                 tf.keras.layers.Lambda(lambda x : x + 1)
@@ -1479,3 +1509,15 @@ class HybridThresholdL2Regularizer(tf.keras.regularizers.Regularizer):
             "axis":self.axis
         }
 
+@tf.keras.utils.register_keras_serializable(package='Custom', name='ClipMaxValue')
+class ClipMaxValue(tf.keras.constraints.Constraint):
+    """Clips the weights to not exceed a maximum value (typically lower than 65504.0 for FP16 compatibility)."""
+
+    def __init__(self, max_value=60000.0):
+        self.max_value = max_value
+
+    def __call__(self, w):
+        return tf.clip_by_value(w, -self.max_value, self.max_value)
+
+    def get_config(self):
+        return {'max_value': self.max_value}
