@@ -927,7 +927,7 @@ class ScheduledDropout(tf.keras.layers.Layer):
     def get_current_rate(self):
         """Get current dropout rate"""
         if self.progress is None:
-            return self.max_rate
+            return self.min_rate
 
         # Calculate layer-specific progress
         # Cast to float32 explicitly to handle mixed precision
@@ -1300,7 +1300,7 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
     def get_current_weight(self):
         """Get current gradient weight"""
         if self.progress is None:
-            return self.min_weight
+            return self.max_weight
 
         # Calculate layer-specific progress
         # Cast to float32 explicitly to handle mixed precision

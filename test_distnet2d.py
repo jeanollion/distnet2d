@@ -39,12 +39,12 @@ if not seg:
     if True:
         from tensorflow.keras import mixed_precision
         mixed_precision.set_global_policy('mixed_float16')
-        fw = 0
+        fw = 2
         spa_dim = (256, 256)
         dn = get_distnet_2d(
-            arch=architectures.TemPyD3(segmentation=False, tracking=False, frame_window=fw, spatial_dimensions=spa_dim, filters=192, self_attention=0, attention_filters=0,
+            arch=architectures.TemPyD3(segmentation=True, wsa_edm=True, tracking=False, frame_window=fw, spatial_dimensions=spa_dim, filters=192, self_attention=0, attention_filters=0,
                                       temporal_attention=64, attention_spatial_radius=16,
-                                      skip_connections=False, early_downsampling=False, category_number=3, inference_gap_number=1,
+                                      skip_connections=True, early_downsampling=False, category_number=3, inference_gap_number=1,
                                       predict_edm_derivatives=False, predict_cdm_derivatives=False)
         )
 
@@ -53,8 +53,8 @@ if not seg:
         print(f"reg loss: {len(dn.losses)} layers: {len(dn.layers)} values: {dn.losses}")
         print(f"variables: {len(dn.trainable_variables)} shape: {[t.shape for t in dn.trainable_variables]}")
         frame_index = tf.reshape(tf.range(fw*2+1), [1, 1, 1, fw*2+1])
-        #out = dn([tf.zeros(shape=(1, spa_dim[0], spa_dim[1], fw*2+1)), frame_index]) # frame aware case
-        out = dn([tf.zeros(shape=(1, spa_dim[0], spa_dim[1], fw*2+1))])
+        out = dn([tf.zeros(shape=(1, spa_dim[0], spa_dim[1], fw*2+1)), frame_index]) # frame aware case
+        #out = dn([tf.zeros(shape=(1, spa_dim[0], spa_dim[1], fw*2+1))])
         print(f"{[o.shape for o in out]}")
         tf.keras.utils.plot_model(dn, "/data/model.png", dpi=64, show_shapes=True)
         #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")

@@ -240,9 +240,9 @@ class DiSTNetModel(tf.keras.Model):
             if center_weight>0:
                 cdm_true = y[cdm_idx]
                 if self.cdm_loss_radius <= 0: # GCDM mode : interior of cell
-                    cdm_mask = None # was cell_mask
+                    cdm_mask = cell_mask # was cell_mask
                     cdm_mask_interior = cell_mask_interior
-                    weight_map = tf.where(cell_mask, 1., 0.01) # TODO adjust this value.
+                    weight_map = None # tf.where(cell_mask, 1., 0.01) # instead of mask: force predict 0 outside
                 else: # ECDM mode: also exterior of object
                     cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
                     half_rad = tf.cast(self.cdm_loss_radius, cdm_true.dtype) / tf.cast(2, cdm_true.dtype)
@@ -614,7 +614,15 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                         decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation="relu", l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower(), aux_decoder=aux_decoder[decoder_name]))
+                    if isinstance(arch, TemPy) and (arch.wsa_edm and decoder_name == "Seg" or arch.wsa_cdm and decoder_name == "Center") and l_idx == len( arch.decoder_settings) - 1:
+                        wsa_kwargs = dict(num_heads=arch.temporal_attention // 2,
+                                            attention_filters=attention_filters // 2,
+                                            window_size=(np.array(arch.attention_spatial_radius) * 2).tolist(),
+                                            add_distance_embedding=True,
+                                            skip_connection=True)
+                    else:
+                        wsa_kwargs = None
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation="relu", window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower(), aux_decoder=aux_decoder[decoder_name]))
 
         # Create GRAPH
         if arch.n_inputs == 1:
@@ -667,18 +675,18 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
         if isinstance(arch, TemPy):
-            watt_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
+            wsa_kwargs = dict(num_heads=arch.temporal_attention, attention_filters=attention_filters,
                                window_size=arch.attention_spatial_radius, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg,
                                add_distance_embedding=True, skip_connection=True)
             v7 = True
             sa = True
             if sa and arch.temporal_attention > 0 and attention_filters > 0:
                 # self-attention with distance embedding for EDM / CDM prediction
-                sa = WindowSpatialAttention(**watt_kwargs, layer_normalization=True)
+                sa = WindowSpatialAttention(**wsa_kwargs, layer_normalization=True)
                 features_batch = sa(features_batch) # T x B, Y, X, C
             if arch.frame_window > 0:
                 features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
-                blend_op = TemporalPyramid(watt_kwargs, filter_increase_factor=1, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
+                blend_op = TemporalPyramid(wsa_kwargs, filter_increase_factor=1, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
                 blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
                 feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
                 for op in feature_blending_convs:
@@ -904,6 +912,7 @@ def decoder_op(
             mode:str="tconv", # tconv, up_nn, up_bilinear,
             skip_combine_mode:str = "conv", # conv, sum, wsconv
             combine_kernel_size:int = 1,
+            window_self_attention_kwargs = None,
             batch_norm:bool = False,
             weight_scaled:bool = False,
             dropout_rate:float=0,
@@ -951,6 +960,7 @@ def decoder_op(
                 convs = lambda suffix: [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==n_conv-1 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 and not aux_decoder else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_conv - 1 or output_name is None or aux_decoder else output_name + suffix) for i in range(n_conv)]
             else:
                 convs = lambda suffix: [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 and not aux_decoder else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_conv - 1 or output_name is None or aux_decoder else output_name + suffix) for i in range(n_conv)]
+        wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
         if not aux_decoder:
             def op(input):
                 down, res = input
@@ -963,6 +973,8 @@ def decoder_op(
                     else:
                         res = tf.cast(res, up.dtype)
                         up = up + res
+                if wsa is not None:
+                    up = wsa(up)
                 for c in convs(""):
                     up = c(up)
                 #up = LogGradientMagnitude(name=f"{f'dec{layer_idx}' if name is None else name}_grad")(up)
@@ -978,6 +990,8 @@ def decoder_op(
                     down, down_aux = down
                 up_aux = up_op_out("_aux")(down_aux) if (n_conv == 0 or layer_idx==0) else up_op("_aux")(down_aux)
                 if layer_idx > 0:
+                    if wsa is not None:
+                        up_aux = wsa(up_aux)
                     for c in convs("_aux"):
                         up_aux = c(up_aux)
                 #up_aux_sg = StopGradient(name=f"aux_sg{layer_idx}")(up_aux) if res is not None or n_conv > 0 and layer_idx > 0 else None # residual gradient do not go in the aux path

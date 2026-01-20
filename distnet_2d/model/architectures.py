@@ -400,11 +400,13 @@ class TemAD4(TemA, D4):
             print(f"tempAtt rad: {self.attention_spatial_radius}")
 
 class TemPy(ArchBase):
-    def __init__(self, temporal_attention:int, **kwargs):
+    def __init__(self, temporal_attention:int, wsa_edm:bool=False, wsa_cdm:bool=False, **kwargs):
         super().__init__(frame_aware=True, **kwargs)
         self.temporal_attention = temporal_attention
         if self.frame_window > 0:
             assert temporal_attention > 0
+        self.wsa_edm = wsa_edm
+        self.wsa_cdm = wsa_cdm
         self.feature_blending_settings = [
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False},
