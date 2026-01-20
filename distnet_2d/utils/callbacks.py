@@ -220,7 +220,7 @@ class ScheduledDropoutCallback(tf.keras.callbacks.Callback):
     based on training epochs. Each layer handles its own schedule via max_progress.
     """
 
-    def __init__(self, n_epochs, verbose=1):
+    def __init__(self, n_epochs, verbose=0):
         """
         Args:
             n_epochs: Total number of training epochs
@@ -285,7 +285,7 @@ class ScheduledDropoutCallback(tf.keras.callbacks.Callback):
         # Each layer will compute its own rate based on its max_progress
         for layer in self.dropout_layers:
             layer.set_progress(global_progress)
-            if self.verbose > 0 and epoch % 100  == 0:
+            if self.verbose > 0 and epoch % 50  == 0:
                 print(f"epoch: {epoch} layer: {layer.name} dropout rate: {layer.get_current_rate()}")
 
 
@@ -295,7 +295,7 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
     based on training epochs. Each layer handles its own schedule via max_progress.
     """
 
-    def __init__(self, n_epochs, verbose=1):
+    def __init__(self, n_epochs, verbose=0):
         """
         Args:
             n_epochs: Total number of training epochs
@@ -354,7 +354,7 @@ class ScheduledGradientCallback(tf.keras.callbacks.Callback):
         # Update all layers with the same global progress, each layer will compute its own weight based on its max_progress
         for layer in self.gradient_layers:
             layer.set_progress(global_progress)
-            if self.verbose > 0 and epoch % 100 == 0: # and epoch % 100 == 0
+            if self.verbose > 0 and epoch % 50 == 0: # and epoch % 100 == 0
                 print(f"epoch: {epoch} layer: {layer.name} gradient weight: {layer.get_current_weight()}")
 
 

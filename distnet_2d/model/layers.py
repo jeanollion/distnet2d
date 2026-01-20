@@ -1,12 +1,9 @@
 from tensorflow import pad
+
+from dataset_iterator.keras_layers import InferenceLayer
 from ..utils.helpers import ensure_multiplicity
 import tensorflow as tf
 import numpy as np
-
-class InferenceLayer:
-    def __init__(self, *args, **kwargs):
-        self.inference_mode = False
-        super().__init__(*args, **kwargs)
 
 
 class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
@@ -874,7 +871,7 @@ class ScheduledDropout(tf.keras.layers.Layer):
             return inputs
 
         current_rate = self.get_current_rate()
-
+        current_rate = tf.cast(current_rate, inputs.dtype)
         if self.spatial:
             # Use tf.nn.dropout with spatial noise_shape for spatial dropout
             input_shape = tf.shape(inputs)
@@ -888,17 +885,19 @@ class ScheduledDropout(tf.keras.layers.Layer):
 
             return tf.nn.dropout(
                 inputs,
-                rate=tf.cast(current_rate, inputs.dtype),
+                rate=current_rate,
                 noise_shape=noise_shape,
                 seed=self.seed
-            )
+            ) * (1 - current_rate) # unscaled dropout
+
         else:
             # Regular dropout (no noise_shape = element-wise dropout)
             return tf.nn.dropout(
                 inputs,
-                rate=tf.cast(current_rate, inputs.dtype),
+                rate=current_rate,
                 seed=self.seed
-            )
+            ) * (1 - current_rate)
+
 
     def set_progress(self, progress_value):
         """Set global training progress [0, 1] - called by callback"""
@@ -912,8 +911,8 @@ class ScheduledDropout(tf.keras.layers.Layer):
         # Calculate layer-specific progress
         # Cast to float32 explicitly to handle mixed precision
         progress_val = tf.cast(self.progress, tf.float32) - tf.cast(self.min_progress, tf.float32)
-        max_progress_val = tf.cast(self.max_progress, tf.float32)
-        layer_progress = tf.maximum(0.0, tf.minimum(1.0, progress_val / max_progress_val))
+        progress_norm = tf.cast(self.max_progress - self.min_progress, tf.float32)
+        layer_progress = tf.maximum(0.0, tf.minimum(1.0, progress_val / progress_norm))
 
         # Interpolate from max_rate to min_rate
         max_rate_val = tf.cast(self.max_rate, tf.float32)
@@ -1092,17 +1091,6 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
         else:
             return additive_emb
 
-# for compat with tf2.7
-class Identity(tf.keras.layers.Layer):
-    def __init__(self, autocast=False, **kwargs):
-        super().__init__(autocast=autocast **kwargs)
-
-    def call(self, input, training=None):
-        if not training:
-            return input
-        return tf.identity( input, name=self.name )
-
-
 class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
     def __init__(self, *args, inference_idx=None, output_dtype:str=None, autocast=False, **kwargs):
         self.output_dtype = output_dtype
@@ -1131,7 +1119,6 @@ class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
         config = super().get_config()
         config.update({'output_dtype': self.output_dtype, "inference_idx": self.inference_idx})
         return config
-
 
 
 # Gradient manipulation
@@ -1288,8 +1275,8 @@ class ScheduledGradientWeight(tf.keras.layers.Layer):
         # Calculate layer-specific progress
         # Cast to float32 explicitly to handle mixed precision
         progress_val = tf.cast(self.progress, tf.float32) -  tf.cast(self.min_progress, tf.float32)
-        max_progress_val = tf.cast(self.max_progress, tf.float32)
-        layer_progress = tf.maximum(0.0, tf.minimum(1.0, progress_val / max_progress_val))
+        progress_norm = tf.cast(self.max_progress - self.min_progress, tf.float32)
+        layer_progress = tf.maximum(0.0, tf.minimum(1.0, progress_val / progress_norm))
 
         # Interpolate from min_weight to max_weight (inverse of dropout)
         min_weight_val = tf.cast(self.min_weight, tf.float32)

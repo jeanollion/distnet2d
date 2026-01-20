@@ -61,7 +61,7 @@ class ArchBase:
                  attention_filters:int = 0, attention:int = 0, attention_positional_encoding:str="2d",
                  skip_connections=True, skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
-                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False, edm_aux_decoder:bool=True
+                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False, edm_aux_decoder:bool=False
                  ):
         if attention > 0 or self_attention:
             assert spatial_dimensions is not None and min(spatial_dimensions) > 0, f"for attention mechanism, spatial dim must be provided. Got {spatial_dimensions}"

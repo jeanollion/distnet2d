@@ -6,6 +6,7 @@ from pyexpat import features
 
 import tensorflow as tf
 
+from dataset_iterator.keras_layers import Identity
 from .temporal_pyramid import TemporalPyramid, TemporalFeatureReconstructor, TemporalFeaturePairReconstructor, \
     TemporalFeatureReconstructorV6
 from .temporal_cross_attention import TemporalCrossAttention
@@ -17,7 +18,7 @@ from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2D
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
     InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, HybridThresholdL2Regularizer, \
     ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter, LogGradientMagnitude, \
-    ConcatenateWithDtype, Identity
+    ConcatenateWithDtype
 import numpy as np
 
 from .local_spatial_attention import LocalSpatialAttention
@@ -25,7 +26,7 @@ from .spatial_attention import SpatialAttention2D
 from .temporal_attention import TemporalAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives, \
-    TemperedFocalCrossEntropy
+    FocalCrossEntropy
 from ..utils.agc import adaptive_clip_grad
 from .gradient_accumulator import GradientAccumulator
 import time
@@ -82,17 +83,17 @@ class DiSTNetModel(tf.keras.Model):
         if link_multiplicity_class_weights is not None:
             assert len(link_multiplicity_class_weights) == 3, "3 link multiplicity class weights should be provided: normal cell, dividing/merging cells, cell with no previous cell"
             self.link_multiplicity_class_weights = HideVariableWrapper( tf.Variable(np.asarray(link_multiplicity_class_weights, dtype="float32"), dtype=tf.float32, trainable=False,  name="link_multiplicity_class_weights"))
-            self.link_multiplicity_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), self.link_multiplicity_class_weights.value, remove_background=True)
+            self.link_multiplicity_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), self.link_multiplicity_class_weights.value, remove_background=True)
         else:
-            self.link_multiplicity_loss = balanced_category_loss(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
+            self.link_multiplicity_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
         if category_number > 1:
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
                 self.category_class_weights = HideVariableWrapper(tf.Variable(np.asarray(category_class_weights, dtype="float32"), dtype=tf.float32, trainable=False, name="category_class_weights"))
-                self.category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight), self.category_class_weights.value, remove_background=True)
+                self.category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight), self.category_class_weights.value, remove_background=True)
             else:
-                self.category_loss = balanced_category_loss(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
-            self.fgbg_category_loss = weighted_loss_by_category(TemperedFocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, temperature=1, focal_weight=0), [1., 1.], remove_background=False)
+                self.category_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
+            self.fgbg_category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=0), [1., 1.], remove_background=False)
         else:
             self.category_loss = None
 
@@ -863,11 +864,12 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
             Id = tf.keras.layers.Identity if hasattr(tf.keras.layers, 'Identity') else Identity
             res = Id(name=f"residual{layer_idx}", autocast=False)(x)
             x =Id(autocast=False)(x)  # tf.identity(x) to split path so that input of ResidualGradientLimiter do not contain residual gradient (gradient merging happens before tf.identity)
-            min_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx - 1) / (total_layers - 1) if layer_idx < total_layers - 1 else 0.
-            max_progress = 0.25 + (0.8 - 0.25) * (total_layers - 1 - layer_idx) / (total_layers - 1) # deepest skip reaches minimal rate before shallowest skip
-            #if layer_idx == 0:
-            #    res = LogGradientMagnitude(name=f"res_weighted{layer_idx}")(res)
-            #res = ScheduledGradientWeight(min_progress=min_progress, max_progress=max_progress, name=f"res_grad_weight{layer_idx}")(res)
+            progress_interval = [0.2, 0.7]
+            min_progress = progress_interval[0] + (progress_interval[1] - progress_interval[0]) * (  total_layers - (layer_idx + 1)) / total_layers
+            max_progress = progress_interval[0] + (progress_interval[1] - progress_interval[0]) * ( total_layers - layer_idx) / total_layers  # deepest skip reaches minimal rate before shallowest skip
+            print(f"layer: {layer_idx + 1}/{total_layers} progress range: [{min_progress}; {max_progress}]")
+
+            res = ScheduledGradientWeight(min_progress=min_progress, max_progress=max_progress, name=f"res_grad_weight{layer_idx}")(res)
             #res = LogGradientMagnitude(name=f"res_limited{layer_idx}")(res)
             res, x = ResidualGradientLimiter(max_ratio=task_with_skip_prop, name=f"res_grad_limiter{layer_idx}")([res, x])
             #x = LogGradientMagnitude(name=f"main{layer_idx}")(x)
@@ -875,7 +877,7 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
             #    res = LogGradientMagnitude(name=f"res{layer_idx}")(res)
             if skip_stop_gradient:
                 res = stop_gradient(res, parent_name = name)
-            #res = ScheduledDropout(rate=0.0, max_rate=0.9, min_progress=min_progress, max_progress=max_progress, spatial=True, name=f"res_dropout{layer_idx}")(res) # pushes the network to use deepest features
+            res = ScheduledDropout(rate=0.0, max_rate=0.9, min_progress=min_progress, max_progress=max_progress, spatial=True, name=f"res_dropout{layer_idx}")(res) # pushes the network to use deepest features
             #res = LogGradientMagnitude(name=f"res_before_dropout{layer_idx}")(res)
             n_splits, inference_idx = skip_parameters
             assert inference_idx<n_splits, f"invalid inference idx: {inference_idx} must be lower than n_splits: {n_splits}"
