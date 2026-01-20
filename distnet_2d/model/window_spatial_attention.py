@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from distnet_2d.model.layers import InferenceLayer, HybridThresholdL2Regularizer
+from distnet_2d.model.layers import InferenceLayer, HybridThresholdL2Regularizer, ClipMaxValue
 
 
 class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
@@ -125,6 +125,8 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
                                             bias_initializer=tf.keras.initializers.Zeros(),
                                             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                                             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                                            kernel_constraint=ClipMaxValue(),
+                                            bias_constraint=ClipMaxValue(),
                                             )
         self.kproj = tf.keras.layers.Conv2D(HF, 1, padding='same',
                                             use_bias=self.use_bias, name="kproj",
@@ -132,6 +134,8 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
                                             bias_initializer=tf.keras.initializers.Zeros(),
                                             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                                             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                                            kernel_constraint=ClipMaxValue(),
+                                            bias_constraint=ClipMaxValue(),
                                             )
         self.vproj = tf.keras.layers.Conv2D(HF, 1, padding='same',
                                             use_bias=self.use_bias, name="vproj",
@@ -139,6 +143,8 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
                                             bias_initializer=tf.keras.initializers.Zeros(),
                                             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                                             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                                            kernel_constraint=ClipMaxValue(),
+                                            bias_constraint=ClipMaxValue(),
                                             )
         self.outproj = tf.keras.layers.Conv2D(self.filters, 1, padding='same',
                                               use_bias=self.use_bias, name="outproj",
@@ -146,6 +152,8 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
                                               bias_initializer=tf.keras.initializers.Zeros(),
                                               kernel_regularizer=HybridThresholdL2Regularizer( directional_strength=self.l2_reg * 10,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                                               bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                                              kernel_constraint=ClipMaxValue(),
+                                              bias_constraint=ClipMaxValue(),
                                               )
 
         if self.dropout > 0:
@@ -159,7 +167,7 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
             name="rpb",
             shape=(embedding_size, self.num_heads),
             initializer=tf.initializers.Zeros(),
-            #constraint=tf.keras.constraints.MaxNorm(max_value=10.0, axis=0),
+            constraint=tf.keras.constraints.MaxNorm(max_value=100.0, axis=0),
             regularizer=HybridThresholdL2Regularizer(directional_threshold=1, elementwise_threshold=5, directional_strength=self.position_encoding_l2_reg * 10, elementwise_strength=self.position_encoding_l2_reg) if self.position_encoding_l2_reg > 0 else None,
             trainable=True
         )
@@ -179,11 +187,13 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
                 name = "distance_encoding_y",
                 input_dim=WSY, output_dim=HF//2, dtype=self.dtype_policy,
                 embeddings_regularizer=HybridThresholdL2Regularizer(directional_strength=self.position_encoding_l2_reg * 10, elementwise_strength=self.position_encoding_l2_reg, axis=1) if self.position_encoding_l2_reg > 0 else None,
+                embeddings_constraint=ClipMaxValue()
             )
             self.distance_encoding_x = tf.keras.layers.Embedding(
                 name="distance_encoding_x",
                 input_dim=WSX, output_dim=HF - HF//2, dtype=self.dtype_policy,
                 embeddings_regularizer=HybridThresholdL2Regularizer(directional_strength=self.position_encoding_l2_reg * 10, elementwise_strength=self.position_encoding_l2_reg, axis=1) if self.position_encoding_l2_reg > 0 else None,
+                embeddings_constraint=ClipMaxValue()
             )
         if self.overlap_reduction == "geometrical":
             self.geometrical_confidence = self._geometrical_confidence()

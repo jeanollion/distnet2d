@@ -18,7 +18,7 @@ from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2D
     FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
     InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, HybridThresholdL2Regularizer, \
     ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter, LogGradientMagnitude, \
-    ConcatenateWithDtype
+    ConcatenateWithDtype, ClipMaxValue
 import numpy as np
 
 from .local_spatial_attention import LocalSpatialAttention
@@ -1124,4 +1124,6 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
     else:
         kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=l2_reg * 10, elementwise_strength=l2_reg) if l2_reg > 0 else None
         bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=l2_reg) if l2_reg > 0 else None
-        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
+        kernel_constraint = ClipMaxValue()
+        bias_constraint = ClipMaxValue()
+        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")

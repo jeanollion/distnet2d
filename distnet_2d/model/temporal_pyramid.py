@@ -3,7 +3,7 @@ from tensorflow.keras.layers import Layer
 import numpy as np
 
 from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, InferenceLayer, get_grad_weight_fun, \
-    HybridThresholdL2Regularizer
+    HybridThresholdL2Regularizer, ClipMaxValue
 from .window_spatial_attention import WindowSpatialAttention
 
 class TemporalPyramid(Layer):
@@ -218,6 +218,8 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
                 dtype=self.dtype_policy,
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                kernel_constraint=ClipMaxValue(),
+                bias_constraint=ClipMaxValue(),
                 name=f'frame_{i}_conv'
             )
             self.convs.append(conv)
@@ -275,6 +277,8 @@ class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
                 dtype=self.dtype_policy,
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                kernel_constraint=ClipMaxValue(),
+                bias_constraint=ClipMaxValue(),
                 name=f'frame_{i}_conv'
             )
             self.frame_convs.append(conv)
@@ -340,6 +344,8 @@ class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
                 dtype=self.dtype_policy,
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                kernel_constraint=ClipMaxValue(),
+                bias_constraint=ClipMaxValue(),
                 name=f'framepair_{i}_conv'
             )
             self.convs.append(conv)
