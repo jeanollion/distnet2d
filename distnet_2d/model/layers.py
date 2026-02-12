@@ -490,6 +490,8 @@ class ResConv2D(tf.keras.layers.Layer):
         if self.output_dtype is not None:
             x = tf.cast(x, dtype=self.output_dtype)
             input = tf.cast(input, dtype=self.output_dtype)
+        else:
+            input = tf.cast(input, dtype=x.dtype)
         if self.weighted_sum:
             return self.activation_layer(self.ws([input, x]))
         else:
@@ -1159,69 +1161,52 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
 
     Usage:
         limiter = ResidualGradientLimiter()
-        limited_skip, main = limiter([skip_path, main_path], training=True)
+        limited_skip, main = limiter(x, training=True)
     """
 
     def __init__(self,
                  max_ratio: float = 1.0,
-                 epsilon: float = 1e-5,  # Numerical stability
+                 epsilon: float = 1e-5,
                  **kwargs):
         super().__init__(autocast=False, **kwargs)
-        self.max_ratio=max_ratio
+        self.max_ratio = max_ratio
         self.epsilon = epsilon
-
-    def build(self, input_shape):
-        """
-        input_shape is a list: [skip_shape, main_shape]
-        """
-        super().build(input_shape)
-
-        if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
-            raise ValueError(
-                f"ResidualGradientLimiter expects exactly 2 inputs [skip, main], "
-                f"got {len(input_shape) if isinstance(input_shape, list) else 1}"
-            )
 
     @tf.custom_gradient
     def _limit_gradients(self, x):
         skip, main = x
-        """
-        Forward: return inputs unchanged
-        Backward: limit skip gradients to match main gradient magnitude (only reduce)
 
-        Args:
-            skip: skip connection tensor
-            main: main path tensor
-        """
         def grad(dy_skip, dy_main):
             main_grad_norm = tf.sqrt(tf.maximum(tf.reduce_sum(tf.cast(dy_main, tf.float32) ** 2), self.epsilon))
             if dy_skip is None:
                 return dy_skip, dy_main
             skip_grad_norm = tf.sqrt(tf.maximum(tf.reduce_sum(tf.cast(dy_skip, tf.float32) ** 2), self.epsilon))
 
-            # Compute scaling factor to limit res path gradient to the scale of main path i.e. |dy_skip_scaled|| <= max_ratio * ||dy_main||
-            scale_factor = tf.minimum(  self.max_ratio * main_grad_norm / tf.maximum(skip_grad_norm, self.epsilon), 1.0 ) # only limit
+            scale_factor = tf.minimum(
+                self.max_ratio * main_grad_norm / tf.maximum(skip_grad_norm, self.epsilon),
+                1.0
+            )
             return dy_skip * tf.cast(scale_factor, dy_skip.dtype), dy_main
+
         return [skip, main], grad
 
     def call(self, inputs, training=None):
         """
         Args:
-            inputs: list of [skip_tensor, main_tensor]
+            inputs: single tensor to be split into skip and main paths
             training: whether in training mode
 
         Returns:
             list of [limited_skip, main]
         """
-        if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
-            raise ValueError(
-                f"ResidualGradientLimiter expects a list/tuple of 2 tensors [skip, main], "
-                f"got {type(inputs)}"
-            )
+        # Split the input into two paths using tf.identity
+        res = tf.identity(inputs, name=f"{self.name}_residual")
+        x = inputs
 
-        if not training: # During inference, no gradient limiting
-            return inputs
-        return self._limit_gradients(inputs)
+        if not training:
+            return [res, x]
+
+        return self._limit_gradients([res, x])
 
     def get_config(self):
         config = super().get_config()
@@ -1230,7 +1215,6 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
             "epsilon": float(self.epsilon),
         })
         return config
-
 
 class ScheduledGradientWeight(tf.keras.layers.Layer):
     """

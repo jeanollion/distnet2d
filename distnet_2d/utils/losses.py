@@ -29,12 +29,10 @@ class PseudoHuber(tf.keras.losses.Loss):
 
 
 class FocalCrossEntropy(tf.keras.losses.Loss):
-    def __init__(self, focal_weight = 2.0,
-                 label_smoothing: float = 0, **kwargs):
+    def __init__(self, focal_weight = 2.0, label_smoothing: float = 0, **kwargs):
         """
         Tempered Focal Cross-Entropy with Label Smoothing for multi-class classification.
-        Combines gradient stability (tempering), hard example mining (focal),
-        and regularization (label smoothing).
+        Combines hard example mining (focal), and regularization (label smoothing).
 
         Args:
             focal_weight: Focusing parameter (γ ≥ 0). Controls hard example emphasis. can be a list / tuple -> one value for each class

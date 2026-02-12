@@ -642,7 +642,8 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
             else:
                 confidence_spatial = None
 
-            out = tf.matmul(attn_probs, v) # (B_win, H, N, N) x (B_win, H, N, F) ->  (B_win, H, N, F)
+            out = tf.matmul(attn_probs, tf.cast(v, attn_probs.dtype)) # (B_win, H, N, N) x (B_win, H, N, F) ->  (B_win, H, N, F)
+            out = tf.cast(out, v.dtype)
             out = tf.transpose(out, [0, 2, 1, 3]) # (B_win, N, H, F)
             out = tf.reshape(out, [B_win, WSY, WSX, HF])
             if self.add_distance_embedding:

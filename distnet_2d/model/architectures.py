@@ -16,17 +16,6 @@ def get_architecture(architecture_type:str, **kwargs):
         else:
             raise ValueError(f"Unsupported downsampling number: {n_downsampling}: must be in [2, 3, 4]")
         return arch(**kwargs)
-    elif architecture_type.lower()=="TEMA".lower():
-        n_downsampling = kwargs.pop("n_downsampling", 3)
-        if n_downsampling == 2:
-            arch = TemAD2
-        elif n_downsampling == 3:
-            arch = TemAD3
-        elif n_downsampling == 4:
-            arch = TemAD4
-        else:
-            raise ValueError(f"Unsupported downsampling number: {n_downsampling}: must be in [2, 3, 4]")
-        return arch(**kwargs)
     elif architecture_type.lower()=="TEMPY".lower():
         n_downsampling = kwargs.pop("n_downsampling", 3)
         if n_downsampling == 2:
@@ -54,17 +43,14 @@ class ArchBase:
                  long_term: bool = True,
                  next: bool = True,
                  early_downsampling:bool = True,
-                 self_attention: int = 0,
                  scale_edm:bool = False,
                  batch_norm:bool = True, dropout:float=0.2, l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",  #conv, wsconv
-                 attention_filters:int = 0, attention:int = 0, attention_positional_encoding:str="2d",
+                 attention_filters:int = 0, attention_positional_encoding:str="2d",
                  skip_connections=True, skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
-                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False, edm_aux_decoder:bool=False
+                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False
                  ):
-        if attention > 0 or self_attention:
-            assert spatial_dimensions is not None and min(spatial_dimensions) > 0, f"for attention mechanism, spatial dim must be provided. Got {spatial_dimensions}"
         self.spatial_dimensions=spatial_dimensions
         self.n_inputs = n_inputs
         self.frame_window = frame_window
@@ -79,6 +65,7 @@ class ArchBase:
         self.skip_stop_gradient=skip_stop_gradient
         self.attention_filters = attention_filters
         self.attention_positional_encoding = attention_positional_encoding
+        self.self_attention = 0
         self.downsampling_mode = downsampling_mode
         self.upsampling_mode = upsampling_mode
         self.skip_combine_mode=skip_combine_mode
@@ -86,7 +73,6 @@ class ArchBase:
         self.frame_max_distance = frame_max_distance
         self.filters = filters
         self.early_downsampling = early_downsampling
-        self.self_attention = self_attention
         self.batch_norm = batch_norm
         self.dropout = dropout
         self.l2_reg=l2_reg
@@ -94,9 +80,6 @@ class ArchBase:
         self.predict_fw=predict_fw
         self.predict_edm_derivatives=predict_edm_derivatives
         self.predict_cdm_derivatives=predict_cdm_derivatives
-        self.edm_aux_decoder=edm_aux_decoder
-        if self.skip_connections == False or self.skip_connections == -1 or (isinstance(self.skip_connections, (list, tuple)) and (len(self.skip_connections)==0 or (len(self.skip_connections)==1 and -1 in self.skip_connections))):
-            self.edm_aux_decoder = False
         # to be defined in ArchDepth
         self.encoder_settings = None
         self.feature_settings = None
@@ -105,6 +88,9 @@ class ArchBase:
         self.kernel_size_fd = None
         self.blend_combine_kernel_size = None
         self.pair_combine_kernel_size = None
+
+    def requires_input_spatial_dim(self):
+        return self.self_attention > 0
 
 class ArchDepth(ArchBase):
     def __init__(self, filters:int, **kwargs):
@@ -332,9 +318,12 @@ class D4(ArchDepth):
 
 
 class Blend(ArchBase):
-    def __init__(self, frame_aware:bool, attention:int=0, blending_filter_factor:float=0.5, **kwargs):
+    def __init__(self, frame_aware:bool, attention:int=0, self_attention:int=0, blending_filter_factor:float=0.5, **kwargs):
         super().__init__(frame_aware=frame_aware, **kwargs)
+        if attention > 0 or self_attention:
+            assert self.spatial_dimensions is not None and min( self.spatial_dimensions) > 0, f"for attention mechanism, spatial dim must be provided. Got {self.spatial_dimensions}"
         self.attention = attention
+        self.self_attention = self_attention
         self.blending_filter_factor = blending_filter_factor
         self.feature_blending_settings = [
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
@@ -344,7 +333,11 @@ class Blend(ArchBase):
             {"op": "res2d", "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout,
              "batch_norm": False}
         ]
-
+    def requires_input_spatial_dim(self):
+        if self.attention > 0:
+            return True
+        else:
+            return super(Blend, self).requires_input_spatial_dim()
 
 class BlendD2(Blend, D2):
     def __init__(self, filters:int = 128, **kwargs):
@@ -367,44 +360,12 @@ class BlendD4(Blend, D4):
         self.name = f"{prefix}blendD4-{filters}"
 
 
-class TemA(ArchBase):
-    def __init__(self, temporal_attention:int, **kwargs):
-        self.temporal_attention = temporal_attention
-        assert temporal_attention > 0
-        super().__init__(frame_aware=True, **kwargs)
-        ker4_fd = self.feature_decoder_settings[0]["kernel_size"]
-        self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
-        self.feature_decoder_settings.insert(1, {"op": "res2d", "kernel_size": ker4_fd, "weighted_sum": False, "weight_scaled": False, "dropout_rate": self.dropout, "batch_norm": False})
-        # to be defined:
-        self.attention_spatial_radius = None
-
-class TemAD2(TemA, D2):
-    def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
-        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2)
-        if self.attention_spatial_radius != attention_spatial_radius:
-            print(f"tempAtt rad: {self.attention_spatial_radius}")
-
-class TemAD3(TemA, D3):
-    def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
-        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3)
-        if self.attention_spatial_radius != attention_spatial_radius:
-            print(f"tempAtt rad: {self.attention_spatial_radius}")
-
-class TemAD4(TemA, D4):
-    def __init__(self, attention_spatial_radius:int, **kwargs):
-        super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=2, last_bn=False, **kwargs)
-        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
-        if self.attention_spatial_radius != attention_spatial_radius:
-            print(f"tempAtt rad: {self.attention_spatial_radius}")
-
 class TemPy(ArchBase):
-    def __init__(self, temporal_attention:int, wsa_edm:bool=False, wsa_cdm:bool=False, **kwargs):
+    def __init__(self, window_attention:int, wsa_edm:bool=False, wsa_cdm:bool=False, **kwargs):
         super().__init__(frame_aware=True, **kwargs)
-        self.temporal_attention = temporal_attention
+        self.window_attention = window_attention
         if self.frame_window > 0:
-            assert temporal_attention > 0
+            assert window_attention > 0
         self.wsa_edm = wsa_edm
         self.wsa_cdm = wsa_cdm
         self.feature_blending_settings = [
@@ -417,6 +378,9 @@ class TemPy(ArchBase):
         ]
         # to be defined:
         self.attention_spatial_radius = None
+
+    def requires_input_spatial_dim(self):
+        return super(TemPy, self).requires_input_spatial_dim()
 
 class TemPyD2(TemPy, D2):
     def __init__(self, attention_spatial_radius:int, **kwargs):
