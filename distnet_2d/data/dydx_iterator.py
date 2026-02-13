@@ -563,7 +563,7 @@ def _compute_prev_label_map(labelIm, prevlabelArray, end_points):
                     else:
                         labels_map_prev_by_f[f][prevlabelArray[i,0,f]].add(prevlabelArray[i,1,f])
                 else: # gap
-                    labels_map_gap_prev_by_f[f][prevlabelArray[i,0,f]] = (prevlabelArray[i,1,f], f-prevlabelArray[i,2,f]-1)
+                    labels_map_gap_prev_by_f[f][prevlabelArray[i,0,f]] = (prevlabelArray[i,1,f], f-int(prevlabelArray[i,2,f])-1)
     labels_map_prev = []
     for (start, stop) in end_points:
         assert stop>=start, f"invalid endpoint [{start}, {stop}]"

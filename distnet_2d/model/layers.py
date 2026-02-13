@@ -1039,14 +1039,14 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
     def build(self, input_shape):
-        self.expand_axis = [0, -1] if len(input_shape)==1 else [-1]
+        self.n_frames = input_shape[-1]
         self.add_embedding = tf.keras.Sequential([
             tf.keras.layers.Dense(
                 units=self.hidden_dim,
                 activation='tanh',
                 dtype=self.dtype_policy,
                 kernel_initializer='glorot_uniform',
-                bias_initializer=tf.keras.initializers.Zeros(),
+                bias_initializer='glorot_uniform',
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 kernel_constraint=ClipMaxValue(),
@@ -1056,8 +1056,8 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 units=self.embedding_dim,
                 activation=None,
                 dtype=self.dtype_policy,
-                kernel_initializer=tf.keras.initializers.Zeros(),
-                bias_initializer=tf.keras.initializers.Zeros(),
+                kernel_initializer='glorot_uniform',
+                bias_initializer='glorot_uniform',
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 kernel_constraint=ClipMaxValue(),
@@ -1081,17 +1081,17 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 ),
                 tf.keras.layers.Dense(
                     self.embedding_dim,
-                    activation='tanh',
+                    activation='sigmoid',
                     dtype=self.dtype_policy,
                     bias_initializer=tf.keras.initializers.Zeros(),
-                    kernel_initializer=tf.keras.initializers.Zeros(),
+                    kernel_initializer='glorot_uniform',
                     kernel_regularizer=HybridThresholdL2Regularizer(directional_strength = self.l2_reg * 10, elementwise_strength = self.l2_reg) if self.l2_reg > 0 else None,
                     bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                     kernel_constraint=ClipMaxValue(),
                     bias_constraint=ClipMaxValue(),
                     name='mult_gate'
                 ),
-                tf.keras.layers.Lambda(lambda x : x + 1)
+                tf.keras.layers.Lambda(lambda x : x * 2)
             ], name='multiplicative_embedding')
 
         super().build(input_shape)
@@ -1115,7 +1115,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
             if multiplicative: returns multiplicative and additive embedding (B, T, D) or (T, D)
             else returns additive embedding only (B, T, D) or (T, D)
         """
-        distances = tf.expand_dims(tf.cast(distances, self.compute_dtype), axis=self.expand_axis) # B, T, 1
+        distances = tf.reshape(tf.cast(distances, self.compute_dtype), shape=[-1, self.n_frames, 1]) # B, T, 1
         additive_emb = self.add_embedding(distances)
         if self.multiplicative:
             mult_embedding = self.mult_embedding(distances)

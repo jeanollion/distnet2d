@@ -1,29 +1,18 @@
 import contextlib
 import copy
 from collections import defaultdict
-
-from pyexpat import features
-
 import tensorflow as tf
-
-from dataset_iterator.keras_layers import Identity
-from .temporal_pyramid import TemporalPyramid, TemporalFeatureReconstructor, TemporalFeaturePairReconstructor, \
-    TemporalFeatureReconstructorV6
-from .temporal_cross_attention import TemporalCrossAttention
+from .temporal_pyramid import TemporalPyramid, TemporalFeatureReconstructor, TemporalFeaturePairReconstructor
 from .window_spatial_attention import WindowSpatialAttention
 from .architectures import ArchBase, Blend, TemPy
 from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, WSConv2D, \
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, \
-    HideVariableWrapper, \
-    FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
-    InferenceLayer, InferenceAwareBatchSelector, RelativeTemporalEmbedding, HybridThresholdL2Regularizer, \
-    ScheduledDropout, ScheduledGradientWeight, ResidualGradientLimiter, LogGradientMagnitude, \
+    HideVariableWrapper, FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
+    InferenceLayer, HybridThresholdL2Regularizer, ResidualGradientLimiter, LogGradientMagnitude, \
     ConcatenateWithDtype, ClipMaxValue
 import numpy as np
 
-from .local_spatial_attention import LocalSpatialAttention
 from .spatial_attention import SpatialAttention2D
-from .temporal_attention import TemporalAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives, \
     FocalCrossEntropy
@@ -559,7 +548,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         for n, o_ns in output_per_decoder.items():
             decoder_output_names[n] = dict()
             for o_n, o_i in o_ns.items():
-                decoder_output_names[n][o_n] = f"Output{o_i:02}_{o_n}"
+                decoder_output_names[n][o_n] = f"output{o_i:02}_{o_n}"
         n_frame_pairs = n_frames -1
         if long_term:
             n_frame_pairs = n_frame_pairs + (arch.frame_window-1) * (2 if arch.future_frames else 1)
@@ -620,6 +609,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             if arch.frame_aware and arch.frame_window > 0:
                 frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name="input2_frameindex")
                 inputs.append(frame_index)
+            else:
+                frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, n_frames])
             input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=True,  name="MergeInputs")(inputs[0]) if arch.frame_window > 0 else inputs[0]
         else:
             if arch.frame_window > 0:
@@ -629,6 +620,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 if arch.frame_aware:
                     frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name=f"input{arch.n_inputs}_frameindex")
                     inputs.append(frame_index)
+                else:
+                    frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, n_frames])
             else:
                 inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(arch.n_inputs)]
                 input_merged = tf.keras.layers.Concatenate(axis=-1, name="MergeInputs")(inputs)
@@ -660,8 +653,6 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                     for c in range(arch.frame_window+2, n_frames):
                         fidx_prev.append(arch.frame_window)
                         fidx_next.append(c)
-            if arch.frame_aware:
-                frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next, l2_reg=arch.position_encoding_l2_reg)(frame_index)
 
         # next section is architecture dependent. blend features and feature pairs. generates features_batch & feature_pairs_batch
         if isinstance(arch, TemPy):
@@ -686,16 +677,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             long_term_feature_prev = tf.keras.layers.Concatenate(axis=0, name="FeaturePairPrevToBatch")([features_list[i] for i in fidx_prev])
             long_term_feature_next = tf.keras.layers.Concatenate(axis=0, name="FeaturePairNextToBatch")([features_list[i] for i in fidx_next])
             feature_pairs_batch = pair_combine_op([long_term_feature_prev, long_term_feature_next])
+            frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next, l2_reg=arch.position_encoding_l2_reg)(frame_index)
             if arch.attention > 0:
-                attention_op = SpatialAttention2D(num_heads=arch.attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=arch.frame_aware, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention")
+                attention_op = SpatialAttention2D(num_heads=arch.attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention") #frame_distance_embedding=arch.frame_aware
                 pair_attention_skip_op = Combine(filters=feature_filters, kernel_size=arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairAttSkip")
-                attention_result = attention_op([long_term_feature_prev + frame_dist_emb, long_term_feature_next + frame_dist_emb,  feature_pairs_batch]) if arch.frame_aware else attention_op( [long_term_feature_prev, long_term_feature_next, feature_pairs_batch])
+                attention_result = attention_op([long_term_feature_prev + frame_dist_emb, long_term_feature_next + frame_dist_emb,  feature_pairs_batch]) #if arch.frame_aware else attention_op( [long_term_feature_prev, long_term_feature_next, feature_pairs_batch])
                 feature_pairs_batch = pair_attention_skip_op([feature_pairs_batch, attention_result])
-            feature_pairs_list = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairs")(feature_pairs_batch)
-            if arch.frame_aware:
-                feature_pairs_list_to_blend = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairsDistEmb")(feature_pairs_batch + frame_dist_emb)
-            else:
-                feature_pairs_list_to_blend = feature_pairs_list
+            feature_pairs_list_to_blend = SplitBatch(n_frame_pairs, compensate_gradient=False, name="SplitFeaturePairs")(feature_pairs_batch + frame_dist_emb)
 
             combine_filters = int(feature_filters * n_frames * arch.blending_filter_factor)
             print(f"feature filters: {feature_filters} combine filters: {combine_filters}")

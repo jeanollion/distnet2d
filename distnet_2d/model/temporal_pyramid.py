@@ -26,7 +26,7 @@ class TemporalPyramid(Layer):
     Output shape: (T, B, Y, X, C)
     """
 
-    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, position_encoding_l2_reg:float=1e-5, verbose=False, **kwargs):
+    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, position_encoding_l2_reg:float=1e-5, multiplicative_temporal_encoding:bool=False, verbose=False, **kwargs):
         super(TemporalPyramid, self).__init__(**kwargs)
         self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
         self.window_spatial_attention_kwargs["layer_normalization"] = False
@@ -35,7 +35,8 @@ class TemporalPyramid(Layer):
         self.filter_increase_mode_log=filter_increase_mode_log
         self.verbose = verbose
         self.l2_reg=l2_reg
-        self.position_encoding_l2_reg=position_encoding_l2_reg
+        self.temporal_encoding_l2_reg=position_encoding_l2_reg
+        self.multiplicative_temporal_encoding=multiplicative_temporal_encoding
 
     def _precompute_indices(self):
         """Pre-compute all indices for downsampling at each level using stride-based formula."""
@@ -107,7 +108,7 @@ class TemporalPyramid(Layer):
             out = conv_layer(out)
             self.down_op.append(tf.keras.Model(input_layers, out))
             self.ln.append(tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32'))
-            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.position_encoding_l2_reg, dtype=self.dtype_policy))
+            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.temporal_encoding_l2_reg, dtype=self.dtype_policy))
         super(TemporalPyramid, self).build(input_shape)
 
     def call(self, inputs, training=None):
@@ -130,12 +131,21 @@ class TemporalPyramid(Layer):
             # temporal embedding
             if self.frame_aware:
                 t_emb = self.temp_emb[level](current_frame_index, training=training)  # B, T, C
+                if self.multiplicative_temporal_encoding:
+                    t_emb_mul, t_emb = t_emb
+                    t_emb_mul = tf.transpose(t_emb_mul, [1, 0, 2])  # T, B, C
+                    t_emb_mul = tf.reshape(t_emb_mul, [T, B, 1, 1, C])
                 t_emb = tf.transpose(t_emb, [1, 0, 2])  # T, B, C
                 t_emb = tf.reshape(t_emb, [T, B, 1, 1, C])
             else:
                 t_emb = self.temp_emb[level](current_frame_index, training=training)  # T, C
+                if self.multiplicative_temporal_encoding:
+                    t_emb_mul, t_emb = t_emb
+                    t_emb_mul = tf.reshape(t_emb_mul, [T, 1, 1, 1, C])
                 t_emb = tf.reshape(t_emb, [T, 1, 1, 1, C])
 
+            if self.multiplicative_temporal_encoding:
+                current = current * t_emb_mul
             current = current + t_emb
             if self.layer_normalization:
                 current = self.ln[level](current, training=training)
@@ -184,7 +194,7 @@ class TemporalPyramid(Layer):
             "filter_increase_mode_log":self.filter_increase_mode_log,
             "layer_normalization":self.layer_normalization,
             "l2_reg":self.l2_reg,
-            "position_encoding_l2_reg":self.position_encoding_l2_reg,
+            "temporal_encoding_l2_reg":self.temporal_encoding_l2_reg,
             'verbose': self.verbose
         })
         return config
@@ -249,68 +259,6 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
         if self.grad_fun is not None and not self.inference_mode:
             output = self.grad_fun(output) # compensate gradients to have same level in
         return output
-
-
-class TemporalFeatureReconstructorV6(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, output_filters, inference_idx:list, l2_reg:float=0, **kwargs):
-        super().__init__(**kwargs)
-        self.output_filters = output_filters
-        self.inference_idx=inference_idx
-        self.l2_reg=l2_reg
-        self.frame_convs = []
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({ 'output_filters': self.output_filters, 'inference_idx': self.inference_idx, 'l2_reg':self.l2_reg })
-        return config
-
-    def build(self, input_shape):
-        features_level0, features_level1, global_features = input_shape
-        self.T = features_level0[0]
-
-        # Create T independent 1x1 convolutions
-        for i in range(self.T):
-            conv = tf.keras.layers.Conv2D(
-                filters=self.output_filters,
-                kernel_size=1,
-                use_bias=True,
-                dtype=self.dtype_policy,
-                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                kernel_constraint=ClipMaxValue(),
-                bias_constraint=ClipMaxValue(),
-                name=f'frame_{i}_conv'
-            )
-            self.frame_convs.append(conv)
-            self.feature_level1_indices = self._get_closest_indices(self.T)
-        super().build(input_shape)
-
-    @staticmethod
-    def _get_closest_indices(T):
-        next_indices = TemporalPyramid._get_indices((T - 1) // 2, T)
-        closest_indices = []
-        for i in np.arange(T):
-            distances = np.abs(next_indices - i)
-            min_distance_indices = np.where(distances == np.min(distances))[0]
-            if len(min_distance_indices) > 1:  # multiple indices
-                closest_indices.append(min_distance_indices.tolist())
-            else:
-                closest_indices.append(min_distance_indices.tolist())
-        return closest_indices
-
-    def call(self, inputs, training=None):
-        features_level0, features_level1, global_features = inputs
-        outputs = []
-        idx_list = self.inference_idx if self.inference_mode and self.inference_idx is not None else list(range(self.T))
-        for i in idx_list:
-            idx = self.feature_level1_indices[i]
-            input_list = [features_level0[i], global_features, features_level1[idx[0]]]
-            if len(idx) == 2: # feature is in between two level 1 features -> also add the second one to inputs
-                input_list.append(features_level1[idx[1]])
-            combined_i = tf.concat(input_list, axis=-1)
-            output_i = self.frame_convs[i](combined_i, training=training)
-            outputs.append(output_i)
-        return tf.stack(outputs, axis=0)
 
 
 class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
