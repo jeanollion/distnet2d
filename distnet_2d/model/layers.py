@@ -1051,6 +1051,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 kernel_constraint=ClipMaxValue(),
                 bias_constraint=ClipMaxValue(),
+                name=f'{self.name}/add_hidden'
             ),
             tf.keras.layers.Dense(
                 units=self.embedding_dim,
@@ -1062,6 +1063,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 kernel_constraint=ClipMaxValue(),
                 bias_constraint=ClipMaxValue(),
+                name=f'{self.name}/add'
             ),
         ], name="additive_embedding")
 
@@ -1077,7 +1079,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                     bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                     kernel_constraint=ClipMaxValue(),
                     bias_constraint=ClipMaxValue(),
-                    name='mult_hidden'
+                    name=f'{self.name}/mult_hidden'
                 ),
                 tf.keras.layers.Dense(
                     self.embedding_dim,
@@ -1089,7 +1091,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                     bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                     kernel_constraint=ClipMaxValue(),
                     bias_constraint=ClipMaxValue(),
-                    name='mult_gate'
+                    name=f'{self.name}/mult_gate'
                 ),
                 tf.keras.layers.Lambda(lambda x : x * 2)
             ], name='multiplicative_embedding')
