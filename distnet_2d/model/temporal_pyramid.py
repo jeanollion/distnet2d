@@ -108,7 +108,7 @@ class TemporalPyramid(Layer):
             out = conv_layer(out)
             self.down_op.append(tf.keras.Model(input_layers, out))
             self.ln.append(tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32'))
-            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.temporal_encoding_l2_reg, dtype=self.dtype_policy))
+            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=False, l2_reg=self.temporal_encoding_l2_reg, dtype=self.dtype_policy, name=f"temp_emb{i}"))
         super(TemporalPyramid, self).build(input_shape)
 
     def call(self, inputs, training=None):
@@ -116,12 +116,11 @@ class TemporalPyramid(Layer):
             inputs, frame_index = inputs
         elif isinstance(inputs, list):
             inputs = inputs[0]
+            frame_index = tf.expand_dims(tf.range(self.T) - tf.cast(self.W, tf.int32), 0)  # relative to center frame
         input_shape = tf.shape(inputs)
         _, B, Y, X, _ = tf.unstack(input_shape)
-        if not self.frame_aware:
-            frame_index = tf.range(self.T) - tf.cast(self.W, tf.int32) # relative to center frame
 
-        current_frame_index = frame_index # B, T if frame_aware, else T
+        current_frame_index = frame_index # B, T if frame_aware, else 1, T
         down_layers = [inputs]
         for level in range(self.num_levels):
             current = down_layers[-1]
@@ -138,7 +137,7 @@ class TemporalPyramid(Layer):
                 t_emb = tf.transpose(t_emb, [1, 0, 2])  # T, B, C
                 t_emb = tf.reshape(t_emb, [T, B, 1, 1, C])
             else:
-                t_emb = self.temp_emb[level](current_frame_index, training=training)  # T, C
+                t_emb = self.temp_emb[level](current_frame_index, training=training)  # 1, T, C
                 if self.multiplicative_temporal_encoding:
                     t_emb_mul, t_emb = t_emb
                     t_emb_mul = tf.reshape(t_emb_mul, [T, 1, 1, 1, C])
@@ -167,7 +166,7 @@ class TemporalPyramid(Layer):
                 downsampled = tf.reshape(downsampled, [next_size, B, Y, X, tf.shape(downsampled)[-1]])
             down_layers.append(downsampled)
             # update frame index for temporal encoding
-            current_frame_index = tf.gather(current_frame_index, indices['center'], axis=1 if self.frame_aware else 0) # update frame index
+            current_frame_index = tf.gather(current_frame_index, indices['center'], axis=1) # update frame index
         return down_layers[-1], down_layers[1]
 
     def compute_output_shape(self, input_shape):
