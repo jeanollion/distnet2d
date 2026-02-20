@@ -625,7 +625,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             else:
                 inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(arch.n_inputs)]
                 input_merged = tf.keras.layers.Concatenate(axis=-1, name="MergeInputs")(inputs)
-        print(f"input dims: {arch.n_inputs} x {spatial_dimensions} frames={n_frames}")
+        print(f"input dims: {arch.n_inputs} x {spatial_dimensions} frames={n_frames} frame_aware: {arch.frame_aware}")
 
         # encoder part
         downsampled = [input_merged]
@@ -665,7 +665,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 features_batch = sa(features_batch) # T x B, Y, X, C
             if arch.frame_window > 0:
                 features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
-                blend_op = TemporalPyramid(wsa_kwargs, filter_increase_factor=1, l2_reg=arch.l2_reg, position_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
+                blend_op = TemporalPyramid(wsa_kwargs, filter_increase_factor=1, l2_reg=arch.l2_reg, temporal_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
                 blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
                 feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg)
                 for op in feature_blending_convs:

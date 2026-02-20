@@ -26,7 +26,7 @@ class TemporalPyramid(Layer):
     Output shape: (T, B, Y, X, C)
     """
 
-    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, position_encoding_l2_reg:float=1e-5, multiplicative_temporal_encoding:bool=True, verbose=False, **kwargs):
+    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, temporal_encoding_l2_reg:float=1e-5, verbose=False, **kwargs):
         super(TemporalPyramid, self).__init__(**kwargs)
         self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
         self.window_spatial_attention_kwargs["layer_normalization"] = False
@@ -35,9 +35,7 @@ class TemporalPyramid(Layer):
         self.filter_increase_mode_log=filter_increase_mode_log
         self.verbose = verbose
         self.l2_reg=l2_reg
-        self.temporal_encoding_l2_reg=position_encoding_l2_reg
-        self.multiplicative_temporal_encoding=multiplicative_temporal_encoding
-        print(f"multiplicative_temporal_encoding: {multiplicative_temporal_encoding}")
+        self.temporal_encoding_l2_reg=temporal_encoding_l2_reg
 
     def _precompute_indices(self):
         """Pre-compute all indices for downsampling at each level using stride-based formula."""
@@ -110,14 +108,15 @@ class TemporalPyramid(Layer):
             out = conv_layer(out)
             self.down_op.append(tf.keras.Model(input_layers, out))
             self.ln.append(tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32', name=f"ln{i}"))
-            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, multiplicative=self.multiplicative_temporal_encoding, l2_reg=self.temporal_encoding_l2_reg, dtype=self.dtype_policy, name=f"temp_emb{i}"))
+            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, l2_reg=self.temporal_encoding_l2_reg, dtype=self.dtype_policy, name=f"temp_emb{i}"))
         super(TemporalPyramid, self).build(input_shape)
 
     def call(self, inputs, training=None):
         if self.frame_aware:
             inputs, frame_index = inputs
-        elif isinstance(inputs, list):
-            inputs = inputs[0]
+        else:
+            if isinstance(inputs, list):
+                inputs = inputs[0]
             frame_index = tf.expand_dims(tf.range(self.T) - tf.cast(self.W, tf.int32), 0)  # relative to center frame
         input_shape = tf.shape(inputs)
         _, B, Y, X, _ = tf.unstack(input_shape)
@@ -132,21 +131,12 @@ class TemporalPyramid(Layer):
             # temporal embedding
             if self.frame_aware:
                 t_emb = self.temp_emb[level](current_frame_index, training=training)  # B, T, C
-                if self.multiplicative_temporal_encoding:
-                    t_emb_mul, t_emb = t_emb
-                    t_emb_mul = tf.transpose(t_emb_mul, [1, 0, 2])  # T, B, C
-                    t_emb_mul = tf.reshape(t_emb_mul, [T, B, 1, 1, C])
                 t_emb = tf.transpose(t_emb, [1, 0, 2])  # T, B, C
                 t_emb = tf.reshape(t_emb, [T, B, 1, 1, C])
             else:
                 t_emb = self.temp_emb[level](current_frame_index, training=training)  # 1, T, C
-                if self.multiplicative_temporal_encoding:
-                    t_emb_mul, t_emb = t_emb
-                    t_emb_mul = tf.reshape(t_emb_mul, [T, 1, 1, 1, C])
                 t_emb = tf.reshape(t_emb, [T, 1, 1, 1, C])
 
-            if self.multiplicative_temporal_encoding:
-                current = current * t_emb_mul
             current = current + t_emb
             if self.layer_normalization:
                 current = self.ln[level](current, training=training)
@@ -196,7 +186,6 @@ class TemporalPyramid(Layer):
             "layer_normalization":self.layer_normalization,
             "l2_reg":self.l2_reg,
             "temporal_encoding_l2_reg":self.temporal_encoding_l2_reg,
-            "multiplicative_temporal_encoding": self.multiplicative_temporal_encoding,
             'verbose': self.verbose
         })
         return config

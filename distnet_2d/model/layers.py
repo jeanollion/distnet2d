@@ -1031,19 +1031,21 @@ def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
 
 
 class RelativeTemporalEmbedding(tf.keras.layers.Layer):
-    def __init__(self, embedding_dim:int, hidden_dim:int=256, multiplicative:bool=True, l2_reg=1e-5, **kwargs):
+    def __init__(self, embedding_dim:int, hidden_dim:int=[128, 128], l2_reg=1e-5, **kwargs):
         self.embedding_dim = embedding_dim
-        self.hidden_dim = hidden_dim
-        self.multiplicative = multiplicative
+        if not isinstance(hidden_dim, (tuple, list)):
+            hidden_dim = [hidden_dim]
+        self.hidden_dims = hidden_dim
         self.l2_reg = l2_reg
         super().__init__(**kwargs)
 
     def build(self, input_shape):
         self.n_frames = input_shape[-1]
-        self.add_embedding = tf.keras.Sequential([
-            tf.keras.layers.Dense(
-                units=self.hidden_dim,
-                activation='tanh',
+        layers = []
+        for i, h in enumerate(self.hidden_dims):
+            layers.append(tf.keras.layers.Dense(
+                units=h,
+                activation='silu' if i==0 else "tanh",
                 dtype=self.dtype_policy,
                 kernel_initializer='glorot_uniform',
                 bias_initializer='glorot_uniform',
@@ -1051,79 +1053,43 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 kernel_constraint=ClipMaxValue(),
                 bias_constraint=ClipMaxValue(),
-                name=f'{self.name}/add_hidden'
-            ),
-            tf.keras.layers.Dense(
-                units=self.embedding_dim,
-                activation=None,
-                dtype=self.dtype_policy,
-                kernel_initializer='glorot_uniform',
-                bias_initializer='glorot_uniform',
-                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                kernel_constraint=ClipMaxValue(),
-                bias_constraint=ClipMaxValue(),
-                name=f'{self.name}/add'
-            ),
-        ], name="additive_embedding")
-
-        if self.multiplicative:
-            self.mult_embedding = tf.keras.Sequential([
-                tf.keras.layers.Dense(
-                    self.hidden_dim,
-                    activation='tanh',
-                    dtype=self.dtype_policy,
-                    bias_initializer=tf.keras.initializers.Zeros(),
-                    kernel_initializer='glorot_uniform',
-                    kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                    bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                    kernel_constraint=ClipMaxValue(),
-                    bias_constraint=ClipMaxValue(),
-                    name=f'{self.name}/mult_hidden'
-                ),
-                tf.keras.layers.Dense(
-                    self.embedding_dim,
-                    activation='sigmoid',
-                    dtype=self.dtype_policy,
-                    bias_initializer=tf.keras.initializers.Zeros(),
-                    kernel_initializer='glorot_uniform',
-                    kernel_regularizer=HybridThresholdL2Regularizer(directional_strength = self.l2_reg * 10, elementwise_strength = self.l2_reg) if self.l2_reg > 0 else None,
-                    bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                    kernel_constraint=ClipMaxValue(),
-                    bias_constraint=ClipMaxValue(),
-                    name=f'{self.name}/mult_gate'
-                ),
-                tf.keras.layers.Lambda(lambda x : x * 2)
-            ], name='multiplicative_embedding')
-
+                name=f'{self.name}/hidden{i}'
+            ))
+        layers.append(tf.keras.layers.Dense(
+            units=self.embedding_dim,
+            activation=None,
+            dtype=self.dtype_policy,
+            kernel_initializer='glorot_uniform',
+            bias_initializer='glorot_uniform',
+            kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+            kernel_constraint=ClipMaxValue(),
+            bias_constraint=ClipMaxValue(),
+            name=f'{self.name}/add'
+        ))
+        self.add_embedding = tf.keras.Sequential(layers, name="embedding")
         super().build(input_shape)
 
     def get_config(self):
         config = super().get_config().copy()
         config.update({
-            "hidden_dim": self.hidden_dim,
+            "hidden_dims": self.hidden_dims,
             "embedding_dim": self.embedding_dim,
-            "l2_reg": self.l2_reg,
-            "multiplicative": self.multiplicative
+            "l2_reg": self.l2_reg
         })
         return config
 
     def call(self, distances):
         """
         Args:
-            distances: (B, T) or (T) - temporal distances (can be negative for backward)
+            distances: (B, T) - temporal distances (can be negative for backward)
 
         Returns:
-            if multiplicative: returns multiplicative and additive embedding (B, T, D) or (T, D)
-            else returns additive embedding only (B, T, D) or (T, D)
+            additive embedding (B, T, D)
         """
         distances = tf.reshape(tf.cast(distances, self.compute_dtype), shape=[-1, self.n_frames, 1]) # B, T, 1
-        additive_emb = self.add_embedding(distances)
-        if self.multiplicative:
-            mult_embedding = self.mult_embedding(distances)
-            return mult_embedding, additive_emb
-        else:
-            return additive_emb
+        return self.add_embedding(distances)
+
 
 class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
     def __init__(self, *args, inference_idx=None, output_dtype:str=None, autocast=False, **kwargs):
