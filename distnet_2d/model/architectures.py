@@ -67,7 +67,7 @@ class ArchBase:
         self.attention_filters = attention_filters
         self.attention_positional_encoding = attention_positional_encoding
         self.self_attention = 0
-        self.default_activation=activation
+        self.default_activation=activation.lower() if isinstance(activation, str) else activation
         self.downsampling_mode = downsampling_mode
         self.upsampling_mode = upsampling_mode
         self.skip_combine_mode=skip_combine_mode

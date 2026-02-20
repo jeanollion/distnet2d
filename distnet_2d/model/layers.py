@@ -351,7 +351,6 @@ class ResConv2D(tf.keras.layers.Layer):
         self.weighted_sum = weighted_sum
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
-        print(f"{self.name} activation={self.activation}")
 
     def get_config(self):
       config = super().get_config().copy()
@@ -447,7 +446,6 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
         self.strides=strides
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
-        print(f"{self.name} activation={self.activation}")
 
     def get_config(self):
       config = super().get_config().copy()
@@ -501,7 +499,6 @@ class Conv2DWithDtype(tf.keras.layers.Conv2D):
         super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
         self.output_dtype = output_dtype
         self.activation = None  # Will be set in build()
-        print(f"{self.name} activation={self._activation}")
 
     def build(self, input_shape):
         super().build(input_shape)
@@ -553,7 +550,6 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
         self.strides=strides
         self.l2_reg=l2_reg
         self.output_dtype=output_dtype
-        print(f"{self.name} activation={self.activation}")
 
     def get_config(self):
       config = super().get_config().copy()
@@ -607,7 +603,6 @@ class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
         super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
         self.output_dtype = output_dtype
         self.activation = None  # Will be set in build()
-        print(f"{self.name} activation={self._activation}")
 
     def build(self, input_shape):
         super().build(input_shape)
