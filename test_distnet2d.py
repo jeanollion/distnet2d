@@ -32,7 +32,6 @@ from distnet_2d.data import DyDxIterator
 from distnet_2d.data.dydx_iterator import CHANNEL_KEYWORDS, ARRAY_KEYWORDS
 from dataset_iterator.image_data_generator import IlluminationImageGenerator, ScalingImageGenerator, ImageGeneratorList, get_image_data_generator
 from dataset_iterator.datasetIO import get_datasetIO, MemoryIO
-from distnet_2d.model import get_distnet_2d, architectures, get_distnet_2d_seg
 
 seg = False
 if not seg:
@@ -132,8 +131,3 @@ if not seg:
         #print(f"dy equals: {np.allclose(y[2][..., d_indices], y2[2])}")
         #print(f"dx equals: {np.allclose(y[3][..., d_indices], y2[3])}")
         #print(f"lm equals: {np.allclose(y[4][..., d_indices], y2[4])}")
-
-else:
-    dn = get_distnet_2d_seg(4, config = architectures.BlendD3(filters=128, self_attention=0, attention=0), category_number=2)
-    tf.keras.utils.plot_model(dn, "/data/modelseg.png", show_shapes=True)
-
