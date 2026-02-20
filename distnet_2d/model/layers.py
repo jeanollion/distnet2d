@@ -1337,6 +1337,8 @@ class ClipMaxValue(tf.keras.constraints.Constraint):
 
 
 def get_kernel_initializer(activation:str):
+    if activation is None:
+        return "glorot_uniform"
     activation = activation.lower()
     if "elu" in activation or "silu" in activation or activation == "mish":
         return "he_normal"
