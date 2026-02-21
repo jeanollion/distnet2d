@@ -911,7 +911,7 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
         self.n_frames = input_shape[-1]
         layers = []
         for i, h in enumerate(self.hidden_dims):
-            activation = 'silu' if i==0 else "tanh"
+            activation = "tanh" # TODO : 'silu' if i==0 else "tanh"
             layers.append(tf.keras.layers.Dense(
                 units=h,
                 activation=activation,
@@ -1052,6 +1052,185 @@ class ResidualGradientLimiter(tf.keras.layers.Layer):
             "epsilon": float(self.epsilon),
         })
         return config
+
+
+def _global_norm(g, epsilon):
+    return tf.sqrt(tf.maximum(
+        tf.reduce_sum(tf.cast(g, tf.float32) ** 2),
+        epsilon,
+    ))
+
+
+def _unitwise_norm(g, epsilon):
+    """
+    Norm computed per output neuron/filter, matching the axis convention of
+    AGC's unitwise_norm so the two are consistent.
+
+    Shape conventions:
+      <= 1D  (bias / scalar)   : global norm, axis=None
+      2D     (Dense IO)        : norm over input dim, axis=0  -> shape [O]
+      3D     (multihead linear): norm over input dims, axis=0 -> shape [H, O]
+      4D     (Conv2D HWIO)     : norm over spatial+input, axis=[0,1,2] -> [O]
+      5D     (Conv3D HWDIO)    : norm over spatial+input, axis=[0,1,2,3] -> [O]
+
+    Returns a tensor broadcastable back onto g.
+    """
+    g = tf.cast(g, tf.float32)
+    shape = g.shape.as_list()
+    rank = len(shape)
+    if rank <= 1:
+        return _global_norm(g, epsilon)
+    elif rank == 2:
+        axis, keepdims = 0, True          # -> [1, O]
+    elif rank == 3:
+        axis, keepdims = 0, True          # -> [1, H, O]
+    elif rank == 4:
+        axis, keepdims = [0, 1, 2], True  # -> [1, 1, 1, O]
+    elif rank == 5:
+        axis, keepdims = [0, 1, 2, 3], True  # -> [1, 1, 1, 1, O]
+    else:
+        raise ValueError(f"Unsupported gradient rank {rank}, shape {shape}")
+    return tf.sqrt(tf.maximum(
+        tf.reduce_sum(g ** 2, axis=axis, keepdims=keepdims),
+        epsilon,
+    ))
+
+
+class MultiHeadGradientLimiter(tf.keras.layers.Layer):
+    """
+    Balances gradients from multiple task heads flowing into a shared encoder.
+
+    During the forward pass this is a pure identity on all branches — no effect
+    on activations or inference.
+
+    In the backward pass it works as an amplification cap:
+       If the norm of the gradient sum exceeds the norm
+       of the strongest individual head gradient, the sum is scaled down to
+       that maximum norm.
+       When unitwise=True this is applied per output neuron/filter, so heads
+       that update disjoint neurons are not incorrectly penalised.
+       When unitwise=False a single scalar norm is used (cheaper, sufficient
+       when heads share most neurons).
+
+    Args:
+        num_heads:   Number of task heads (1 to N). With a single head the
+                     layer is a no-op.
+        unitwise:    If True, the amplification cap is computed per output
+                     neuron/filter (more accurate when heads are specialised
+                     on disjoint neurons, but slightly more expensive).
+                     If False, a single global scalar norm is used.
+        epsilon:     Floor for norm computations to avoid division by zero.
+        monitor:     If True, tf.print per-head cosine similarities and the
+                     amplification scale factor each step.
+
+    Usage:
+        balancer = MultiHeadGradientBalancer(num_heads=3, unitwise=True)
+        branches = balancer(encoder_output, training=training)
+        feat_seg, feat_track = branches[0], branches[1]
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        unitwise: bool = False,
+        epsilon: float = 1e-6,
+        monitor: bool = False,
+        **kwargs,
+    ):
+        super().__init__(autocast=False, **kwargs)
+        if num_heads < 1:
+            raise ValueError(f"num_heads must be >= 1, got {num_heads}")
+        self.num_heads = num_heads
+        self.unitwise = unitwise
+        self.epsilon = epsilon
+        self.monitor = monitor
+
+    @tf.custom_gradient
+    def _gradient_fn(self, *branches):
+        def grad(*upstream_grads):
+            grads = list(upstream_grads)
+            epsilon = self.epsilon
+            unitwise = self.unitwise
+            monitor = self.monitor
+
+            if self.num_heads == 1:
+                return grads
+
+            # Collect non-None gradients; sanitise non-finite values in-graph.
+            valid = [ (i, tf.cast(g, tf.float32))  for i, g in enumerate(grads)  if g is not None ]
+            if len(valid) <= 1:
+                return grads
+
+            indices, f_grads = zip(*valid)
+            f_grads = [ tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) for g in f_grads ]
+            f_grads = list(f_grads)
+
+            # ── 1. Natural sum — reference direction ───────────────────────
+            g_sum = tf.add_n(f_grads)
+
+            # ── 2. Amplification cap ───────────────────────────────────────
+            if unitwise:
+                # Per output-neuron/filter cap.
+                # For each position, the sum norm must not exceed the maximum
+                # individual head norm at that position.
+                # head_norms_uw shape: broadcastable onto g (e.g. [1,1,1,C_out])
+                head_norms_uw = [_unitwise_norm(g, epsilon) for g in f_grads]
+                g_sum_norm_uw = _unitwise_norm(g_sum, epsilon)
+                m_cap_uw = tf.reduce_max( tf.stack(head_norms_uw, axis=0), axis=0 )  # same shape as head_norms_uw[i]
+                # Elementwise scale, clipped to [0, 1] — never amplify.
+                scale = tf.minimum(m_cap_uw / g_sum_norm_uw, 1.0)
+                if monitor:
+                    tf.print(
+                        "[MultiHeadGradientBalancer] unitwise amp_scale min/max:",
+                        tf.reduce_min(scale), tf.reduce_max(scale),
+                    )
+            else:
+                # Single scalar cap.
+                g_sum_norm_global = _global_norm(g_sum, epsilon)
+                head_norms_global = [_global_norm(g, epsilon) for g in f_grads]
+                m_cap = tf.reduce_max(tf.stack(head_norms_global))
+                scale = tf.minimum(m_cap / g_sum_norm_global, 1.0)
+                if monitor:
+                    tf.print(
+                        "[MultiHeadGradientBalancer] amp_scale:", scale,
+                        "g_sum_norm:", g_sum_norm_global,
+                        "m_cap:", m_cap,
+                    )
+
+            # ── 4. Apply scale and cast back to original dtype ─────────────
+            out_grads = list(grads)
+            for i, g_new in zip(indices, f_grads):
+                out_grads[i] = tf.cast(g_new * scale, grads[i].dtype)
+
+            return out_grads
+
+        return list(branches), grad
+
+    def call(self, inputs, training=None):
+        """
+        Args:
+            inputs:   Single tensor — the shared encoder output.
+            training: If False, returns plain tf.identity copies (no-op).
+
+        Returns:
+            Plain Python list of `num_heads` tensors equal to `inputs`.
+            Always index explicitly: branches[0], branches[1], ...
+        """
+        branches = [tf.identity(inputs) for _ in range(self.num_heads)]
+        if self.num_heads == 1 or not training:
+            return branches
+        return self._gradient_fn(*branches)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "num_heads": self.num_heads,
+            "unitwise":  self.unitwise,
+            "epsilon":   float(self.epsilon),
+            "monitor":   self.monitor,
+        })
+        return config
+
 
 class ScheduledGradientWeight(tf.keras.layers.Layer):
     """
