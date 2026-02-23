@@ -290,7 +290,6 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
                 kernel_size=1,
                 padding='same',
                 activation=self.activation,
-                kernel_initializer=get_kernel_initializer(self.activation),
                 dtype=self.dtype_policy,
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
@@ -369,7 +368,6 @@ class ResConv2D(tf.keras.layers.Layer):
             name=f"Conv1_{ker_size_to_string(self.kernel_size)}",
             dtype=self.dtype_policy,
             activation="linear",
-            kernel_initializer=get_kernel_initializer(self.activation),
             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             kernel_constraint=ClipMaxValue(),
@@ -384,7 +382,6 @@ class ResConv2D(tf.keras.layers.Layer):
             dtype=self.dtype_policy,
             name=f"Conv2_{ker_size_to_string(self.kernel_size)}",
             activation="linear",
-            kernel_initializer=get_kernel_initializer(self.activation),
             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             kernel_constraint=ClipMaxValue(),
@@ -462,7 +459,6 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             dtype=self.dtype_policy,
             name=f"Conv",
             activation="linear",
-            kernel_initializer = get_kernel_initializer(self.activation),
             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             kernel_constraint=ClipMaxValue(),
@@ -490,8 +486,6 @@ class Conv2DWithDtype(tf.keras.layers.Conv2D):
     def __init__(self, *args, l2_reg:float=0, output_dtype:str=None, **kwargs):
         self._activation = kwargs.pop('activation', None)
         self.l2_reg = l2_reg
-        if "kernel_initializer" not in kwargs:
-            kwargs["kernel_initializer"] = get_kernel_initializer(self._activation)
         kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
         bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
         kernel_constraint = ClipMaxValue()
@@ -564,7 +558,6 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             padding='same',
             dtype=self.dtype_policy,
             activation="linear",
-            kernel_initializer=get_kernel_initializer(self.activation),
             kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
             kernel_constraint=ClipMaxValue(),
@@ -594,8 +587,6 @@ class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
     def __init__(self, *args, output_dtype=None, l2_reg:float=0, **kwargs):
         self._activation = kwargs.pop('activation', None)
         self.l2_reg = l2_reg
-        if "kernel_initializer" not in kwargs:
-            kwargs["kernel_initializer"] = get_kernel_initializer(self._activation)
         kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
         bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
         kernel_constraint = ClipMaxValue()
@@ -899,44 +890,57 @@ def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
 
 
 class RelativeTemporalEmbedding(tf.keras.layers.Layer):
-    def __init__(self, embedding_dim:int, hidden_dim:int=[128, 128], l2_reg=1e-5, **kwargs):
+    def __init__(self, embedding_dim:int, hidden_dims:int=512, use_regular_embedding:bool=False, max_distance:int = None, l2_reg=1e-5, **kwargs):
         self.embedding_dim = embedding_dim
-        if not isinstance(hidden_dim, (tuple, list)):
-            hidden_dim = [hidden_dim]
-        self.hidden_dims = hidden_dim
+        self.use_regular_embedding=use_regular_embedding
+        if use_regular_embedding:
+            assert max_distance is not None and isinstance(max_distance, int ) and max_distance > 0, "max_distance must be provided in regular embedding mode"
+        self.max_distance=int(max_distance) if max_distance is not None else None
+        if not isinstance(hidden_dims, (tuple, list)):
+            hidden_dims = [hidden_dims]
+        self.hidden_dims = hidden_dims
         self.l2_reg = l2_reg
         super().__init__(**kwargs)
 
     def build(self, input_shape):
         self.n_frames = input_shape[-1]
-        layers = []
-        for i, h in enumerate(self.hidden_dims):
-            activation = "tanh" # TODO : 'silu' if i==0 else "tanh"
+        if self.use_regular_embedding:
+            self.embedding = tf.keras.layers.Embedding(
+                input_dim=self.max_distance * 2 + 1,
+                output_dim=self.embedding_dim,
+                embeddings_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10,  elementwise_strength=self.l2_reg, axis=1) if self.l2_reg > 0 else None,
+                embeddings_constraint=ClipMaxValue(),
+                dtype=self.dtype_policy
+            )
+        else: # NLP
+            layers = []
+            for i, h in enumerate(self.hidden_dims):
+                activation = "tanh" # TODO : 'silu' if i==0 else "tanh"
+                layers.append(tf.keras.layers.Dense(
+                    units=h,
+                    activation=activation,
+                    dtype=self.dtype_policy,
+                    kernel_initializer='glorot_uniform',
+                    bias_initializer='glorot_uniform', # TODO zeros ?
+                    kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                    bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                    kernel_constraint=ClipMaxValue(),
+                    bias_constraint=ClipMaxValue(),
+                    name=f'{self.name}/hidden{i}'
+                ))
             layers.append(tf.keras.layers.Dense(
-                units=h,
-                activation=activation,
+                units=self.embedding_dim,
+                activation=None,
                 dtype=self.dtype_policy,
-                kernel_initializer=get_kernel_initializer(activation),
-                bias_initializer=get_kernel_initializer(activation),
+                kernel_initializer='glorot_uniform',
+                bias_initializer='glorot_uniform',  # TODO zeros ?
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
+                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 kernel_constraint=ClipMaxValue(),
                 bias_constraint=ClipMaxValue(),
-                name=f'{self.name}/hidden{i}'
+                name=f'{self.name}/add'
             ))
-        layers.append(tf.keras.layers.Dense(
-            units=self.embedding_dim,
-            activation=None,
-            dtype=self.dtype_policy,
-            kernel_initializer='glorot_uniform',
-            bias_initializer='glorot_uniform',
-            kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-            bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-            kernel_constraint=ClipMaxValue(),
-            bias_constraint=ClipMaxValue(),
-            name=f'{self.name}/add'
-        ))
-        self.add_embedding = tf.keras.Sequential(layers, name="embedding")
+            self.embedding = tf.keras.Sequential(layers, name="embedding")
         super().build(input_shape)
 
     def get_config(self):
@@ -944,6 +948,8 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
         config.update({
             "hidden_dims": self.hidden_dims,
             "embedding_dim": self.embedding_dim,
+            "use_regular_embedding": self.use_regular_embedding,
+            "max_distance": self.max_distance,
             "l2_reg": self.l2_reg
         })
         return config
@@ -956,8 +962,12 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
         Returns:
             additive embedding (B, T, D)
         """
-        distances = tf.reshape(tf.cast(distances, self.compute_dtype), shape=[-1, self.n_frames, 1]) # B, T, 1
-        return self.add_embedding(distances)
+        if self.use_regular_embedding: # make distance positive
+            distances = tf.cast(distances, tf.int32) + tf.cast(self.max_distance, tf.int32)
+            distances = tf.clip_by_value(distances, 0, self.max_distance * 2)
+        else:
+            distances = tf.reshape(tf.cast(distances, self.compute_dtype), shape=[-1, self.n_frames, 1]) # B, T, 1
+        return self.embedding(distances)
 
 
 class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
@@ -1217,7 +1227,7 @@ class MultiHeadGradientLimiter(tf.keras.layers.Layer):
             Always index explicitly: branches[0], branches[1], ...
         """
         branches = [tf.identity(inputs) for _ in range(self.num_heads)]
-        if self.num_heads == 1 or not training:
+        if True or self.num_heads == 1 or not training:
             return branches
         return self._gradient_fn(*branches)
 
@@ -1508,13 +1518,3 @@ class ClipMaxValue(tf.keras.constraints.Constraint):
 
     def get_config(self):
         return {'max_value': self.max_value}
-
-
-def get_kernel_initializer(activation:str):
-    if activation is None:
-        return "glorot_uniform"
-    activation = activation.lower()
-    if "elu" in activation or "silu" in activation or activation == "mish":
-        return "he_normal"
-    else:
-        return "glorot_uniform"

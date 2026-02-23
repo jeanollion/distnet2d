@@ -43,7 +43,7 @@ class DiSTNetModel(tf.keras.Model):
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
                  category_number:int=0, category_class_weights = None, category_focal_weight = 2.0, category_max_class_weight=10,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
-                 accum_steps=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
+                 accum_steps=1, use_agc=False, agc_clip_factor=0.01, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False, scale_losses:bool = True,
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -734,8 +734,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # decoder part
         outputs=[]
-        up_seg = MultiHeadGradientLimiter(n_seg_heads, name="grad_bal_seg")(features_batch) if n_seg_heads > 1 else [features_batch]
-        up_track = MultiHeadGradientLimiter(n_track_heads, name="grad_bal_track")(feature_pairs_batch) if n_track_heads > 1 else [feature_pairs_batch]
+        up_seg = MultiHeadGradientLimiter(n_seg_heads, name="grad_bal_seg")(features_batch) if n_seg_heads > 1 else [features_batch]*n_seg_heads
+        up_track = MultiHeadGradientLimiter(n_track_heads, name="grad_bal_track")(feature_pairs_batch) if n_track_heads > 1 else [feature_pairs_batch]*n_track_heads
         seg_head_idx = 0
         track_head_idx = 0
         for decoder_name, is_segmentation in decoder_is_segmentation.items():
@@ -864,11 +864,11 @@ def decoder_op(
         if op == "res1d" or op=="resconv1d":
             raise NotImplementedError("ResConv1D are not implemented")
         elif op == "res2d" or op=="resconv2d":
-            convs =lambda suffix: [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}") if filters_out==filters or i < n_conv-1
-                                   else Conv2DBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix) for i in range(n_conv)]
+            convs =lambda suffix: [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==0 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}") if filters_out==filters or i < n_conv-1
+                                   else Conv2DBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm if i==0 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix) for i in range(n_conv)]
         else:
             if batch_norm or dropout_rate>0:
-                convs = lambda suffix: [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==n_conv-1 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_conv - 1 or output_name is None else output_name + suffix) for i in range(n_conv)]
+                convs = lambda suffix: [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==0 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_conv - 1 or output_name is None else output_name + suffix) for i in range(n_conv)]
             else:
                 convs = lambda suffix: [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_conv - 1 or output_name is None else output_name + suffix) for i in range(n_conv)]
         wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None

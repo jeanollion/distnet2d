@@ -108,7 +108,7 @@ class TemporalPyramid(Layer):
             out = conv_layer(out)
             self.down_op.append(tf.keras.Model(input_layers, out))
             self.ln.append(tf.keras.layers.LayerNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32', name=f"ln{i}"))
-            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, l2_reg=self.temporal_encoding_l2_reg, dtype=self.dtype_policy, name=f"temp_emb{i}"))
+            self.temp_emb.append(RelativeTemporalEmbedding(embedding_dim=input_filters, use_regular_embedding=True, max_distance=20, l2_reg=self.temporal_encoding_l2_reg, dtype=self.dtype_policy, name=f"temp_emb{i}"))
         super(TemporalPyramid, self).build(input_shape)
 
     def call(self, inputs, training=None):
