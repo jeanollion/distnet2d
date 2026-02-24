@@ -27,7 +27,7 @@ class TemporalPyramid(Layer):
     Output shape: (T, B, Y, X, C)
     """
 
-    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, position_encoding_l2_reg:float=1e-5, multiplicative_temporal_encoding:bool=True, verbose=False, **kwargs):
+    def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, temporal_encoding_l2_reg:float=1e-5, multiplicative_temporal_encoding:bool=True, verbose=False, **kwargs):
         super(TemporalPyramid, self).__init__(**kwargs)
         self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
         self.window_spatial_attention_kwargs["layer_normalization"] = False
@@ -36,7 +36,7 @@ class TemporalPyramid(Layer):
         self.filter_increase_mode_log=filter_increase_mode_log
         self.verbose = verbose
         self.l2_reg=l2_reg
-        self.temporal_encoding_l2_reg=position_encoding_l2_reg
+        self.temporal_encoding_l2_reg=temporal_encoding_l2_reg
         self.multiplicative_temporal_encoding=multiplicative_temporal_encoding
         print(f"multiplicative_temporal_encoding: {multiplicative_temporal_encoding}")
 
