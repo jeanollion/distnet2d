@@ -835,13 +835,11 @@ def decoder_op(
             name = name.lower()
         if n_conv==0 and activation_out is not None:
             activation = activation_out
-        if n_conv>0 and activation_out is None:
-            activation_out = activation
         if n_conv>0 and filters_out is None:
             filters_out = filters
 
         up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg)
-        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None)
+        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation_out, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None)
         if skip_combine_mode.lower()=="conv":
             combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_conv==0 else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_conv == 0 else None, filters=filters if filters_out is None or n_conv > 0 else filters_out, activation=activation_out if n_conv==0 else activation, kernel_size = combine_kernel_size, l2_reg=l2_reg)
         else:
