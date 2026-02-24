@@ -1,10 +1,11 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import numpy as np
-
-from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, InferenceLayer, get_grad_weight_fun, \
+from dataset_iterator.keras_layers import InferenceLayer
+from .layers import Combine, RelativeTemporalEmbedding, SplitBatch, get_grad_weight_fun, \
     HybridThresholdL2Regularizer, ClipMaxValue
 from .window_spatial_attention import WindowSpatialAttention
+
 
 class TemporalPyramid(Layer):
     """
@@ -116,8 +117,9 @@ class TemporalPyramid(Layer):
     def call(self, inputs, training=None):
         if self.frame_aware:
             inputs, frame_index = inputs
-        elif isinstance(inputs, list):
-            inputs = inputs[0]
+        else:
+            if isinstance(inputs, list):
+                inputs = inputs[0]
             frame_index = tf.expand_dims(tf.range(self.T) - tf.cast(self.W, tf.int32), 0)  # relative to center frame
         input_shape = tf.shape(inputs)
         _, B, Y, X, _ = tf.unstack(input_shape)

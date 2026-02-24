@@ -213,7 +213,6 @@ class Combine(tf.keras.layers.Layer):
             self,
             filters: int = 0,
             kernel_size: int=1,
-            weight_scaled:bool = False,
             activation: str="relu",
             compensate_gradient:bool = False,
             l2_reg: float=0,
@@ -224,7 +223,6 @@ class Combine(tf.keras.layers.Layer):
         self.activation = activation
         self.filters= filters
         self.kernel_size=kernel_size
-        self.weight_scaled = weight_scaled
         self.compensate_gradient = compensate_gradient
         self.l2_reg=l2_reg
         self.output_dtype=output_dtype
@@ -232,7 +230,7 @@ class Combine(tf.keras.layers.Layer):
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "weight_scaled":self.weight_scaled, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -243,28 +241,15 @@ class Combine(tf.keras.layers.Layer):
         else:
             filters = self.filters
         self.concat = tf.keras.layers.Concatenate(axis=-1, name = self.name+"_concat")
-        if self.weight_scaled:
-            self.combine_conv = WSConv2D(
-                filters=filters,
-                kernel_size=self.kernel_size,
-                dtype=self.dtype_policy,
-                padding='same',
-                activation=self.activation,
-                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                kernel_constraint=ClipMaxValue(),
-                bias_constraint=ClipMaxValue(),
-                name=self.name+"_conv1x1")
-        else:
-            self.combine_conv = Conv2DWithDtype(
-                filters=filters,
-                kernel_size=self.kernel_size,
-                dtype=self.dtype_policy,
-                padding='same',
-                activation=self.activation,
-                l2_reg=self.l2_reg,
-                output_dtype=self.output_dtype,
-                name=self.name+"_conv1x1")
+        self.combine_conv = Conv2DWithDtype(
+            filters=filters,
+            kernel_size=self.kernel_size,
+            dtype=self.dtype_policy,
+            padding='same',
+            activation=self.activation,
+            l2_reg=self.l2_reg,
+            output_dtype=self.output_dtype,
+            name=self.name+"_conv1x1")
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./len(input_shape))
         super().build(input_shape)
@@ -283,9 +268,10 @@ class Combine(tf.keras.layers.Layer):
 
 
 class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, name: str= "NConvToBatch2D", l2_reg=None, **kwargs):
+    def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, activation="relu", name: str= "NConvToBatch2D", l2_reg=None, **kwargs):
         self.n_conv = n_conv
         self.filters = filters
+        self.activation = activation
         self.inference_idx=inference_idx
         self.compensate_gradient=compensate_gradient
         self.l2_reg=l2_reg
@@ -293,7 +279,7 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient, "inference_idx":self.inference_idx, "l2_reg":self.l2_reg})
+        config.update({"n_conv": self.n_conv, "filters":self.filters, "compensate_gradient":self.compensate_gradient, "activation":self.activation, "inference_idx":self.inference_idx, "l2_reg":self.l2_reg})
         return config
 
     def build(self, input_shape):
@@ -302,7 +288,7 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
                 filters=self.filters,
                 kernel_size=1,
                 padding='same',
-                activation="relu",
+                activation=self.activation,
                 dtype=self.dtype_policy,
                 kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
                 bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
@@ -340,71 +326,6 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         return output
 
 
-class SplitNConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
-    def __init__(self, n_conv:int, inference_idx, filters:int, kernel, compensate_gradient:bool = False, name: str= "SplitNConvToBatch2D", l2_reg=None, **kwargs):
-        self.n_conv = n_conv
-        self.filters = filters
-        self.kernel = kernel
-        self.inference_idx=inference_idx if isinstance(inference_idx, (list, tuple)) else [inference_idx]
-        self.compensate_gradient=compensate_gradient
-        self.convs = None
-        self.split_layer = None
-        self.inference_split_layer = None
-        self.l2_reg=l2_reg
-        super().__init__(name=name, **kwargs)
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({"n_conv": self.n_conv, "filters":self.filters, "kernel":self.kernel, "compensate_gradient":self.compensate_gradient, "inference_idx":self.inference_idx, "l2_reg":self.l2_reg})
-        return config
-
-    def build(self, input_shape):
-        self.convs = [
-            tf.keras.layers.Conv2D(
-                filters=self.filters,
-                kernel_size=1,
-                padding='same',
-                activation="relu",
-                dtype=self.dtype_policy,
-                kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                kernel_constraint=ClipMaxValue(),
-                bias_constraint = ClipMaxValue(),
-                name=f"Conv_{i}"
-            )
-        for i in range(self.n_conv)]
-        self.split_layer = SplitBatch(n_splits=self.n_conv)
-        self.inference_split_layer = SplitBatch(n_splits=len(self.inference_idx))
-
-        if self.compensate_gradient and self.n_conv>1:
-            self.grad_fun = get_grad_weight_fun(float(self.n_conv))
-            self.grad_fun_inv = get_grad_weight_fun(1./self.n_conv)
-        else:
-            self.grad_fun = None
-            self.grad_fun_inv = None
-        super().build(input_shape)
-
-    def call(self, input): # (B, Y, X, F)
-        if self.inference_mode: # only produce one output
-            input_split = self.inference_split_layer(input)
-            items = [self.convs[idx](input_split[i]) for i, idx in enumerate(self.inference_idx)]
-            if len(self.inference_idx)>1:
-                return tf.concat(items, axis=0)
-            else:
-                return items[0]
-        # input = get_print_grad_fun(f"{self.name} before split")(input)
-        if self.grad_fun_inv is not None:
-            input = self.grad_fun_inv(input)
-        input_split = self.split_layer(input)
-        inputs = [conv(input_split[i]) for i, conv in enumerate(self.convs)] # N x (B, Y, X, F)
-        # inputs[0] = get_print_grad_fun(f"{self.name} before concat")(inputs[0])
-        output = tf.concat(inputs, axis = 0) # (N x B, Y, X, F)
-        if self.grad_fun is not None:
-            output = self.grad_fun(output) # compensate gradients to have same level in
-        # output = get_print_grad_fun(f"{self.name} after concat")(output)
-        return output
-
-
 class ResConv2D(tf.keras.layers.Layer):
     def __init__(
             self,
@@ -413,7 +334,6 @@ class ResConv2D(tf.keras.layers.Layer):
             weighted_sum : bool = False,
             dropout_rate : float = 0.3,
             batch_norm : bool = True,
-            weight_scaled:bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
@@ -426,20 +346,18 @@ class ResConv2D(tf.keras.layers.Layer):
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
-        self.weight_scaled = weight_scaled
         self.weighted_sum = weighted_sum
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weight_scaled":self.weight_scaled, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
         input_channels = int(input_shape[-1])
-        conv_fun = WSConv2D if self.weight_scaled else  tf.keras.layers.Conv2D
-        self.conv1 = conv_fun(
+        self.conv1 = tf.keras.layers.Conv2D(
             filters=input_channels,
             kernel_size=self.kernel_size,
             strides=1,
@@ -452,7 +370,7 @@ class ResConv2D(tf.keras.layers.Layer):
             kernel_constraint=ClipMaxValue(),
             bias_constraint = ClipMaxValue()
         )
-        self.conv2 = conv_fun(
+        self.conv2 = tf.keras.layers.Conv2D(
             filters=input_channels,
             kernel_size=self.kernel_size,
             dilation_rate = self.dilation,
@@ -466,7 +384,6 @@ class ResConv2D(tf.keras.layers.Layer):
             kernel_constraint=ClipMaxValue(),
             bias_constraint = ClipMaxValue()
         )
-        self.gamma = get_gamma(self.activation) if self.weight_scaled else 1.
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
@@ -481,7 +398,7 @@ class ResConv2D(tf.keras.layers.Layer):
         x = self.conv1(input)
         if self.batch_norm:
             x = self.bn1(x, training = training)
-        x = self.activation_layer(x) #* self.gamma
+        x = self.activation_layer(x)
         x = self.conv2(x)
         if self.batch_norm:
             x = self.bn2(x, training = training)
@@ -717,67 +634,6 @@ class UpSampling2DWithDtype(tf.keras.layers.UpSampling2D):
         config = super(UpSampling2DWithDtype, self).get_config()
         config.update({'output_dtype': self.output_dtype})
         return config
-
-
-class WSConv2D(tf.keras.layers.Conv2D):
-    def __init__(self, *args, eps=1e-4, use_gain=True, dropout_rate = 0, kernel_initializer="he_normal", output_dtype:str=None, **kwargs):
-        activation = kwargs.pop("activation", "linear") # bypass activation
-        gamma = kwargs.pop("gamma", get_gamma(activation if isinstance(activation, str) else tf.keras.activations.serialize(activation)))
-        super().__init__(kernel_initializer=kernel_initializer, *args, **kwargs)
-        self.eps = eps
-        self.use_gain = use_gain
-        self.activation_layer = tf.keras.activations.get(activation)
-        self.dropout_rate = dropout_rate
-        self.gamma = gamma
-        self.output_dtype=output_dtype
-
-    def build(self, input_shape):
-        super().build(input_shape)
-        if self.use_gain:
-            self.gain = self.add_weight(
-                name="gain",
-                shape=(self.kernel.shape[-1],),
-                initializer="ones",
-                trainable=True,
-                dtype=self.dtype_policy,
-            )
-        else:
-            self.gain = None
-        if self.dropout_rate>0:
-            self.dropout = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
-
-    def convolution_op(self, inputs, kernel): # original code modified to used standardized weights
-        if self.padding == "causal":
-            tf_padding = "VALID"  # Causal padding handled in `call`.
-        elif isinstance(self.padding, str):
-            tf_padding = self.padding.upper()
-        else:
-            tf_padding = self.padding
-
-        return tf.nn.convolution(
-            inputs,
-            _standardize_weight(kernel, self.gain, self.eps),
-            strides=list(self.strides),
-            padding=tf_padding,
-            dilations=list(self.dilation_rate),
-            data_format=self._tf_data_format,
-            name=self.__class__.__name__,
-        )
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({"eps":self.eps, "use_gain": self.use_gain, "output_dtype":self.output_dtype, "activation_layer":tf.keras.activations.serialize(self.activation_layer), "dropout_rate":self.dropout_rate, "gamma":self.gamma})
-        return config
-
-    def call(self, input, training=None):
-        x = super().call(input)
-        if self.dropout_rate>0:
-            x = self.dropout(x, training = training)
-        if self.output_dtype is not None:
-            x = tf.cast(x, dtype=self.output_dtype)
-        if self.activation_layer is not None:
-            x = self.activation_layer(x) #* self.gamma
-        return x
 
 
 class WeightedSum(tf.keras.layers.Layer):
