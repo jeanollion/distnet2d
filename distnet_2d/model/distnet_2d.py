@@ -833,8 +833,8 @@ def decoder_op(
             name=f"{name}{layer_idx}"
         elif name is not None:
             name = name.lower()
-        if n_conv==0 and activation_out is not None:
-            activation = activation_out
+        if activation_out is None:
+            activation_out = activation
         if n_conv>0 and filters_out is None:
             filters_out = filters
 
