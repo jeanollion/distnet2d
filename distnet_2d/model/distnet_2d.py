@@ -460,11 +460,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         if arch.frame_window<=1:
             long_term = False
         n_frames = arch.frame_window * (2 if arch.future_frames else 1) + 1
-
+        print("skip connections: {}".format(skip_connections))
         if skip_connections == False:
             skip_connections = [len(arch.encoder_settings)] # only at feature level
         elif skip_connections == True:
             skip_connections = [i for i in range(len(arch.encoder_settings) + 1)]
+            if arch.early_downsampling:
+                skip_connections.pop(0)
         else:
             assert isinstance(skip_connections, (list))
             skip_connections = [i if i>=0 else len(arch.encoder_settings) + 1 + i for i in skip_connections]
@@ -580,7 +582,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                         output_name = None if arch.frame_window > 0 or predict_edm_derivatives else decoder_output_names["Seg"][dSegName]
                         if 0 in skip_connections:
                             param_list_seg = copy.deepcopy(param_list)
-                            param_list_seg["n_conv"] = max(2, param_list.get("n_conv", 0))
+                            ops = param_list_seg.get("ops", ["conv"]*2)
+                            while len(ops) < 2:
+                                ops.append("conv")
+                            param_list_seg["ops"] = ops
                         else:
                             param_list_seg = param_list
                         decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
@@ -824,9 +829,8 @@ def decoder_op(
             dropout_rate_up:float=0,
             activation: str="relu",
             activation_out : str = None,
-            op:str = "conv", # conv, resconv2d, resconv2d
+            ops:list = ["conv"], # conv, resconv2d, resconv2d
             weighted_sum:bool=False, # in case op = resconv2d, resconv2d
-            n_conv:int = 1,
             l2_reg:float=0,
             name: str="DecoderLayer",
             output_name: str = None,
@@ -838,33 +842,40 @@ def decoder_op(
             name = name.lower()
         if activation_out is None:
             activation_out = activation
-        if n_conv>0 and filters_out is None:
+        n_ops = len(ops)
+        if n_ops>0 and filters_out is None:
             filters_out = filters
-
-        up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg)
+        if n_ops > 0:
+            batch_norm = ensure_multiplicity(n_ops, batch_norm)
+        up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, name=f"{name}_tConv{ker_size_to_string(conv_kernel_size)}{suffix}")
         up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation_out, batch_norm=batch_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None)
         if skip_combine_mode.lower()=="conv":
-            combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_conv==0 else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_conv == 0 else None, filters=filters if filters_out is None or n_conv > 0 else filters_out, activation=activation_out if n_conv==0 else activation, kernel_size = combine_kernel_size, l2_reg=l2_reg)
+            combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_ops==0 else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_ops == 0 else None, filters=filters if filters_out is None or n_ops > 0 else filters_out, activation=activation_out if n_ops==0 else activation, kernel_size = combine_kernel_size, l2_reg=l2_reg)
         else:
             combine = None
-        op = op.lower().replace("_", "")
-        if op == "res1d" or op=="resconv1d":
-            raise NotImplementedError("ResConv1D are not implemented")
-        elif op == "res2d" or op=="resconv2d":
-            convs =lambda suffix: [ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==0 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}") if filters_out==filters or i < n_conv-1
-                                   else Conv2DBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm if i==0 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix) for i in range(n_conv)]
-        else:
-            if batch_norm or dropout_rate>0:
-                convs = lambda suffix: [Conv2DBNDrop(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_conv-1 else activation, batch_norm=batch_norm if i==0 else False, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_conv - 1 or output_name is None else output_name + suffix) for i in range(n_conv)]
+        def create_op(suffix, i):
+            op_name = ops[i]
+            op_name = op_name.lower().replace("_", "")
+            if op_name == "res1d" or op_name=="resconv1d":
+                raise NotImplementedError("ResConv1D are not implemented")
+            elif op_name == "res2d" or op_name=="resconv2d":
+                if filters_out == filters or i < n_ops - 1:
+                    return ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_ops-1 else activation, batch_norm=batch_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}")
+                else:
+                    return Conv2DBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix)
             else:
-                convs = lambda suffix: [Conv2DWithDtype(filters=filters_out if i==n_conv-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_conv-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_conv-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_conv - 1 or output_name is None else output_name + suffix) for i in range(n_conv)]
+                if batch_norm[i] or dropout_rate>0:
+                    return Conv2DBNDrop(filters=filters_out if i==n_ops-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_ops-1 else activation, batch_norm=batch_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix)
+                else:
+                    return Conv2DWithDtype(filters=filters_out if i==n_ops-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_ops-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_ops - 1 or output_name is None else output_name + suffix)
+        convs = lambda suffix : [create_op(suffix, i) for i in range(n_ops)]
         wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
 
         def op(input):
             down, res = input
             if isinstance(down, tuple):
                 down = down[0]
-            up = up_op_out("")(down) if n_conv==0 and res is None else up_op("")(down)
+            up = up_op_out("")(down) if n_ops==0 and res is None else up_op("")(down)
             if res is not None:
                 if combine is not None:
                     up = combine("")([up, res])

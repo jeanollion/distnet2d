@@ -156,10 +156,10 @@ class D2(ArchDepth):
              "batch_norm": False}
         ]
         self.decoder_settings = [
-            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": ker0, "up_kernel_size": 4,
+            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": 4,
               "batch_norm_up": False, "dropout_rate": 0},
-            {"filters": 32, "op": "res2d", "conv_kernel_size":ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
-              "batch_norm":self.batch_norm, "dropout_rate": 0}
+            {"filters": 32, "ops": ["conv", "res2d"], "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": 4,
+              "batch_norm": [self.batch_norm, False], "dropout_rate": 0}
         ]
 
 
@@ -225,12 +225,12 @@ class D3(ArchDepth):
              "batch_norm": False}
         ]
         self.decoder_settings = [
-            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": ker0, "up_kernel_size": 4,
+            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": 4,
               "batch_norm_up": False, "dropout_rate": 0},
-            {"filters": 32, "op": "res2d", "conv_kernel_size" : ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
+            {"filters": 32, "ops": ["res2d"]*2, "conv_kernel_size" : ker1, "weighted_sum": False, "up_kernel_size": 4,
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 64, "op": "res2d", "conv_kernel_size" : ker2, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
-              "batch_norm": self.batch_norm, "dropout_rate": 0}
+            {"filters": 64, "ops": ["conv", "res2d"], "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": 4,
+              "batch_norm": [self.batch_norm, False], "dropout_rate": 0}
         ]
 
 
@@ -307,14 +307,14 @@ class D4(ArchDepth):
              "batch_norm": False}
         ]
         self.decoder_settings = [
-            {"filters": 16, "op": "conv", "n_conv": 0, "conv_kernel_size": ker0, "up_kernel_size": 4,
+            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": 4,
               "batch_norm_up": False, "dropout_rate": 0},
-            {"filters": 16, "op": "res2d", "conv_kernel_size": ker1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
+            {"filters": 16, "ops": ["res2d"]*2, "conv_kernel_size": ker1, "weighted_sum": False, "up_kernel_size": 4,
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 32, "op": "res2d", "conv_kernel_size": ker2_1, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
+            {"filters": 32, "ops": ["res2d"]*2, "conv_kernel_size": ker2_1, "weighted_sum": False, "up_kernel_size": 4,
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 64, "op": "res2d", "conv_kernel_size": ker3_3, "weighted_sum": False, "n_conv": 2, "up_kernel_size": 4,
-              "batch_norm": self.batch_norm, "dropout_rate": 0}
+            {"filters": 64, "ops": ["conv", "res2d"], "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": 4,
+              "batch_norm": [self.batch_norm, False], "dropout_rate": 0}
         ]
 
 
