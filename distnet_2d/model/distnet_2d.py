@@ -26,9 +26,9 @@ class DiSTNetModel(tf.keras.Model):
                  edm_loss_weight:float=1,
                  edm_class_weights:list = None,  # weights to balance foreground/background classes
                  cdm_loss_weight:float=1,
-                 displacement_loss_weight:float=1, # increase to 0.5 ? no simultaneously with lm
-                 link_multiplicity_loss_weight:float=1, # increase to  0.25 ? no simultaneously with dis
-                 category_loss_weight: float = 1, # reduce ?
+                 displacement_loss_weight:float=1,
+                 link_multiplicity_loss_weight:float=1,
+                 category_loss_weight: float = 1,
                  edm_loss=PseudoHuber(1), edm_derivative_loss:bool=False,
                  cdm_loss=PseudoHuber(1), cdm_derivative_loss:bool=False,
                  cdm_loss_radius:float = 0,
@@ -43,7 +43,7 @@ class DiSTNetModel(tf.keras.Model):
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
                  category_number:int=0, category_class_weights = None, category_focal_weight = 2.0, category_max_class_weight=10,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
-                 accum_steps=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
+                 gradient_accumulation_steps:int=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False, scale_losses:bool = True,
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -61,6 +61,7 @@ class DiSTNetModel(tf.keras.Model):
         self.future_frames = future_frames
         self.predict_fw=predict_fw
         self.frame_window = frame_window
+        self.long_term = long_term
         self.edm_loss = edm_loss
         self.edm_derivative_loss = edm_derivative_loss
         self.cdm_loss = cdm_loss
@@ -89,11 +90,11 @@ class DiSTNetModel(tf.keras.Model):
             self.category_loss = None
 
         # gradient accumulation from https://github.com/andreped/GradientAccumulator/blob/main/gradient_accumulator/accumulators.py
-        self.long_term = long_term
-        self.use_grad_acc = accum_steps>1
-        self.accum_steps = float(accum_steps)
+        self.use_grad_acc = gradient_accumulation_steps > 1
+        self.gradient_accumulation_steps = float(gradient_accumulation_steps)
         if self.use_grad_acc:
-            self.gradient_accumulator = GradientAccumulator(accum_steps, self)
+            print(f"gradient accumulation steps: {self.gradient_accumulation_steps}")
+            self.gradient_accumulator = GradientAccumulator(gradient_accumulation_steps, self)
         self.use_agc = use_agc
         self.agc_clip_factor = agc_clip_factor
         self.agc_eps = agc_eps
