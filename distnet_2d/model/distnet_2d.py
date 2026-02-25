@@ -192,6 +192,8 @@ class DiSTNetModel(tf.keras.Model):
         cat_idx = lm_idx + int(link_multiplicity_weight > 0)
         with self.maybe_gradient_tape(training) as tape:
             y_pred = self(x, training=training)  # Forward pass
+            if training and self.use_grad_acc: # for batch norm handling
+                self.gradient_accumulator.post_forward_step()
             if edm_weight > 0:
                 if self.predict_edm_derivatives:
                     edm, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=3, axis=-1)

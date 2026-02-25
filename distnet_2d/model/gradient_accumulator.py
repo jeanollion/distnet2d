@@ -11,19 +11,62 @@ class GradientAccumulator():
         self.first_call = True
         self.gradient_accumulation = None
         self.scale = tf.cast(1./accum_steps, tf.float32)
-        self.reinit_grad_accum()
 
-    def apply_accu_gradients(self):
-        # apply accumulated gradients
-        self.model.optimizer.apply_gradients(zip(self.gradient_accumulation, self.model.trainable_variables))
+        # --- BN handling ---
+        self._bn_layers = get_all_bn_layers(model)
+        self._bn_mean_accum = {}
+        self._bn_ex2_accum = {}
+        self._bn_moving_mean_snapshot = {}
+        self._bn_moving_var_snapshot = {}
+        self._init_bn_accumulators()
 
-        # reset
-        self.accum_step_counter.assign(0)
+        self._reinit_grad_accum()
+
+    # ------------------------------------------------------------------
+    # Public API — only these three methods are called from training loop
+    # ------------------------------------------------------------------
+
+    def init_train_step(self):
+        """Call at the very beginning of each training step."""
+        if self.first_call:
+            self._reinit_grad_accum()
+            self.first_call = False
+        self.accum_step_counter.assign_add(1)
+
+        # Snapshot BN moving stats BEFORE the forward pass so we can
+        # restore them after the forward pass runs (BN will corrupt them
+        # with single-mini-batch statistics during training=True).
+        self._snapshot_bn_stats()
+
+    def post_forward_step(self):
+        """
+        Call AFTER forward pass, BEFORE tape.gradient().
+        Recovers sub-batch stats, then restores moving averages to their
+        pre-forward-pass values so they are not corrupted by sub-batch updates.
+        """
+        self._accumulate_bn_stats_from_ema()
+        self._restore_bn_stats()
+
+    def accumulate_gradients(self, gradients, scale=True):
+        """Call after tape.gradient()."""
         for i in range(len(self.gradient_accumulation)):
-            self.gradient_accumulation[i].assign(
-                tf.zeros_like(self.model.trainable_variables[i], dtype=tf.float32), read_value=False)
+            if gradients[i] is not None:
+                if scale:
+                    gradients[i] = self.scale * gradients[i]
+                self.gradient_accumulation[i].assign_add(gradients[i], read_value=False)
 
-    def reinit_grad_accum(self):
+    def apply_gradients(self):
+        """Call at the end of each training step."""
+        # If accum_step_counter reach the accum_steps then we apply accumulated gradients to update the variables
+        # otherwise do nothing
+        tf.cond(tf.equal(self.accum_step_counter, self.accum_steps), true_fn=self._apply_accu_gradients,
+                false_fn=lambda: None)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _reinit_grad_accum(self):
         # reinitialize gradient accumulator
         self.gradient_accumulation = [
             tf.Variable(tf.zeros_like(v, dtype=tf.float32), trainable=False,
@@ -33,21 +76,125 @@ class GradientAccumulator():
             ) for i, v in enumerate(self.model.trainable_variables)
         ]
 
-    def accumulate_gradients(self, gradients, scale=True):
+    def _apply_accu_gradients(self):
+        # apply accumulated gradients
+        self.model.optimizer.apply_gradients(zip(self.gradient_accumulation, self.model.trainable_variables))
+
+        # Apply the correctly accumulated BN moving statistics
+        self._apply_bn_stats()
+
+        # reset
+        self.accum_step_counter.assign(0)
         for i in range(len(self.gradient_accumulation)):
-            if gradients[i] is not None:
-                if scale:
-                    gradients[i] = self.scale * gradients[i]
-                self.gradient_accumulation[i].assign_add(gradients[i], read_value=False)
+            self.gradient_accumulation[i].assign(
+                tf.zeros_like(self.model.trainable_variables[i], dtype=tf.float32), read_value=False)
 
-    def apply_gradients(self):
-        # If accum_step_counter reach the accum_steps then we apply accumulated gradients to update the variables
-        # otherwise do nothing
-        tf.cond(tf.equal(self.accum_step_counter, self.accum_steps), true_fn=self.apply_accu_gradients,
-                false_fn=lambda: None)
+        self._reset_bn_accumulators()
 
-    def init_train_step(self):
-        if self.first_call:
-            self.reinit_grad_accum()
-            self.first_call = False
-        self.accum_step_counter.assign_add(1)
+    # --- BN helpers ---
+    def _init_bn_accumulators(self):
+        for layer in self._bn_layers:
+            self._bn_mean_accum[layer.name] = tf.Variable(
+                tf.zeros_like(layer.moving_mean), trainable=False,
+                name=f"bn_mean_accum_{layer.name}"
+            )
+            self._bn_ex2_accum[layer.name] = tf.Variable(
+                tf.zeros_like(layer.moving_variance), trainable=False,
+                name=f"bn_ex2_accum_{layer.name}"
+            )
+            self._bn_moving_mean_snapshot[layer.name] = tf.Variable(
+                tf.zeros_like(layer.moving_mean), trainable=False,
+                name=f"bn_mean_snap_{layer.name}"
+            )
+            self._bn_moving_var_snapshot[layer.name] = tf.Variable(
+                tf.zeros_like(layer.moving_variance), trainable=False,
+                name=f"bn_var_snap_{layer.name}"
+            )
+
+    def _snapshot_bn_stats(self):
+        """Save current moving stats before the forward pass."""
+        for layer in self._bn_layers:
+            self._bn_moving_mean_snapshot[layer.name].assign(layer.moving_mean)
+            self._bn_moving_var_snapshot[layer.name].assign(layer.moving_variance)
+
+    def _accumulate_bn_stats_from_ema(self):
+        """
+        Recover batch_mean and batch_var from the EMA update BN just applied:
+            moving_new = moving_old * m + batch_stat * (1 - m)
+            => batch_stat = (moving_new - moving_old * m) / (1 - m)
+
+        Accumulate:
+            - scaled mean:          mu_i / N
+            - scaled E[X^2] term:  (sigma_i^2 + mu_i^2) / N
+        """
+        for layer in self._bn_layers:
+            m = layer.momentum
+            snap_mean = self._bn_moving_mean_snapshot[layer.name]
+            snap_var = self._bn_moving_var_snapshot[layer.name]
+
+            batch_mean = (layer.moving_mean - snap_mean * m) / (1.0 - m)
+            batch_var = (layer.moving_variance - snap_var * m) / (1.0 - m)
+
+            self._bn_mean_accum[layer.name].assign_add(batch_mean * self.scale)
+            # accumulate E[X^2] = var + mean^2
+            self._bn_ex2_accum[layer.name].assign_add( (batch_var + tf.square(batch_mean)) * self.scale)
+
+    def _restore_bn_stats(self):
+        """Roll back the EMA update BN made during the forward pass."""
+        for layer in self._bn_layers:
+            layer.moving_mean.assign(self._bn_moving_mean_snapshot[layer.name])
+            layer.moving_variance.assign(self._bn_moving_var_snapshot[layer.name])
+
+    def _apply_bn_stats(self):
+        """
+        Exact full-batch variance via law of total variance:
+            E[X]      = mean(mu_i)
+            E[X^2]    = mean(sigma_i^2 + mu_i^2)
+            Var(full) = E[X^2] - E[X]^2
+        """
+        for layer in self._bn_layers:
+            m = layer.momentum
+
+            full_mean = self._bn_mean_accum[layer.name]  # E[X]
+            full_var = (self._bn_ex2_accum[layer.name] - tf.square(full_mean))  # E[X^2] - E[X]^2
+
+            layer.moving_mean.assign( layer.moving_mean * m + full_mean * (1.0 - m))
+            layer.moving_variance.assign( layer.moving_variance * m + full_var * (1.0 - m))
+
+    def _reset_bn_accumulators(self):
+        for layer in self._bn_layers:
+            self._bn_mean_accum[layer.name].assign(tf.zeros_like(layer.moving_mean))
+            self._bn_ex2_accum[layer.name].assign(tf.zeros_like(layer.moving_variance))
+
+
+def get_sub_layer_dict(layer):
+    if hasattr(layer, 'layers'):
+        return {l.name: l for l in layer.layers}
+    else:
+        res = {}
+        for attribute, value in vars(layer).items():
+            if not attribute.startswith("_"):
+                if isinstance(value, tf.keras.layers.Layer):
+                    res[value.name] = value
+                elif isinstance(value, (list, tuple)):
+                    for l in value:
+                        if isinstance(l, tf.keras.layers.Layer):
+                            res[l.name] = l
+        return res
+
+def get_all_bn_layers(model):
+    """Recursively collect all BatchNormalization layers in the model."""
+    bn_layers = []
+    visited = set()
+
+    def _recurse(layer):
+        if id(layer) in visited:
+            return
+        visited.add(id(layer))
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            bn_layers.append(layer)
+        for sublayer in get_sub_layer_dict(layer).values():
+            _recurse(sublayer)
+
+    _recurse(model)
+    return bn_layers
