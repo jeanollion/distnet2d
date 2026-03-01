@@ -1,3 +1,5 @@
+import copy
+
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import numpy as np
@@ -29,7 +31,7 @@ class TemporalPyramid(Layer):
 
     def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, temporal_encoding_l2_reg:float=1e-5, multiplicative_temporal_encoding:bool=False, verbose=False, **kwargs):
         super(TemporalPyramid, self).__init__(**kwargs)
-        self.window_spatial_attention_kwargs = window_spatial_attention_kwargs
+        self.window_spatial_attention_kwargs = copy.deepcopy(window_spatial_attention_kwargs)
         self.window_spatial_attention_kwargs["layer_normalization"] = False
         self.layer_normalization=layer_normalization
         self.filter_increase_factor=filter_increase_factor

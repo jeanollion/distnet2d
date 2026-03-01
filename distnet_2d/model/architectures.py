@@ -44,7 +44,7 @@ class ArchBase:
                  next: bool = True,
                  early_downsampling:bool = True,
                  scale_edm:bool = False,
-                 batch_norm:bool = True, dropout:float=0.2, l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
+                 batch_norm:bool = False, dropout:float=0.2, l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",
                  attention_filters:int = 0, attention_positional_encoding:str="2d",
                  activation:str= "relu",

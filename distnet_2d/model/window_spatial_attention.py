@@ -23,7 +23,7 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
     """
 
     def __init__(self, num_heads: int, attention_filters: int, window_size:tuple,
-                 use_bias:bool = True, dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=False,
+                 use_bias:bool = True, dropout: float = 0.1, skip_connection: bool = True, layer_normalization:bool=True,
                  add_distance_embedding:bool=True,
                  window_processing:str="auto", # "batch", "row", "col", "sequential", "auto"="batch" at train and "sequential" otherwise
                  overlap_reduction: str = 'geometrical',  # 'mean', 'attention_weighted', 'geometrical'

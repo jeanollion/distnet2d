@@ -680,7 +680,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 features_batch = sa(features_batch) # T x B, Y, X, C
             if arch.frame_window > 0:
                 features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
-                blend_op = TemporalPyramid(wsa_kwargs, filter_increase_factor=1, l2_reg=arch.l2_reg, temporal_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
+                blend_op = TemporalPyramid(wsa_kwargs, layer_normalization=True, filter_increase_factor=1, l2_reg=arch.l2_reg, temporal_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
                 blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
                 feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg, activation=arch.default_activation)
                 for op in feature_blending_convs:
