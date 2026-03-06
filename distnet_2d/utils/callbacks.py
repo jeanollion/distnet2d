@@ -15,8 +15,8 @@ class CosineDecayResume(LearningRateSchedule):
     def __init__(
             self,
             initial_learning_rate:float,
+            min_lr: float,
             decay_steps:int,
-            alpha:float=0.0,
             start_step:int=0,
             warmup_learning_rate_factor:float=None,
             warmup_steps:int = 0,
@@ -26,7 +26,9 @@ class CosineDecayResume(LearningRateSchedule):
         self.initial_learning_rate = float(initial_learning_rate)
         self.warmup_learning_rate_factor = warmup_learning_rate_factor
         self.warmup_steps = int(warmup_steps)
+        alpha = float(min_lr) / float(initial_learning_rate),
         self.cosine_decay = CosineDecay(initial_learning_rate, decay_steps-self.warmup_steps, alpha, name=name)
+        self.min_lr = float(min_lr)
 
     def __call__(self, step):
         if self.warmup_steps>0 and self.warmup_learning_rate_factor is not None:
@@ -38,6 +40,7 @@ class CosineDecayResume(LearningRateSchedule):
         target_learning_rate = self.cosine_decay(tf.maximum(tf.cast(0, tf.int32), tf.cast(step + self.start_step - self.warmup_steps, tf.int32)))
         dtype = target_learning_rate.dtype
         warmup_lr = tf.cast(self.warmup_learning_rate_factor, dtype=dtype) * target_learning_rate
+        warmup_lr = tf.maximum(tf.cast(self.min_lr, dtype=dtype), warmup_lr)
         step = tf.cast(step, dtype=dtype)
         warmup_steps = tf.cast(self.warmup_steps, dtype=dtype)
         return warmup_lr + (target_learning_rate - warmup_lr) * step / warmup_steps
