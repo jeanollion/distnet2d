@@ -26,7 +26,7 @@ class CosineDecayResume(LearningRateSchedule):
         self.initial_learning_rate = float(initial_learning_rate)
         self.warmup_learning_rate_factor = warmup_learning_rate_factor
         self.warmup_steps = int(warmup_steps)
-        alpha = float(min_lr) / float(initial_learning_rate),
+        alpha = float(min_lr) / float(initial_learning_rate)
         self.cosine_decay = CosineDecay(initial_learning_rate, decay_steps-self.warmup_steps, alpha, name=name)
         self.min_lr = float(min_lr)
 
