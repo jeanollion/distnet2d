@@ -44,7 +44,7 @@ class ArchBase:
                  next: bool = True,
                  early_downsampling:bool = True,
                  scale_edm:bool = False,
-                 layer_norm_dec:bool = False, batch_norm:bool = False, dropout:float=0.2,
+                 layer_norm_dec:bool = False, batch_norm:bool = True, dropout:float=0.2,
                  l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",
                  attention_filters:int = 0, attention_positional_encoding:str="2d",
@@ -365,7 +365,7 @@ class BlendD4(Blend, D4):
 
 class TemPy(ArchBase):
     def __init__(self, window_attention:int, wsa_edm:bool=False, wsa_cdm:bool=False, frame_aware:bool=True, **kwargs):
-        super().__init__(frame_aware=frame_aware, batch_norm=False, layer_norm_dec=False, **kwargs)
+        super().__init__(frame_aware=frame_aware, batch_norm=True, layer_norm_dec=False, **kwargs)
         self.window_attention = window_attention
         if self.frame_window > 0:
             assert window_attention > 0
