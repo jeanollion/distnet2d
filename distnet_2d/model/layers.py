@@ -332,8 +332,9 @@ class ResConv2D(tf.keras.layers.Layer):
             kernel_size: int=3,
             dilation: int = 1,
             weighted_sum : bool = False,
-            dropout_rate : float = 0.3,
-            batch_norm : bool = True,
+            dropout_rate : float = 0,
+            batch_norm : bool = False,
+            layer_norm: bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
@@ -346,13 +347,14 @@ class ResConv2D(tf.keras.layers.Layer):
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
+        self.layer_norm = layer_norm
         self.weighted_sum = weighted_sum
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -390,6 +392,11 @@ class ResConv2D(tf.keras.layers.Layer):
         if self.batch_norm:
             self.bn1 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
             self.bn2 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
+            print(f"layer: {self.name} BN")
+        elif self.layer_norm:
+            self.bn1 = tf.keras.layers.LayerNormalization(  dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+            self.bn2 = tf.keras.layers.LayerNormalization( dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+            print(f"layer: {self.name} LN")
         if self.weighted_sum:
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
@@ -423,7 +430,8 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             dilation: int = 1,
             strides: int = 1,
             dropout_rate:float = 0.2,
-            batch_norm : bool = True,
+            batch_norm : bool = False,
+            layer_norm: bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
@@ -437,13 +445,14 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
+        self.layer_norm = layer_norm
         self.strides=strides
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -466,6 +475,10 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
             self.bn = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
+            print(f"layer: {self.name} BN")
+        if self.layer_norm:
+            self.bn = tf.keras.layers.LayerNormalization( dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+            print(f"layer: {self.name} LN")
         super().build(input_shape)
 
     def call(self, input, training=None):
@@ -526,6 +539,7 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             strides: int = 2,
             dropout_rate:float = 0,
             batch_norm : bool = False,
+            layer_norm: bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
@@ -538,13 +552,14 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
+        self.layer_norm = layer_norm
         self.strides=strides
         self.l2_reg=l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -565,8 +580,11 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"Dropout")
         if self.batch_norm:
-            #self.bn = MockBatchNormalization(name = f"/MockBatchNormalization")
             self.bn = tf.keras.layers.BatchNormalization(name = f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
+            print(f"layer: {self.name} BN")
+        elif self.layer_norm:
+            self.bn = tf.keras.layers.LayerNormalization(name=f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+            print(f"layer: {self.name} LN")
         super().build(input_shape)
 
     def call(self, input, training=None):
