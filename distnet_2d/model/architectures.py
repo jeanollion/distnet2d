@@ -385,23 +385,17 @@ class TemPy(ArchBase):
 class TemPyD2(TemPy, D2):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
-        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2)
-        if self.attention_spatial_radius != attention_spatial_radius:
-            print(f"tempAtt rad: {self.attention_spatial_radius}")
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2, message="Temporal Attention")
 
 class TemPyD3(TemPy, D3):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
-        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3)
-        if self.attention_spatial_radius != attention_spatial_radius:
-            print(f"tempAtt rad: {self.attention_spatial_radius}")
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3, message="Temporal Attention")
 
 class TemPyD4(TemPy, D4):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
-        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4)
-        if self.attention_spatial_radius != attention_spatial_radius:
-            print(f"tempAtt rad: {self.attention_spatial_radius}")
+        self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4, message="Temporal Attention")
 
 def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, downsampling):
     if spa_dimensions is None:
@@ -429,7 +423,7 @@ def test_ker_dil(ker, dil, dim):
     size = (ker-1)*dil
     return dim >= size * 2
 
-def limit_radius(target_radius, spa_dimensions, downsampling):
+def limit_radius(target_radius, spa_dimensions, downsampling, message:str=None):
     if target_radius == 0 or spa_dimensions is None:
         return target_radius
     spa_dimensions = ensure_multiplicity(2, spa_dimensions)
@@ -438,5 +432,6 @@ def limit_radius(target_radius, spa_dimensions, downsampling):
     rad = [min(s, r) for r, s in zip(rad, spa_dimensions)]
     if rad[0] == rad[1]:
         rad = rad[0]
-    print(f"rad: {target_radius} -> {rad} for dim: {spa_dimensions}")
+    if message is not None:
+        print(f"{message} rad: target={target_radius} -> actual={rad} for dim: {spa_dimensions}")
     return rad

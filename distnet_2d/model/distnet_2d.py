@@ -69,14 +69,12 @@ class DiSTNetModel(tf.keras.Model):
         self.displacement_loss = displacement_loss
         self.predict_cdm_derivatives = predict_cdm_derivatives
         self.predict_edm_derivatives = predict_edm_derivatives
-        print(f"lm focal weight: {link_multiplicity_focal_weight}")
         if link_multiplicity_class_weights is not None:
             assert len(link_multiplicity_class_weights) == 3, "3 link multiplicity class weights should be provided: normal cell, dividing/merging cells, cell with no previous cell"
             self.link_multiplicity_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight), link_multiplicity_class_weights, remove_background=True)
         else:
             self.link_multiplicity_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
         if category_number > 1:
-            print(f"cat focal weight: {category_focal_weight}")
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
                 self.category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight), category_class_weights, remove_background=True)
@@ -439,7 +437,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             kwargs["displacement_loss_weight"] = 0
             kwargs["link_multiplicity_loss_weight"] = 0
 
-        print(f"edm activation: {'tanh' if arch.scale_edm else 'linear'} l2_reg: {arch.l2_reg} l2_reg_emb: {arch.position_encoding_l2_reg}")
+        #print(f"edm activation: {'tanh' if arch.scale_edm else 'linear'} l2_reg: {arch.l2_reg} l2_reg_emb: {arch.position_encoding_l2_reg}")
         total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in arch.encoder_settings])
         total_contraction = ensure_multiplicity(2, total_contraction)
         assert len(arch.encoder_settings) == len(arch.decoder_settings), "decoder should have same length as encoder"
@@ -460,7 +458,6 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         if arch.frame_window<=1:
             long_term = False
         n_frames = arch.frame_window * (2 if arch.future_frames else 1) + 1
-        print("skip connections: {}".format(skip_connections))
         if skip_connections == False:
             skip_connections = [len(arch.encoder_settings)] # only at feature level
         elif skip_connections == True:
@@ -555,7 +552,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             oidx += 1
             if not tracking and not arch.segmentation:
                 output_per_decoder["Cat"]["FgBg"] = oidx
-        print(f"outputs: {output_per_decoder}")
+        #print(f"outputs: {output_per_decoder}")
         decoder_output_names = dict()
         for n, o_ns in output_per_decoder.items():
             decoder_output_names[n] = dict()

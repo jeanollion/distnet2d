@@ -392,11 +392,9 @@ class ResConv2D(tf.keras.layers.Layer):
         if self.batch_norm:
             self.bn1 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
             self.bn2 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-            print(f"layer: {self.name} BN")
         elif self.layer_norm:
             self.bn1 = tf.keras.layers.LayerNormalization(  dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
             self.bn2 = tf.keras.layers.LayerNormalization( dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
-            print(f"layer: {self.name} LN")
         if self.weighted_sum:
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
@@ -475,10 +473,8 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
             self.bn = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-            print(f"layer: {self.name} BN")
         if self.layer_norm:
             self.bn = tf.keras.layers.LayerNormalization( dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
-            print(f"layer: {self.name} LN")
         super().build(input_shape)
 
     def call(self, input, training=None):
@@ -581,10 +577,8 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"Dropout")
         if self.batch_norm:
             self.bn = tf.keras.layers.BatchNormalization(name = f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-            print(f"layer: {self.name} BN")
         elif self.layer_norm:
             self.bn = tf.keras.layers.LayerNormalization(name=f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
-            print(f"layer: {self.name} LN")
         super().build(input_shape)
 
     def call(self, input, training=None):
@@ -905,10 +899,9 @@ def sinusoidal_temporal_encoding(distances, embedding_dim, dtype="float32"):
 
 
 class RelativeTemporalEmbedding(tf.keras.layers.Layer):
-    def __init__(self, embedding_dim:int, hidden_dim:int=256, multiplicative:bool=True, l2_reg=1e-5, **kwargs):
+    def __init__(self, embedding_dim:int, hidden_dim:int=256, l2_reg=1e-5, **kwargs):
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
-        self.multiplicative = multiplicative
         self.l2_reg = l2_reg
         super().__init__(**kwargs)
 
@@ -940,36 +933,6 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
                 name=f'{self.name}/add'
             ),
         ], name="additive_embedding")
-
-        if self.multiplicative:
-            self.mult_embedding = tf.keras.Sequential([
-                tf.keras.layers.Dense(
-                    self.hidden_dim,
-                    activation='tanh',
-                    dtype=self.dtype_policy,
-                    bias_initializer=tf.keras.initializers.Zeros(),
-                    kernel_initializer='glorot_uniform',
-                    kernel_regularizer=HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                    bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0,  elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                    kernel_constraint=ClipMaxValue(),
-                    bias_constraint=ClipMaxValue(),
-                    name=f'{self.name}/mult_hidden'
-                ),
-                tf.keras.layers.Dense(
-                    self.embedding_dim,
-                    activation='sigmoid',
-                    dtype=self.dtype_policy,
-                    bias_initializer=tf.keras.initializers.Zeros(),
-                    kernel_initializer='glorot_uniform',
-                    kernel_regularizer=HybridThresholdL2Regularizer(directional_strength = self.l2_reg * 10, elementwise_strength = self.l2_reg) if self.l2_reg > 0 else None,
-                    bias_regularizer=HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else None,
-                    kernel_constraint=ClipMaxValue(),
-                    bias_constraint=ClipMaxValue(),
-                    name=f'{self.name}/mult_gate'
-                ),
-                tf.keras.layers.Lambda(lambda x : x * 2)
-            ], name='multiplicative_embedding')
-
         super().build(input_shape)
 
     def get_config(self):
@@ -977,27 +940,21 @@ class RelativeTemporalEmbedding(tf.keras.layers.Layer):
         config.update({
             "hidden_dim": self.hidden_dim,
             "embedding_dim": self.embedding_dim,
-            "l2_reg": self.l2_reg,
-            "multiplicative": self.multiplicative
+            "l2_reg": self.l2_reg
         })
         return config
 
     def call(self, distances):
         """
         Args:
-            distances: (B, T) or (T) - temporal distances (can be negative for backward)
+            distances: (B, T) - temporal distances (can be negative for backward)
 
         Returns:
-            if multiplicative: returns multiplicative and additive embedding (B, T, D) or (T, D)
-            else returns additive embedding only (B, T, D) or (T, D)
+            returns additive embedding (B, T, D)
         """
         distances = tf.reshape(tf.cast(distances, self.compute_dtype), shape=[-1, self.n_frames, 1]) # B, T, 1
         additive_emb = self.add_embedding(distances)
-        if self.multiplicative:
-            mult_embedding = self.mult_embedding(distances)
-            return mult_embedding, additive_emb
-        else:
-            return additive_emb
+        return additive_emb
 
 class ConcatenateWithDtype(InferenceLayer, tf.keras.layers.Concatenate):
     def __init__(self, *args, inference_idx=None, output_dtype:str=None, autocast=False, **kwargs):
