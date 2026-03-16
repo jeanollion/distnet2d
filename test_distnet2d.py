@@ -1,17 +1,22 @@
 import time
+from collections import defaultdict
 from pathlib import Path
 import sys
 from scipy.ndimage import gaussian_filter
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-from distnet_2d.utils.objectwise_computation_tf import circular_kernel, _erode_mask
 
 path_root = Path(__file__).parents[1]
+print(f"path {path_root}")
 sys.path.append(path_root.joinpath("dataset_iterator").__str__())
 sys.path.append(path_root.joinpath("distne2d").__str__())
 #print(f"root={path_root} pixmclass {path_root.joinpath('pix_mclass')}")
 import tensorflow as tf
 
 
+from distnet_2d.model.architectures import BlendD2
+from distnet_2d.utils.objectwise_computation_tf import circular_kernel, _erode_mask
 import numpy as np
 from dataset_iterator.tile_utils import extract_tiles
 #a = np.zeros(shape=(10, 256, 250, 2))
@@ -29,19 +34,31 @@ from dataset_iterator.image_data_generator import IlluminationImageGenerator, Sc
 from dataset_iterator.datasetIO import get_datasetIO, MemoryIO
 from distnet_2d.model import get_distnet_2d, architectures, get_distnet_2d_seg
 
-
 seg = False
 if not seg:
-    #t = [[0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 0, 0, 0, 0]]
-    #print(_erode_mask(np.array(t)[np.newaxis], radius=2))
-    print(circular_kernel(2.5))
+    if True:
+        from tensorflow.keras import mixed_precision
+        mixed_precision.set_global_policy('mixed_float16')
+        fw = 2
+        spa_dim = (256, 256)
+        dn = get_distnet_2d(
+            arch=architectures.TemPyD3(segmentation=True, wsa_edm=True, tracking=False, frame_window=fw, spatial_dimensions=spa_dim, filters=192, self_attention=0, attention_filters=0,
+                                      temporal_attention=64, attention_spatial_radius=16,
+                                      skip_connections=True, early_downsampling=False, category_number=3, inference_gap_number=1,
+                                      predict_edm_derivatives=False, predict_cdm_derivatives=False)
+        )
 
-    if False:
-        dn = get_distnet_2d((None, None), 4, 1, True, category_number=2, config=architectures.BlendD3(filters=128, self_attention=0, attention=0, skip_connections=True, early_downsampling=True), predict_edm_derivatives=True, predict_cdm_derivatives=True)
-
-        tf.keras.utils.plot_model(dn, "/data/model.png", show_shapes=True)
+        dn.set_inference(True)
+        dn.compile()
+        print(f"reg loss: {len(dn.losses)} layers: {len(dn.layers)} values: {dn.losses}")
+        print(f"variables: {len(dn.trainable_variables)} shape: {[t.shape for t in dn.trainable_variables]}")
+        frame_index = tf.reshape(tf.range(fw*2+1), [1, 1, 1, fw*2+1])
+        out = dn([tf.zeros(shape=(1, spa_dim[0], spa_dim[1], fw*2+1)), frame_index]) # frame aware case
+        #out = dn([tf.zeros(shape=(1, spa_dim[0], spa_dim[1], fw*2+1))])
+        print(f"{[o.shape for o in out]}")
+        tf.keras.utils.plot_model(dn, "/data/model.png", dpi=64, show_shapes=True)
         #dn.load_weights("/data/DL/DistNet2D/MotherMachinePhase/distnet2d_mm_phase_D3ASA16_5.h5")
-        #print(dn.summary())
+        print(dn.summary())
 
     if False:
 

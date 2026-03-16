@@ -30,7 +30,7 @@ class DyDxIterator(TrackingIterator):
                  frame_window:int,
                  aug_frame_subsampling,  # either int: frame number interval will be drawn uniformly in [frame_window,aug_frame_subsampling] or callable that generate an frame number interval (int)
                  erase_edge_cell_size:int,
-                 next_frames:bool = True,
+                 future_frames:bool = True,
                  allow_frame_subsampling_direct_neigh:bool = False,
                  aug_remove_prob: float = 0.005,
                  return_link_multiplicity:bool = True,
@@ -44,12 +44,13 @@ class DyDxIterator(TrackingIterator):
                  scale_edm:bool = False,  # for each cell max edm value is 1
                  center_mode:str = "MEDOID",  # GEOMETRICAL, "EDM_MAX", "EDM_MEAN", "SKELETON", "MEDOID"
                  center_distance_mode = "GEODESIC",  # GEODESIC, EUCLIDEAN
-                 input_label_center_idx:int = -1, # center of target label are centers of the input label of this index
+                 input_label_center_idx:int = -1,  # center of target label are centers of the input label of this index
                  return_label_rank = False,
-                 long_term:bool = True,
+                 segmentation:bool = True,
                  tracking:bool = True,
+                 long_term: bool = True,
                  return_next_displacement:bool = True,
-                 output_float16=False,
+                 frame_aware:bool=False,  # return actual frame (relative to central frame)
                  **kwargs):
         assert len(channel_keywords)>=2, 'keyword should contain at least 2 elements in this order: grayscale input images, object labels, [other grayscale input images]'
         if frame_window == 0:
@@ -63,16 +64,22 @@ class DyDxIterator(TrackingIterator):
         assert center_distance_mode.upper() in CENTER_DISTANCE_MODE, f"invalid center distance mode: {center_distance_mode} should be in {CENTER_DISTANCE_MODE}"
         self.category_array_idx = next((i for i, s in enumerate(array_keywords) if "category" in s), -1)
         self.tracking = tracking
+        self.segmentation=segmentation
+        if not segmentation:
+            return_center = False
+            return_edm_derivatives = False
+            scale_edm = False
         if not tracking:
             return_link_multiplicity = False
             return_next_displacement = False
             long_term = False
+        if not segmentation and not tracking:
+            assert self.category_array_idx==0, "if no segmentation and no tracking category must be provided"
         self.return_link_multiplicity=return_link_multiplicity
         self.downscale=downscale_displacement_and_link_multiplicity
         self.erase_edge_cell_size=erase_edge_cell_size
         self.aug_frame_subsampling=aug_frame_subsampling
         self.allow_frame_subsampling_direct_neigh=allow_frame_subsampling_direct_neigh
-        self.output_float16=output_float16
         self.return_edm_derivatives=return_edm_derivatives
         self.scale_edm = scale_edm
         self.return_center=return_center
@@ -86,6 +93,7 @@ class DyDxIterator(TrackingIterator):
         self.return_next_displacement=return_next_displacement
         self.n_label_max = kwargs.pop("n_label_max", 2000)
         self.long_term=long_term
+        self.frame_aware=frame_aware
         self.output_central_only = False
         nchan = len(channel_keywords)
         if input_label_keywords is not None:
@@ -105,12 +113,14 @@ class DyDxIterator(TrackingIterator):
                          input_channels=[0] + [i for i in range(2, nchan)] + self.label_input_channels,
                          output_channels=[1],
                          channels_prev=[True]*len(channel_keywords),
-                         channels_next=[next_frames] * len(channel_keywords),
+                         channels_next=[future_frames] * len(channel_keywords),
                          mask_channels=[1] + self.label_input_channels,
                          n_frames = self.frame_window,
                          aug_remove_prob=aug_remove_prob,
+                         frame_subsampling=1,  # disable default frame subsampling mechanism
                          aug_all_frames=False,
                          convert_masks_to_dtype=False,
+                         return_image_index = self.frame_aware,
                          extract_tile_function=extract_tile_function,
                          elasticdeform_parameters=elasticdeform_parameters,
                          **kwargs)
@@ -142,7 +152,13 @@ class DyDxIterator(TrackingIterator):
                     n_frames = self.frame_window
         else:
             n_frames = 0
-        kwargs.update({"n_frames":n_frames})
+        #print(f"aug sub: {self.aug_frame_subsampling} -> nframes={n_frames}", flush=True)
+        kwargs.update({"n_frames":n_frames, "ref_channel_idx":1 if not input_only else 0})
+        if n_frames > 0: # only open subsampled frames, except for labels and prevlinks that requires all the frames to reconstruct lineage
+            frames = np.array(self._get_end_points(n_frames, False)) - n_frames
+            #print(f"frame increment: {frames}")
+            kwargs.update({"frame_increment_per_channel": {c:frames for c in range(len(self.channel_keywords)) if c!=1 }})
+            kwargs.update({"frame_increment_per_array": {self.category_array_idx : frames}})
         batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False, **kwargs)
         ref_shape = batch_by_channel[0].shape
         for c in range(1, len(self.channel_keywords)):
@@ -171,12 +187,13 @@ class DyDxIterator(TrackingIterator):
             # get previous labels and store in batch_by_channel BEFORE applying tiling and elastic deform
             self._get_prev_label(batch_by_channel, n_frames)
         batch_by_channel["batch_size"] = batch_by_channel[0].shape[0] # batch size is recorded here: it will be used in case of tiling
-        if n_frames>1: # remove unused frames
+        if n_frames>1: # remove unused frames for labels
             sel = self._get_end_points(n_frames, False)
-            channels = [c for c in batch_by_channel if not isinstance(c, str) and c>=0]
-            #print(f"remove unused frames: nframes: {n_frames*2+1} sel: {sel} channels: {channels}")
-            for c in channels:
-                batch_by_channel[c] = batch_by_channel[c][..., sel]
+            #print(f"remove unused frames: nframes: {n_frames*2+1} sel: {sel} channels: {1}")
+            batch_by_channel[1] = batch_by_channel[1][..., sel]
+            if self.return_image_index:
+                batch_by_channel["image_idx"] = batch_by_channel["image_idx"][:, sel]
+
         if perform_elasticdeform or perform_tiling: ## elastic deform do not support float16 type -> temporarily convert to float32
             channels = [c for c in batch_by_channel.keys() if not isinstance(c, str) and c>=0]
             converted_from_float16=[]
@@ -191,6 +208,9 @@ class DyDxIterator(TrackingIterator):
         if perform_elasticdeform or perform_tiling:
             for c in converted_from_float16:
                 batch_by_channel[c] = batch_by_channel[c].astype('float16')
+        if self.return_image_index: # reshape to match image shape
+            n_chan = self.frame_window * (2 if self.channels_next[1] else 1) + 1
+            batch_by_channel["image_idx"] = np.reshape(batch_by_channel["image_idx"], (-1, 1, 1, n_chan))
         return batch_by_channel, aug_param_array, ref_channel
 
     @staticmethod
@@ -281,10 +301,11 @@ class DyDxIterator(TrackingIterator):
         object_slices = {}
         for b, c in itertools.product(range(labelIms.shape[0]), range(labelIms.shape[-1])):
             object_slices[(b, c)] = find_objects(labelIms[b,...,c])
-        edm = np.zeros(shape=labelIms.shape, dtype=np.float32)
-        for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
-            edm[b,...,c] = edt_smooth(labelIms[b,...,c], object_slices[(b, c)])
-            #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
+        edm = np.zeros(shape=labelIms.shape, dtype=np.float32) if self.segmentation or ("edm" in self.center_mode and self.input_label_center_idx < 0) else None
+        if edm is not None:
+            for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
+                edm[b,...,c] = edt_smooth(labelIms[b,...,c], object_slices[(b, c)])
+                #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
         n_motion = 2 * frame_window if return_next else frame_window
         if long_term:
             n_motion = n_motion + (2 * ( frame_window - 1 ) if return_next else frame_window -1)
@@ -296,8 +317,8 @@ class DyDxIterator(TrackingIterator):
             if self.return_link_multiplicity:
                 linkMultiplicityImNext = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
         centerIm = np.zeros(labelIms.shape, dtype=self.dtype) if self.return_center else None
-        categoryIm = np.zeros(labelIms.shape, dtype=self.dtype) if self.category_array_idx>0 else None
-        cat_array = batch_by_channel['arrays'][self.category_array_idx] if self.category_array_idx>0 else None
+        categoryIm = np.zeros(labelIms.shape, dtype=self.dtype) if self.category_array_idx>=0 else None
+        cat_array = batch_by_channel['arrays'][self.category_array_idx] if self.category_array_idx>=0 else None
         if cat_array is not None and len(cat_array.shape) == 4:
             cat_array = cat_array[:, :, 0]
         if self.return_label_rank:
@@ -320,7 +341,7 @@ class DyDxIterator(TrackingIterator):
         labels_and_centers = {}
         for b,c in itertools.product(range(labelIms.shape[0]), range(labelIms.shape[-1])):
             input_centers = batch_by_channel["input_centers"][self.input_label_center_idx][(b, c)] if self.input_label_center_idx >= 0 else None
-            labels_and_centers[(b, c)] = _get_labels_and_centers(labelIms[b][...,c], edm[b][...,c], self.center_mode, input_centers=input_centers)
+            labels_and_centers[(b, c)] = _get_labels_and_centers(labelIms[b][...,c], edm[b][...,c] if edm is not None else None, self.center_mode, input_centers=input_centers)
         for i in range(labelIms.shape[0]):
             bidx = get_idx(i)
             if self.frame_window > 0:
@@ -328,13 +349,13 @@ class DyDxIterator(TrackingIterator):
                     sel = [c, c+1]
                     l_c = [labels_and_centers[(i,s)] for s in sel]
                     o_s = [object_slices[(i, s)] for s in sel]
-                    _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dyIm[i,...,c] if self.tracking else None, dxIm[i,...,c] if self.tracking else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,...,frame_window] if self.return_center and sel[1] == frame_window else None, cdmImPrev=centerIm[i,...,c] if self.return_center else None, edmIm = edm[i,...,frame_window] if self.scale_edm else None, edmImPrev = edm[i,...,c] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,frame_window] if self.category_array_idx>0 and sel[1] == frame_window else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>0 and sel[1] == frame_window else None, categoryImPrev=categoryIm[i,...,c] if self.category_array_idx>0 else None, categoryArrayPrev=cat_array[bidx, :, c] if self.category_array_idx>0 else None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,...,frame_window] if self.return_label_rank and sel[1] == frame_window else None, rankImPrev=rankIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and self.tracking and ndisp else None, centerArr=centerArr[i,frame_window] if self.return_label_rank and sel[1] == frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
+                    _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dyIm[i,...,c] if self.tracking else None, dxIm[i,...,c] if self.tracking else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,...,frame_window] if self.return_center and sel[1] == frame_window else None, cdmImPrev=centerIm[i,...,c] if self.return_center else None, edmIm = edm[i,...,frame_window] if self.scale_edm else None, edmImPrev = edm[i,...,c] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryImPrev=categoryIm[i,...,c] if self.category_array_idx>=0 else None, categoryArrayPrev=cat_array[bidx, :, c] if self.category_array_idx>=0 else None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,...,frame_window] if self.return_label_rank and sel[1] == frame_window else None, rankImPrev=rankIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and self.tracking and ndisp else None, centerArr=centerArr[i,frame_window] if self.return_label_rank and sel[1] == frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
                 if return_next:
                     for c in range(frame_window, 2*frame_window):
                         sel = [c, c+1]
                         l_c = [labels_and_centers[(i, s)] for s in sel]
                         o_s = [object_slices[(i, s)] for s in sel]
-                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dyIm[i,...,c] if self.tracking else None, dxIm[i,...,c] if self.tracking else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,..., c + 1] if self.return_center else None, edmIm = edm[i,...,c+1] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,..., c + 1] if self.category_array_idx>0 else None, categoryArray=cat_array[bidx, :, c+1] if self.category_array_idx>0 else None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,..., c + 1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i, c + 1] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
+                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dyIm[i,...,c] if self.tracking else None, dxIm[i,...,c] if self.tracking else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,..., c + 1] if self.return_center else None, edmIm = edm[i,...,c+1] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,..., c + 1] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, c+1] if self.category_array_idx>=0 else None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,..., c + 1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i, c + 1] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
                 if long_term:
                     off = 2*frame_window if return_next else frame_window
                     for c in range(0, frame_window-1):
@@ -351,9 +372,10 @@ class DyDxIterator(TrackingIterator):
             else:
                 l_c = [labels_and_centers[(i, 0)]]
                 o_s = [object_slices[(i, 0)]]
-                _compute_outputs(l_c, labelIms[i][...,0:1], None, o_s, None, None, cdmIm=centerIm[i,...,0], edmIm = edm[i,...,0] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,0] if self.category_array_idx>0 else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>0 else None, rankIm=rankIm[i,...,0] if self.return_label_rank else None, centerArr=centerArr[i,0] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
+                _compute_outputs(l_c, labelIms[i][...,0:1], None, o_s, None, None, cdmIm=centerIm[i,...,0] if self.return_center else None, edmIm = edm[i,...,0] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,0] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 else None, rankIm=rankIm[i,...,0] if self.return_label_rank else None, centerArr=centerArr[i,0] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
 
-        edm[edm == 0] = -1
+        if edm is not None:
+            edm[edm == 0] = -1
         if self.return_edm_derivatives:
             der_y, der_x = np.zeros_like(edm), np.zeros_like(edm)
             c_range = range(edm.shape[-1]) if not self.output_central_only else range(frame_window, frame_window - 1)
@@ -364,13 +386,13 @@ class DyDxIterator(TrackingIterator):
                 der_x = der_x[..., 1:-1]
 
         if self.output_central_only: # select only central frame for edm / center and only displacement / link multiplicity related to central frame
-            edm = edm[..., 1:-1]
-            centerIm = centerIm[..., 1:-1]
+            edm = edm[..., 1:-1] if edm is not None else None
+            centerIm = centerIm[..., 1:-1] if self.return_center else None
             dyIm = dyIm[..., :1] if self.tracking else None
             dxIm = dxIm[..., :1] if self.tracking else None
             if self.return_link_multiplicity:
                 linkMultiplicityIm = linkMultiplicityIm[..., :1]
-            if self.category_array_idx>0:
+            if self.category_array_idx>=0:
                 categoryIm = categoryIm[..., 1:-1]
             if ndisp:
                 dyImNext = dyImNext[..., 1:]
@@ -385,12 +407,10 @@ class DyDxIterator(TrackingIterator):
                     nextLabelArr = nextLabelArr[:, 1:]
         if self.return_edm_derivatives:
             edm = np.concatenate([edm, der_y, der_x], -1)
-        if self.output_float16:
-            edm = edm.astype('float16', copy=False)
-        all_channels = [edm]
+        all_channels = []
+        if edm is not None:
+            all_channels.append(edm)
         if self.return_center:
-            if self.output_float16:
-                centerIm = centerIm.astype('float16', copy=False)
             all_channels.append(centerIm)
         downscale_factor = 1./self.downscale if self.downscale>1 else 0
         scale = [1, downscale_factor, downscale_factor, 1]
@@ -403,9 +423,6 @@ class DyDxIterator(TrackingIterator):
         if ndisp:
             dyIm = np.concatenate([dyIm, dyImNext], -1)
             dxIm = np.concatenate([dxIm, dxImNext], -1)
-        if self.output_float16 and self.tracking:
-            dyIm = dyIm.astype('float16', copy=False)
-            dxIm = dxIm.astype('float16', copy=False)
         if self.tracking:
             all_channels.append(dyIm)
             all_channels.append(dxIm)
@@ -417,7 +434,7 @@ class DyDxIterator(TrackingIterator):
             if ndisp:
                 linkMultiplicityIm = np.concatenate([linkMultiplicityIm, linkMultiplicityImNext], -1)
             all_channels.append(linkMultiplicityIm)
-        if self.category_array_idx>0:
+        if self.category_array_idx>=0:
             if self.downscale > 1:
                 categoryIm = rescale(categoryIm, scale, anti_aliasing=False, order=0)
             all_channels.append(categoryIm)
@@ -546,7 +563,7 @@ def _compute_prev_label_map(labelIm, prevlabelArray, end_points):
                     else:
                         labels_map_prev_by_f[f][prevlabelArray[i,0,f]].add(prevlabelArray[i,1,f])
                 else: # gap
-                    labels_map_gap_prev_by_f[f][prevlabelArray[i,0,f]] = (prevlabelArray[i,1,f], f-prevlabelArray[i,2,f]-1)
+                    labels_map_gap_prev_by_f[f][prevlabelArray[i,0,f]] = (prevlabelArray[i,1,f], f-int(prevlabelArray[i,2,f])-1)
     labels_map_prev = []
     for (start, stop) in end_points:
         assert stop>=start, f"invalid endpoint [{start}, {stop}]"

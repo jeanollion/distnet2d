@@ -4,7 +4,7 @@ from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun
     FP
 
 
-def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = False, tracking:bool=True):
+def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = False, segmentation:bool=True, tracking:bool=True):
     """
     return metric function for disnet2D
     assumes iterator in return_central_only= True mode (thus framewindow = 1 and next = true)
@@ -30,23 +30,27 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
         if category:
             if tracking:
                 edm, gdcm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
-            else:
+            elif segmentation:
                 edm, gdcm, cat, true_edm, true_cat, labels, true_center_ob = args
+            else:
+                cat, labels, true_center_ob = args
         else:
             if tracking:
                 edm, gdcm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
             else:
                 edm, gdcm, true_edm, labels, true_center_ob = args
+
         labels = tf.transpose(labels, perm=[2, 0, 1])  # (1, Y, X)
-        edm = tf.transpose(edm, perm=[2, 0, 1]) # (1, Y, X)
-        gdcm = tf.transpose(gdcm, perm=[2, 0, 1])  # (1, Y, X)
-        center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, tf.cast(scale/2., tf.float32))))
         ids, sizes, N = get_label_size(labels, max_objects_number)  # (1, N), (1, N)
         ids = ids[0]
         sizes = sizes[0]
         true_center_ob = true_center_ob[:, :N]
-        zero = tf.cast(0, edm.dtype)
 
+        if segmentation:
+            zero = tf.cast(0, edm.dtype)
+            edm = tf.transpose(edm, perm=[2, 0, 1])  # (1, Y, X)
+            gdcm = tf.transpose(gdcm, perm=[2, 0, 1])  # (1, Y, X)
+            center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, tf.cast(scale / 2., tf.float32))))
         if tracking:
             motion_shape = tf.shape(dY) # Y, X, T
             lm = tf.reshape(lm, shape=tf.concat([motion_shape[:2], motion_shape[-1:], [3]], 0)) # Y, X, T, 3
@@ -58,37 +62,37 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
             true_dYX = tf.transpose(true_dYX, perm=[2, 0, 1, 3])  # T, Y, X, 2
 
         metrics = []
+        if segmentation:
+            # EDM : foreground/background IoU
+            pred_foreground = tf.math.greater(edm, tf.cast(0, edm.dtype))
+            true_foreground = tf.math.greater(labels, tf.cast(0, labels.dtype))
+            edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=0) #
+            metrics.append(edm_IoU)
 
-        # EDM : foreground/background IoU
-        pred_foreground = tf.math.greater(edm, tf.cast(0, edm.dtype))
-        true_foreground = tf.math.greater(labels, tf.cast(0, labels.dtype))
-        edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=scale / 8.) #
-        metrics.append(edm_IoU)
+            # Surface-based False Positive Density (FPD) based on EDM
+            fp = FP(true_foreground, pred_foreground, rate=False, tolerance_radius = 1 + scale / 6.) # higher tolerance_radius radius to focus on instances
+            metrics.append(-fp)
 
-        # Surface-based False Positive Density (FPD) based on EDM
-        fp = FP(true_foreground, pred_foreground, rate=False, tolerance_radius=scale / 4.) #
-        metrics.append(-fp)
+            # contour IoU : problem: true positive contours are usually not precise enough.
+            #pred_contours = tf.math.logical_and(tf.math.greater(edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(edm, tf.cast(1.5, edm.dtype)))
+            #true_contours = tf.math.logical_and(tf.math.greater(true_edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(true_edm, tf.cast(1.5, edm.dtype)))
+            #contour_IoU = IoU(true_contours, pred_contours, tolerance=True)
+            #edm_IoU = 0.5 * (edm_IoU + contour_IoU)
 
-        # contour IoU : problem: true positive contours are usually not precise enough.
-        #pred_contours = tf.math.logical_and(tf.math.greater(edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(edm, tf.cast(1.5, edm.dtype)))
-        #true_contours = tf.math.logical_and(tf.math.greater(true_edm, tf.cast(0.5, edm.dtype)), tf.math.less_equal(true_edm, tf.cast(1.5, edm.dtype)))
-        #contour_IoU = IoU(true_contours, pred_contours, tolerance=True)
-        #edm_IoU = 0.5 * (edm_IoU + contour_IoU)
+            labels = labels[0]
+            # CENTER
+            # compute center coordinates per objects: spatial max of predicted gaussian function of CDM
+            center_coord = objectwise_compute(center_values[0], spa_max_fun, labels, ids, sizes)  # (N, 2)
+            center_coord = tf.expand_dims(center_coord, 0) # (1, N, 2)
+            # metric is the distance between true and pred centers
+            center_spa_l2 = coord_distance_function(true_center_ob, center_coord)
+            center_spa_l2 = tf.cond(tf.math.is_nan(center_spa_l2), lambda: zero, lambda: center_spa_l2)
+            metrics.append(-center_spa_l2)
 
-        labels = labels[0]
-        # CENTER
-        # compute center coordinates per objects: spatial max of predicted gaussian function of CDM
-        center_coord = objectwise_compute(center_values[0], spa_max_fun, labels, ids, sizes)  # (N, 2)
-        center_coord = tf.expand_dims(center_coord, 0) # (1, N, 2)
-        # metric is the distance between true and pred centers
-        center_spa_l2 = coord_distance_function(true_center_ob, center_coord)
-        center_spa_l2 = tf.cond(tf.math.is_nan(center_spa_l2), lambda: zero, lambda: center_spa_l2)
-        metrics.append(-center_spa_l2)
-
-        # CENTER 2 : absolute value of exp(-CDM) at center -> should be as low as possible. Objective is 1 = max value, min possible value is 0.
-        center_max_value = objectwise_compute(center_values[0], max_fun, labels, ids, sizes) # (N,)
-        center_max_value = -reduce_pop_size(-center_max_value, N, pop_fraction=0.25) # either min (worst case among all cells = further away from 1 = min) or mean among worst
-        metrics.append(center_max_value)
+            # CENTER 2 : absolute value of exp(-CDM) at center -> should be as low as possible. Objective is 1 = max value, min possible value is 0.
+            center_max_value = objectwise_compute(center_values[0], max_fun, labels, ids, sizes) # (N,)
+            center_max_value = -reduce_pop_size(-center_max_value, N, pop_fraction=0.25) # either min (worst case among all cells = further away from 1 = min) or mean among worst
+            metrics.append(center_max_value)
 
         # CATEGORY
         if category:
@@ -99,6 +103,7 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
             cat_errors = tf.reduce_sum(tf.cast(errors, tf.float32))
             metrics.append(-cat_errors)
             #metrics.append(tf.cast(tf.reduce_sum(true_cat), tf.float32)) # for testing purpose
+
         if tracking:
             # DISPLACEMENT
             dm = objectwise_compute_channel(dYX, mean_fun, labels, ids, sizes)
@@ -120,9 +125,12 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
         if tracking:
             def metrics_fun(edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
                 return tf.map_fn(fun, (edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
-        else:
+        elif segmentation:
             def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
                 return tf.map_fn(fun, (edm, gcdm, cat, true_edm, true_cat, labels, true_center_array), fn_output_signature=tf.float32)
+        else:
+            def metrics_fun(cat, labels, true_center_array):
+                return tf.map_fn(fun, (cat, labels, true_center_array), fn_output_signature=tf.float32)
     else:
         if tracking:
             def metrics_fun(edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
