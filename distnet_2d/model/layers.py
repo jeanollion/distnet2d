@@ -241,12 +241,12 @@ class Combine(tf.keras.layers.Layer):
         else:
             filters = self.filters
         self.concat = tf.keras.layers.Concatenate(axis=-1, name = self.name+"_concat")
-        self.combine_conv = Conv2DWithDtype(
+        self.combine_conv = ConvBNDrop(
             filters=filters,
             kernel_size=self.kernel_size,
-            dtype=self.dtype_policy,
             padding='same',
             activation=self.activation,
+            dropout_rate=0,
             l2_reg=self.l2_reg,
             output_dtype=self.output_dtype,
             name=self.name+"_conv1x1")
@@ -267,7 +267,7 @@ class Combine(tf.keras.layers.Layer):
 
 
 
-class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
+class NConvToBatch(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, activation="relu", name: str= "NConvToBatch2D", l2_reg=None, **kwargs):
         self.n_conv = n_conv
         self.filters = filters
@@ -283,8 +283,13 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         return config
 
     def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        op = tf.keras.layers.Conv3D if len(input_shape) == 5 else tf.keras.layers.Conv2D
         self.convs = [
-            tf.keras.layers.Conv2D(
+            op(
                 filters=self.filters,
                 kernel_size=1,
                 padding='same',
@@ -326,7 +331,7 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         return output
 
 
-class ResConv2D(tf.keras.layers.Layer):
+class ResConv(tf.keras.layers.Layer):
     def __init__(
             self,
             kernel_size: int=3,
@@ -358,8 +363,13 @@ class ResConv2D(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
         input_channels = int(input_shape[-1])
-        self.conv1 = tf.keras.layers.Conv2D(
+        conv_op = tf.keras.layers.Conv3D if len(input_shape)==5 else tf.keras.layers.Conv2D
+        self.conv1 = conv_op(
             filters=input_channels,
             kernel_size=self.kernel_size,
             strides=1,
@@ -372,7 +382,7 @@ class ResConv2D(tf.keras.layers.Layer):
             kernel_constraint=ClipMaxValue(),
             bias_constraint = ClipMaxValue()
         )
-        self.conv2 = tf.keras.layers.Conv2D(
+        self.conv2 = conv_op(
             filters=input_channels,
             kernel_size=self.kernel_size,
             dilation_rate = self.dilation,
@@ -420,14 +430,14 @@ class ResConv2D(tf.keras.layers.Layer):
             return self.activation_layer(input + x)
 
 
-class Conv2DBNDrop(tf.keras.layers.Layer):
+class ConvBNDrop(tf.keras.layers.Layer):
     def __init__(
             self,
             filters:int,
             kernel_size: int=3,
             dilation: int = 1,
             strides: int = 1,
-            dropout_rate:float = 0.2,
+            dropout_rate:float = 0,
             batch_norm : bool = False,
             layer_norm: bool = False,
             activation:str = "relu",
@@ -454,7 +464,12 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
-        self.conv = tf.keras.layers.Conv2D(
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        op = tf.keras.layers.Conv3D if len(input_shape)==5 else tf.keras.layers.Conv2D
+        self.conv = op(
             filters=self.filters,
             kernel_size=self.kernel_size,
             dilation_rate = self.dilation,
@@ -488,58 +503,20 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
         return self.activation_layer(x)
 
 
-class Conv2DWithDtype(tf.keras.layers.Conv2D):
-    def __init__(self, *args, l2_reg:float=0, output_dtype:str=None, **kwargs):
-        self._activation = kwargs.pop('activation', None)
-        self.l2_reg = l2_reg
-        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
-        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
-        kernel_constraint = ClipMaxValue()
-        bias_constraint = ClipMaxValue()
-        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
-        self.output_dtype = output_dtype
-        self.activation = None  # Will be set in build()
-
-    def build(self, input_shape):
-        super().build(input_shape)
-        if self._activation is not None:
-            self.activation = tf.keras.activations.get(self._activation)
-
-    def call(self, inputs):
-        output = super().call(inputs)
-        if self.output_dtype is not None:
-            output = tf.cast(output, dtype=self.output_dtype)
-        if self.activation is not None:
-            output = self.activation(output)
-        return output
-
-    def get_config(self):
-        config = super().get_config()
-        config.pop("kernel_regularizer", None)
-        config.pop("bias_regularizer", None)
-        config.pop("kernel_constraint", None)
-        config.pop("bias_constraint", None)
-        config.update({
-            'output_dtype': self.output_dtype,
-            'l2_reg':self.l2_reg,
-            'activation': self._activation if isinstance(self._activation, str) else tf.keras.activations.serialize(self._activation)
-        })
-        return config
-
-
-class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
+class ConvTransposeBNDrop(tf.keras.layers.Layer):
     def __init__(
             self,
             filters:int,
             kernel_size: int=4,
             strides: int = 2,
+            tridimensional_mode : bool=False,
             dropout_rate:float = 0,
             batch_norm : bool = False,
             layer_norm: bool = False,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
-            name: str="ResConv2DTransposeBNDrop",
+            name: str="ConvTransposeBNDrop",
             **kwargs
     ):
         super().__init__(name=name, **kwargs)
@@ -559,7 +536,8 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
-        self.conv = tf.keras.layers.Conv2DTranspose(
+        op = tf.keras.layers.Conv3DTranspose if len(input_shape)==5 else tf.keras.layers.Conv2DTranspose
+        self.conv = op(
             filters=self.filters,
             kernel_size=self.kernel_size,
             strides=self.strides,
@@ -592,59 +570,26 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
         return self.activation_layer(x)
 
 
-class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
-    def __init__(self, *args, output_dtype=None, l2_reg:float=0, **kwargs):
-        self._activation = kwargs.pop('activation', None)
-        self.l2_reg = l2_reg
-        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
-        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
-        kernel_constraint = ClipMaxValue()
-        bias_constraint = ClipMaxValue()
-        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
+class UpSamplingWithDtype(tf.keras.layers.Layer):
+    def __init__(self, size, interpolation, output_dtype=None, name=None, **kwargs):
+        super().__init__(name=name, **kwargs)
         self.output_dtype = output_dtype
-        self.activation = None  # Will be set in build()
+        self.size = size
+        self.interpolation = interpolation
 
     def build(self, input_shape):
-        super().build(input_shape)
-        if self._activation is not None:
-            self.activation = tf.keras.activations.get(self._activation)
+        op = tf.keras.layers.UpSampling3D if len(input_shape)==5 else tf.keras.layers.UpSampling2D
+        self.up_op = op(size=self.size, interpolation=self.interpolation, name="up_op")
 
     def call(self, inputs):
-        output = super().call(inputs)
-        if self.output_dtype is not None:
-            output = tf.cast(output, dtype=self.output_dtype)
-        if self.activation is not None:
-            output = self.activation(output)
-        return output
-
-    def get_config(self):
-        config = super().get_config()
-        config.pop("kernel_regularizer", None)
-        config.pop("bias_regularizer", None)
-        config.pop("kernel_constraint", None)
-        config.pop("bias_constraint", None)
-        config.update({
-            'output_dtype': self.output_dtype,
-            'l2_reg':self.l2_reg,
-            'activation': self._activation if isinstance(self._activation, str) else tf.keras.activations.serialize(self._activation)
-        })
-        return config
-
-
-class UpSampling2DWithDtype(tf.keras.layers.UpSampling2D):
-    def __init__(self, *args, output_dtype=None, **kwargs):
-        super(UpSampling2DWithDtype, self).__init__(*args, **kwargs)
-        self.output_dtype = output_dtype
-
-    def call(self, inputs):
-        output = super(UpSampling2DWithDtype, self).call(inputs)
+        output = self.up_op(inputs)
         if self.output_dtype is not None:
             output = tf.cast(output, dtype=self.output_dtype)
         return output
 
     def get_config(self):
-        config = super(UpSampling2DWithDtype, self).get_config()
-        config.update({'output_dtype': self.output_dtype})
+        config = super().get_config().copy()
+        config.update({'output_dtype': self.output_dtype, 'size':self.size, 'interpolation':self.interpolation})
         return config
 
 
@@ -837,6 +782,7 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
         self.l2_reg=l2_reg
         assert len(frame_prev_idx) == len(frame_next_idx)
         self.embedding=None
+        self.tridim_mode=False
         super().__init__(name=name, **kwargs)
 
     def get_config(self):
@@ -845,6 +791,11 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        self.tridim_mode = len(input_shape) == 5
         self.embedding = tf.keras.layers.Embedding(
             input_dim=self.input_dim,
             output_dim=self.output_dim,
@@ -854,12 +805,15 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
         )
         super().build(input_shape)
 
-    def call(self, frame_index): # (B, 1, 1, FW)
+    def call(self, frame_index): # (B, 1, 1, FW) or (B, 1, 1, 1, FW)
         offset = tf.cast(self.offset, tf.int32)
         frame_distance = tf.cast( tf.gather(frame_index[:, 0, 0], self.frame_next_idx, axis=-1) - tf.gather(frame_index[:, 0, 0], self.frame_prev_idx, axis=-1), tf.int32 ) + offset # (B, N)
         frame_distance_emb = self.embedding(frame_distance) # (B, N, C)
         frame_distance_emb = tf.transpose(frame_distance_emb, perm=[1, 0, 2]) # (N, B, C)
-        frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim]) # ( N x B, 1, 1, C )
+        if self.tridim_mode:
+            frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, 1, self.output_dim]) # ( N x B, 1, 1, 1, C )
+        else:
+            frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim])
         return frame_distance_emb
 
 

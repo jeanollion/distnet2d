@@ -4,16 +4,16 @@ from collections import defaultdict
 import tensorflow as tf
 from .temporal_pyramid import TemporalPyramid, TemporalFeatureReconstructor, TemporalFeaturePairReconstructor
 from .window_spatial_attention import WindowSpatialAttention
-from .architectures import ArchBase, Blend, TemPy
-from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, \
-    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, \
-    HideVariableWrapper, FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
+from .architectures import ArchBase, Blend, TemPy, spatial_contraction_product
+from .layers import ker_size_to_string, Combine, ResConv, ConvBNDrop, ConvTransposeBNDrop, \
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch, InferenceAwareSelector, StopGradient, Stack, \
+    HideVariableWrapper, FrameDistanceEmbedding, \
     HybridThresholdL2Regularizer, ResidualGradientLimiter, LogGradientMagnitude, \
-    ConcatenateWithDtype, ClipMaxValue
+    ConcatenateWithDtype, ClipMaxValue, UpSamplingWithDtype
 from dataset_iterator.keras_layers import InferenceLayer
 import numpy as np
 
-from .spatial_attention import SpatialAttention2D
+from .spatial_attention import SpatialAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives, \
     FocalCrossEntropy
@@ -438,23 +438,26 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             kwargs["link_multiplicity_loss_weight"] = 0
 
         #print(f"edm activation: {'tanh' if arch.scale_edm else 'linear'} l2_reg: {arch.l2_reg} l2_reg_emb: {arch.position_encoding_l2_reg}")
-        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in arch.encoder_settings])
-        total_contraction = ensure_multiplicity(2, total_contraction)
+        n_spa_dims = 2 if not arch.tridimensional_mode else 3
+        total_contraction = spatial_contraction_product([spatial_contraction_product([params.get("downscale", 1) for params in param_list]) for param_list in arch.encoder_settings])
+        total_contraction = ensure_multiplicity(n_spa_dims, total_contraction)
         assert len(arch.encoder_settings) == len(arch.decoder_settings), "decoder should have same length as encoder"
         if spatial_dimensions is None:
-            spatial_dimensions = [None, None]
+            spatial_dimensions = [None]*n_spa_dims
         else:
             spatial_dimensions = list(spatial_dimensions)
-            assert len(spatial_dimensions) == 2, "2D input required"
+            assert len(spatial_dimensions) == n_spa_dims, f"{n_spa_dims}D input required"
             for ax, (s, c) in enumerate(zip(spatial_dimensions, total_contraction)):
                 if s is not None and s>0:
                     assert s%c==0, f"Error: axis={ax} size={s} not divisible by contraction factor={c}"
         if arch.requires_input_spatial_dim():
             assert spatial_dimensions[0] is not None and spatial_dimensions[0] > 0, "for attention mechanism, spatial dim must be provided"
             assert spatial_dimensions[1] is not None and spatial_dimensions[1] > 0, "for attention mechanism, spatial dim must be provided"
+            if arch.tridimensional_mode:
+                assert spatial_dimensions[2] is not None and spatial_dimensions[2] > 0, "for attention mechanism, spatial dim must be provided"
             print(f"attention positional encoding mode: {arch.attention_positional_encoding}")
         else:
-            spatial_dimensions = [None, None] # no attention : no need to enforce fixed size
+            spatial_dimensions = [None]*n_spa_dims # no attention : no need to enforce fixed size
         if arch.frame_window<=1:
             long_term = False
         n_frames = arch.frame_window * (2 if arch.future_frames else 1) + 1
@@ -619,10 +622,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         if arch.n_inputs == 1:
             inputs = [ tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name="input") ]
             if arch.frame_aware and arch.frame_window > 0:
-                frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name="input2_frameindex")
+                frame_index = tf.keras.layers.Input(shape=[1, 1, 1, n_frames] if arch.tridimensional_mode else [1, 1, n_frames], name="input2_frameindex")
                 inputs.append(frame_index)
             else:
-                frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, n_frames])
+                frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, 1, n_frames] if arch.tridimensional_mode else [1, 1, 1, n_frames])
             input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=True,  name="MergeInputs")(inputs[0]) if arch.frame_window > 0 else inputs[0]
         else:
             if arch.frame_window > 0:
@@ -630,10 +633,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 input_stacked = Stack(axis = -2, name="InputStack")(inputs)
                 input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=False, name="MergeInputs")(input_stacked)
                 if arch.frame_aware:
-                    frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name=f"input{arch.n_inputs}_frameindex")
+                    frame_index = tf.keras.layers.Input(shape=[1, 1, 1, n_frames] if arch.tridimensional_mode else [1, 1, n_frames], name=f"input{arch.n_inputs}_frameindex")
                     inputs.append(frame_index)
                 else:
-                    frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, n_frames])
+                    frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, 1, n_frames] if arch.tridimensional_mode else [1, 1, 1, n_frames])
             else:
                 inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(arch.n_inputs)]
                 input_merged = tf.keras.layers.Concatenate(axis=-1, name="MergeInputs")(inputs)
@@ -691,7 +694,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             feature_pairs_batch = pair_combine_op([long_term_feature_prev, long_term_feature_next])
             frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next, l2_reg=arch.position_encoding_l2_reg)(frame_index)
             if arch.attention > 0:
-                attention_op = SpatialAttention2D(num_heads=arch.attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention") #frame_distance_embedding=arch.frame_aware
+                attention_op = SpatialAttention(num_heads=arch.attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention") #frame_distance_embedding=arch.frame_aware
                 pair_attention_skip_op = Combine(filters=feature_filters, kernel_size=arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairAttSkip")
                 attention_result = attention_op([long_term_feature_prev + frame_dist_emb, long_term_feature_next + frame_dist_emb,  feature_pairs_batch]) #if arch.frame_aware else attention_op( [long_term_feature_prev, long_term_feature_next, feature_pairs_batch])
                 feature_pairs_batch = pair_attention_skip_op([feature_pairs_batch, attention_result])
@@ -719,8 +722,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 for op in feature_blending_convs:
                     combined_features = op(combined_features)
 
-                blended_features_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, l2_reg=arch.l2_reg, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
-                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters, l2_reg=arch.l2_reg,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
+                blended_features_batch = NConvToBatch(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, l2_reg=arch.l2_reg, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
+                blended_feature_pairs_batch = NConvToBatch(compensate_gradient=True, n_conv=n_frame_pairs, inference_idx=inference_pair_idx, filters=feature_filters, l2_reg=arch.l2_reg, name=f"TrackingFeatures")(combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
             else:
                 blended_features_batch = combined_features
 
@@ -774,7 +777,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if arch.requires_input_spatial_dim() else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=arch.category_number, **kwargs)
 
 
-def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, activation:str="relu", last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, task_with_skip_prop:float=1.):
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, activation:str="relu", last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, task_with_skip_prop:float=1., tridimensional_mode:bool=False):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
@@ -783,7 +786,8 @@ def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l
     if maxpool:
         down_sequence = []
     if maxpool or maxpool_and_stride:
-        down_sequence = down_sequence+[tf.keras.layers.MaxPool2D(pool_size=total_contraction, name=f"{name}_Maxpool{total_contraction}x{total_contraction}")]
+        mp_op = tf.keras.layers.MaxPool3D if tridimensional_mode else tf.keras.layers.MaxPool2D
+        down_sequence = down_sequence+[mp_op(pool_size=total_contraction, name=f"{name}_Contraction")]
         down_concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}_DownConcat")
     def op(input):
         x = input
@@ -858,16 +862,13 @@ def decoder_op(
             op_name = op_name.lower().replace("_", "")
             if op_name == "res1d" or op_name=="resconv1d":
                 raise NotImplementedError("ResConv1D are not implemented")
-            elif op_name == "res2d" or op_name=="resconv2d":
+            elif op_name == "res" or op_name=="resconv":
                 if filters_out == filters or i < n_ops - 1:
-                    return ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_ops-1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}")
+                    return ResConv(kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}")
                 else:
-                    return Conv2DBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix)
+                    return ConvBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix)
             else:
-                if batch_norm[i] or layer_norm[i] or dropout_rate>0:
-                    return Conv2DBNDrop(filters=filters_out if i==n_ops-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_ops-1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix)
-                else:
-                    return Conv2DWithDtype(filters=filters_out if i==n_ops-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_ops-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_ops - 1 or output_name is None else output_name + suffix)
+                return ConvBNDrop(filters=filters_out if i == n_ops - 1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix)
         convs = lambda suffix : [create_op(suffix, i) for i in range(n_ops)]
         wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
 
@@ -900,7 +901,6 @@ def upsampling_op(
             batch_norm:bool = False,
             layer_norm:bool = False,
             dropout_rate:float = 0,
-            use_bias:bool = True,
             l2_reg:float = 0,
             output_dtype=None,
             name: str= None,
@@ -909,18 +909,13 @@ def upsampling_op(
         if kernel_size<size_factor:
             kernel_size = size_factor
         if mode=="tconv":
-            if batch_norm or layer_norm or dropout_rate>0:
-                upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, layer_norm=layer_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
-            else:
-                upsample = Conv2DTransposeWithDtype(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, l2_reg = l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
+            upsample = ConvTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, layer_norm=layer_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
-            upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{parent_name}_Upsample{size_factor}x{size_factor}_{interpolation}" if parent_name is not None else name)
-            if batch_norm or layer_norm:
-                conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, layer_norm=layer_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation )
-            else:
-                conv = Conv2DWithDtype(filters=filters, kernel_size=kernel_size, strides=1, padding='same', output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, use_bias=use_bias, activation=activation, l2_reg=l2_reg )
+            upsample = UpSamplingWithDtype(size=size_factor, interpolation=interpolation, name = f"{parent_name}_Upsample{size_factor}x{size_factor}_{interpolation}" if parent_name is not None else name)
+            conv = ConvBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, layer_norm=layer_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation)
+
         def op(input):
             x = upsample(input)
             if conv is not None:
@@ -941,7 +936,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
     if ignore_stride:
         param_list = [params.copy() for params in param_list]
         for params in param_list:
-            total_contraction *= params.get("downscale", 1)
+            total_contraction = spatial_contraction_product(total_contraction, params.get("downscale", 1))
             params["downscale"] = 1
     # split into sequence with no stride (for residual) and the rest of the sequence
     i = 0
@@ -977,7 +972,7 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                     last_input_filters=residual_filters # input of downscaler is the residual
                 filters -= last_input_filters
             down = [parse_params(**params, filters=filters, attention_positional_encoding=attention_positional_encoding, name=f"{name}_DownOp")] if filters > 0 else []
-            total_contraction *= param_list[i].get("downscale", 1)
+            total_contraction = spatial_contraction_product(total_contraction, param_list[i].get("downscale", 1))
         else:
             raise ValueError("Only one downscale operation allowed")
     else:
@@ -985,25 +980,18 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="2D", attention_filters:int=None, dropout_rate:float=0, batch_norm:bool=False, layer_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, num_attention_heads:int=1, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="1D", attention_filters:int=None, dropout_rate:float=0, batch_norm:bool=False, layer_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, num_attention_heads:int=1, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
         raise NotImplementedError("ResConv1D is not implemented")
-    elif op =="res2d" or op == "resconv2d":
-        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
+    elif op =="res" or op == "resconv":
+        return ResConv(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
-        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, attention_filters=attention_filters, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
+        self_attention_op = SpatialAttention(num_heads=num_attention_heads, attention_filters=attention_filters, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
         self_attention_skip_op = Combine(filters=filters, l2_reg=l2_reg, name=f"{name}_SelfAttentionSkip")
         def op(x):
             sa = self_attention_op([x, x])
             return self_attention_skip_op([x, sa])
         return op
-    if batch_norm or layer_norm or dropout_rate>0:
-        return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
-    else:
-        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=l2_reg * 10, elementwise_strength=l2_reg) if l2_reg > 0 else None
-        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=l2_reg) if l2_reg > 0 else None
-        kernel_constraint = ClipMaxValue()
-        bias_constraint = ClipMaxValue()
-        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
+    return ConvBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")

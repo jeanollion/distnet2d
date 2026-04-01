@@ -3,8 +3,8 @@ from math import ceil
 import tensorflow as tf
 import numpy as np
 
-class SpatialAttention2D(tf.keras.layers.Layer):
-    def __init__(self, num_heads:int=1, positional_encoding:str= "2d", attention_filters:int=0, frame_distance_embedding:bool=False, return_attention:bool=False, dropout:float=0.1, l2_reg:float=0., name="Attention"):
+class SpatialAttention(tf.keras.layers.Layer):
+    def __init__(self, num_heads:int=1, positional_encoding:str= "1d", attention_filters:int=0, frame_distance_embedding:bool=False, return_attention:bool=False, dropout:float=0.1, l2_reg:float=0., name="Attention"):
         '''
             filters : number of output channels
             if positional_encoding: filters must correspond to input channel number
@@ -40,7 +40,6 @@ class SpatialAttention2D(tf.keras.layers.Layer):
             pass
         if isinstance(input_shape, tuple):
             input_shape = list(input_shape)
-
         assert len(input_shape_)==len(input_shape) and all(i==j for i,j in zip(input_shape_, input_shape)), f"both tensors must have same input shape: {input_shape_} != {input_shape}"
         self.spatial_dims=input_shape[1:-1]
         self.spatial_dim = np.prod(self.spatial_dims)
@@ -48,12 +47,15 @@ class SpatialAttention2D(tf.keras.layers.Layer):
         #print(f"attention spatial dims: {self.spatial_dims}")
         if self.attention_filters is None or self.attention_filters<=0:
             self.attention_filters = int(ceil(self.filters / self.num_heads))
-        self.attention_layer=tf.keras.layers.MultiHeadAttention(self.num_heads, key_dim=self.attention_filters, attention_axes=[1, 2], dropout=self.dropout, name="MultiHeadAttention")
+        tridim_mode = len(self.spatial_dims) == 3
+        self.attention_layer=tf.keras.layers.MultiHeadAttention(self.num_heads, key_dim=self.attention_filters, attention_axes=[1, 2] if not tridim_mode else [1, 2, 3], dropout=self.dropout, name="MultiHeadAttention")
         #self.attention_layer._build_from_signature(query=input_shape, value=input_shape, key=input_shape)
 
         # positional encoding
         if "sine" in self.positional_encoding:
             if "2d" in self.positional_encoding:
+                if tridim_mode:
+                    raise ValueError("Input is 3D and 2D embedding is selected")
                 y_index = tf.range(self.spatial_dims[0], dtype=tf.float32)
                 x_index = tf.range(self.spatial_dims[1], dtype=tf.float32)
                 filter_index = tf.range(0, input_shape[-1], 4, dtype=tf.float32)
@@ -72,6 +74,8 @@ class SpatialAttention2D(tf.keras.layers.Layer):
                 self.pos_enc = tf.reshape(pe, (self.spatial_dims[0], self.spatial_dims[1], -1))[..., :input_shape[-1]]
 
             elif False and "2d" in self.positional_encoding: # alternative version with sum of x and y components, // TODO : compare to 2D
+                if tridim_mode:
+                    raise ValueError("Input is 3D and 2D embedding is selected")
                 y_index = tf.range(self.spatial_dims[0], dtype=tf.float32)
                 x_index = tf.range(self.spatial_dims[1], dtype=tf.float32)
                 filter_index = tf.range(0, input_shape[-1], 2, dtype=tf.float32)
@@ -109,6 +113,8 @@ class SpatialAttention2D(tf.keras.layers.Layer):
         elif "rotary" in self.positional_encoding or "rope" in self.positional_encoding:
             assert input_shape[-1] % 2 == 0, "Attention filters must be divisible by two for RoPE mode"
             if "2d" in self.positional_encoding:
+                if tridim_mode:
+                    raise ValueError("Input is 3D and 2D embedding is selected")
                 y_index = tf.range(self.spatial_dims[0], dtype=tf.float32)
                 x_index = tf.range(self.spatial_dims[1], dtype=tf.float32)
                 freq_index = tf.range(0, input_shape[-1], 4, dtype=tf.float32)
@@ -148,6 +154,8 @@ class SpatialAttention2D(tf.keras.layers.Layer):
 
         elif self.positional_encoding is not None: # embedding
             if "2d" in self.positional_encoding:
+                if tridim_mode:
+                    raise ValueError("Input is 3D and 2D embedding is selected")
                 self.pos_embedding_y = tf.keras.layers.Embedding(self.spatial_dims[0], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncY")
                 self.pos_embedding_x = tf.keras.layers.Embedding(self.spatial_dims[1], input_shape[-1], embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg) if self.l2_reg>0 else None, name="PosEncX")
             else:
@@ -181,8 +189,8 @@ class SpatialAttention2D(tf.keras.layers.Layer):
                 y_index = tf.range(self.spatial_dims[0], dtype=tf.int32)
                 pos_emb_y = self.pos_embedding_y(y_index) # (y, self.filters)
                 pos_emb_y = tf.reshape(pos_emb_y, (self.spatial_dims[0], 1, self.filters)) #(y, 1, self.filters)
-                x_index = tf.range(self.spatial_dims[1], dtype=tf.int32)
-                pos_emb_x = self.pos_embedding_x(x_index) # (x, self.filters)
+                spa_index = tf.range(self.spatial_dims[1], dtype=tf.int32)
+                pos_emb_x = self.pos_embedding_x(spa_index) # (x, self.filters)
                 pos_emb_x = tf.reshape(pos_emb_x, (1, self.spatial_dims[1], self.filters)) #(1, x, self.filters)
                 pos_emb = pos_emb_x + pos_emb_y # broadcast to (y, x, self.filters)
                 #pos_emb_y = tf.transpose(pos_emb_y, [2, 0, 1]) #(self.filters, y, 1)
@@ -192,8 +200,8 @@ class SpatialAttention2D(tf.keras.layers.Layer):
                 query = query + pos_emb # broadcast
                 key = key + pos_emb # broadcast
             else:
-                x_index = tf.range(self.spatial_dim, dtype=tf.int32)
-                pos_emb = self.pos_embedding(x_index) # (spa_dim, self.filters)
+                spa_index = tf.range(self.spatial_dim, dtype=tf.int32)
+                pos_emb = self.pos_embedding(spa_index) # (spa_dim, self.filters)
                 pos_emb = tf.reshape(pos_emb, (self.spatial_dims[0], self.spatial_dims[1], self.filters)) #for broadcasting purpose
                 query = query + pos_emb # broadcast
                 key = key + pos_emb # broadcast

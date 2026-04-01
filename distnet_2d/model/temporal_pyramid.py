@@ -25,8 +25,8 @@ class TemporalPyramid(Layer):
                   and outputs upsampled item (optional, for testing)
         verbose: If True, print index information during build
 
-    Input shape: (T, B, Y, X, C)
-    Output shape: (T, B, Y, X, C)
+    Input shape: (T, B, Y, X, C) or (T, B, Z, Y, X, C)
+    Output shape: (T, B, Y, X, C) or (T, B, Z, Y, X, C)
     """
 
     def __init__(self, window_spatial_attention_kwargs, layer_normalization=True, filter_increase_factor:float=1, filter_increase_mode_log:bool=False, l2_reg:float=0, temporal_encoding_l2_reg:float=1e-5, verbose=False, **kwargs):
@@ -39,6 +39,7 @@ class TemporalPyramid(Layer):
         self.verbose = verbose
         self.l2_reg=l2_reg
         self.temporal_encoding_l2_reg=temporal_encoding_l2_reg
+        self.tridim_mode = False
 
     def _precompute_indices(self):
         """Pre-compute all indices for downsampling at each level using stride-based formula."""
@@ -87,11 +88,16 @@ class TemporalPyramid(Layer):
                 tensor_shape = input_shape
             self.frame_aware = False
         #print(f"frame aware: {self.frame_aware}")
+        self.tridim_mode = len(tensor_shape) == 6 # T, B, Z, Y, X, C
         self.T = tensor_shape[0]
         assert self.T % 2 == 1, "T must be odd (T = 2W + 1)"
         self.W = (self.T - 1) // 2
         self.C = tensor_shape[-1]
-        Y, X = tensor_shape[2:4]
+        if self.tridim_mode:
+            Z, Y, X = tensor_shape[2:-1]
+        else:
+            Y, X = tensor_shape[2:-1]
+            Z = 1
         # Pre-compute all indices for each level
         self._precompute_indices()
         self.temp_emb = []
@@ -99,11 +105,12 @@ class TemporalPyramid(Layer):
         self.down_op = []
         for i in range(len(self.down_indices)):
             input_filters = self._compute_filters(i, self.C)
+            i_s = [Z, Y, X, input_filters] if self.tridim_mode else [Y, X, input_filters]
             output_filters = self._compute_filters(i+1, self.C)
             #print(f"level: {i} filters: {input_filters} -> {output_filters}")
             att_layer = WindowSpatialAttention(**self.window_spatial_attention_kwargs, dtype=self.dtype_policy, name=f"down_att{i}")
             conv_layer = Combine(filters=output_filters, dtype=self.dtype_policy, l2_reg=self.l2_reg, name=f"down_comb{i}")
-            input_layers = [tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype), tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype), tf.keras.layers.Input([Y, X, input_filters], dtype=self.compute_dtype)]
+            input_layers = [tf.keras.layers.Input(i_s, dtype=self.compute_dtype), tf.keras.layers.Input(i_s, dtype=self.compute_dtype), tf.keras.layers.Input(i_s, dtype=self.compute_dtype)]
             q = tf.keras.layers.Concatenate(axis=0, name=f"concat_q{i}", dtype=self.compute_dtype)( [input_layers[1], input_layers[0], input_layers[1], input_layers[2]] )
             kv = tf.keras.layers.Concatenate(axis=0, name=f"concat_kv{i}", dtype=self.compute_dtype)( [input_layers[0], input_layers[1], input_layers[2], input_layers[1]] )
             att = att_layer([q, kv])
@@ -122,23 +129,28 @@ class TemporalPyramid(Layer):
                 inputs = inputs[0]
             frame_index = tf.expand_dims(tf.range(self.T) - tf.cast(self.W, tf.int32), 0)  # relative to center frame
         input_shape = tf.shape(inputs)
-        _, B, Y, X, _ = tf.unstack(input_shape)
+        if self.tridim_mode:
+            _, B, Z, Y, X, _ = tf.unstack(input_shape)
+        else:
+            _, B, Y, X, _ = tf.unstack(input_shape)
 
         current_frame_index = frame_index # B, T if frame_aware, else 1, T
         down_layers = [inputs]
         for level in range(self.num_levels):
             current = down_layers[-1]
             indices = self.down_indices[level]
-            T, _, _, _, C = tf.unstack(tf.shape(current))
+            current_shape = tf.shape(current)
+            T = current_shape[0]
+            C = current_shape[-1]
 
             # temporal embedding
             if self.frame_aware:
                 t_emb = self.temp_emb[level](current_frame_index, training=training)  # B, T, C
                 t_emb = tf.transpose(t_emb, [1, 0, 2])  # T, B, C
-                t_emb = tf.reshape(t_emb, [T, B, 1, 1, C])
+                t_emb = tf.reshape(t_emb, [T, B, 1, 1, 1, C] if self.tridim_mode else [T, B, 1, 1, C])
             else:
                 t_emb = self.temp_emb[level](current_frame_index, training=training)  # 1, T, C
-                t_emb = tf.reshape(t_emb, [T, 1, 1, 1, C])
+                t_emb = tf.reshape(t_emb, [T, 1, 1, 1, 1, C] if self.tridim_mode else [T, 1, 1, 1, C])
 
             current = current + t_emb
             if self.layer_normalization:
@@ -151,14 +163,16 @@ class TemporalPyramid(Layer):
 
             # Transpose + reshape for batch processing
             next_size = len(indices['center'])
-            prev_neighbors = tf.reshape(prev_neighbors, [next_size * B, Y, X, C])
-            centers = tf.reshape(centers, [next_size * B, Y, X, C])
-            next_neighbors = tf.reshape(next_neighbors, [next_size * B, Y, X, C])
+            next_shape = [next_size * B, Z, Y, X, C] if self.tridim_mode else [next_size * B, Y, X, C]
+            prev_neighbors = tf.reshape(prev_neighbors, next_shape)
+            centers = tf.reshape(centers, next_shape)
+            next_neighbors = tf.reshape(next_neighbors, next_shape)
 
             # Apply downsampling
             downsampled = self.down_op[level]([prev_neighbors, centers, next_neighbors], training=training)
             if next_size > 1: # Reshape back
-                downsampled = tf.reshape(downsampled, [next_size, B, Y, X, tf.shape(downsampled)[-1]])
+                downsampled_shape = [next_size, B, Z, Y, X, tf.shape(downsampled)[-1]] if self.tridim_mode else [next_size, B, Y, X, tf.shape(downsampled)[-1]]
+                downsampled = tf.reshape(downsampled, downsampled_shape)
             down_layers.append(downsampled)
             # update frame index for temporal encoding
             current_frame_index = tf.gather(current_frame_index, indices['center'], axis=1) # update frame index
@@ -193,6 +207,7 @@ class TemporalPyramid(Layer):
         })
         return config
 
+
 # reconstruct features through independent convolutions that inputs both features, global context and level 1 features from pyramid
 class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, output_filters, inference_idx:list, compensate_gradient:bool=False, stack:bool=False, l2_reg:float=0, **kwargs):
@@ -210,12 +225,17 @@ class TemporalFeatureReconstructor(InferenceLayer, tf.keras.layers.Layer):
         return config
 
     def build(self, input_shape):
-        features_level0, global_features = input_shape
-        self.T = features_level0[0]
+        features_level0_shape, global_features_shape = input_shape
+        try:
+            global_features_shape = global_features_shape.as_list()
+        except:
+            pass
+        self.T = features_level0_shape[0]
 
         # Create T independent 1x1 convolutions
+        conv_op = tf.keras.layers.Conv3D if len(global_features_shape) == 5 else tf.keras.layers.Conv2D
         for i in range(self.T):
-            conv = tf.keras.layers.Conv2D(
+            conv = conv_op(
                 filters=self.output_filters,
                 kernel_size=1,
                 use_bias=True,
@@ -274,12 +294,17 @@ class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
         return config
 
     def build(self, input_shape):
-        features_level0, features_level1, global_features = input_shape
-        self.T = features_level0[0]
+        features_level0_shape, features_level1_shape, global_features_shape = input_shape
+        try:
+            global_features_shape = global_features_shape.as_list()
+        except:
+            pass
+        self.T = features_level0_shape[0]
         n_conv = len(self.prev_idx)
         # Create T independent 1x1 convolutions
+        conv_op = tf.keras.layers.Conv3D if len(global_features_shape) == 5 else tf.keras.layers.Conv2D
         for i in range(n_conv):
-            conv = tf.keras.layers.Conv2D(
+            conv = conv_op(
                 filters=self.output_filters,
                 kernel_size=1,
                 use_bias=True,
