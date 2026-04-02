@@ -1,12 +1,25 @@
 import numpy as np
 
 def compute_edm(centers, output):
-    Y, X = output.shape
+    """Compute euclidean distance map to nearest center.
+    Works for 2D (Y, X) and 3D (Z, Y, X) output shapes.
+
+    Args:
+        centers: list of center coordinates, each with len matching output.ndim
+        output: array to write into, shape (Y, X) or (Z, Y, X)
+    """
+    ndim = output.ndim
     centers = np.asarray(centers, output.dtype)
-    y_indices = np.arange(Y)[:, np.newaxis, np.newaxis]  # (Y, 1, 1)
-    x_indices = np.arange(X)[np.newaxis, :, np.newaxis]  # (1, X, 1)
-    dy = y_indices - centers[:, 0]  # (Y, 1, num_centers)
-    dx = x_indices - centers[:, 1]  # (1, X, num_centers)
-    squared_distances = dy**2 + dx**2  # (Y, X, num_centers)
-    min_squared_distances = np.min(squared_distances, axis=2)  # (Y, X)
-    np.sqrt(min_squared_distances, out = output)
+    # Build index grids: each has shape that broadcasts with (spatial..., num_centers)
+    indices = []
+    for dim in range(ndim):
+        shape = [1] * (ndim + 1)  # +1 for centers axis
+        shape[dim] = output.shape[dim]
+        indices.append(np.arange(output.shape[dim], dtype=output.dtype).reshape(shape))
+    # centers shape: (num_centers, ndim) -> broadcast dim at end
+    squared_distances = sum(
+        (idx - centers[:, dim]) ** 2
+        for dim, idx in enumerate(indices)
+    )
+    min_squared_distances = np.min(squared_distances, axis=-1)
+    np.sqrt(min_squared_distances, out=output)

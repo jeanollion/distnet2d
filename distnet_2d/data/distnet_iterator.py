@@ -23,7 +23,7 @@ CENTER_DISTANCE_MODE = ["GEODESIC", "EUCLIDEAN"]
 CHANNEL_KEYWORDS = ['/raw', '/regionLabels']
 ARRAY_KEYWORDS = ['/linksPrev', '/category']
 
-class DyDxIterator(TrackingIterator):
+class DistnetIterator(TrackingIterator):
     def __init__(self,
                  dataset,
                  extract_tile_function,  # = extract_tile_random_zoom_function(tile_shape=(128, 128), n_tiles=8, zoom_range=[0.6, 1.6], aspect_ratio_range=[0.75, 1.5], random_channel_jitter_shape=[50, 50] ),
@@ -51,6 +51,8 @@ class DyDxIterator(TrackingIterator):
                  long_term: bool = True,
                  return_next_displacement:bool = True,
                  frame_aware:bool=False,  # return actual frame (relative to central frame)
+                 tridimensional_mode:bool=False,
+                 z_radius:float=1., # to take into account anisotropy: z radius considering that x=y=1
                  **kwargs):
         assert len(channel_keywords)>=2, 'keyword should contain at least 2 elements in this order: grayscale input images, object labels, [other grayscale input images]'
         if frame_window == 0:
@@ -107,6 +109,8 @@ class DyDxIterator(TrackingIterator):
                     image_data_generators.append(image_data_generators[1])
         else:
             self.label_input_channels = []
+        self.tridimensional_mode = tridimensional_mode
+        self.z_radius = z_radius
         super().__init__(dataset=dataset,
                          channel_keywords=channel_keywords,
                          array_keywords = array_keywords,
@@ -210,7 +214,8 @@ class DyDxIterator(TrackingIterator):
                 batch_by_channel[c] = batch_by_channel[c].astype('float16')
         if self.return_image_index: # reshape to match image shape
             n_chan = self.frame_window * (2 if self.channels_next[1] else 1) + 1
-            batch_by_channel["image_idx"] = np.reshape(batch_by_channel["image_idx"], (-1, 1, 1, n_chan))
+            spatial_axis = (1, 1, 1) if self.tridimensional_mode else (1, 1)
+            batch_by_channel["image_idx"] = np.reshape(batch_by_channel["image_idx"], (-1,) + spatial_axis + (n_chan,))
         return batch_by_channel, aug_param_array, ref_channel
 
     @staticmethod
@@ -304,14 +309,16 @@ class DyDxIterator(TrackingIterator):
         edm = np.zeros(shape=labelIms.shape, dtype=np.float32) if self.segmentation or ("edm" in self.center_mode and self.input_label_center_idx < 0) else None
         if edm is not None:
             for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
-                edm[b,...,c] = edt_smooth(labelIms[b,...,c], object_slices[(b, c)])
-                #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False)
+                edm[b,...,c] = edt_smooth(labelIms[b,...,c], object_slices[(b, c)], z_radius=self.z_radius) # TODO: in 3D: check speed
+                #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False, anisotropy=(z_radius, 1.0, 1.0) if z_radius is not None and z_radius != 1.0 else None)
         n_motion = 2 * frame_window if return_next else frame_window
         if long_term:
             n_motion = n_motion + (2 * ( frame_window - 1 ) if return_next else frame_window -1)
+        dzIm = np.zeros(labelIms.shape[:-1] + (n_motion,), dtype=self.dtype) if self.tracking and self.tridimensional_mode else None
         dyIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype) if self.tracking else None
         dxIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype) if self.tracking else None
         if ndisp:
+            dzImNext = np.zeros(labelIms.shape[:-1] + (n_motion,), dtype=self.dtype) if self.tridimensional_mode else None
             dyImNext = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
             dxImNext = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
             if self.return_link_multiplicity:
@@ -319,13 +326,17 @@ class DyDxIterator(TrackingIterator):
         centerIm = np.zeros(labelIms.shape, dtype=self.dtype) if self.return_center else None
         categoryIm = np.zeros(labelIms.shape, dtype=self.dtype) if self.category_array_idx>=0 else None
         cat_array = batch_by_channel['arrays'][self.category_array_idx] if self.category_array_idx>=0 else None
-        if cat_array is not None and len(cat_array.shape) == 4:
-            cat_array = cat_array[:, :, 0]
+        if cat_array is not None:
+            if self.tridimensional_mode and len(cat_array.shape) == 5:
+                cat_array = cat_array[:, :, :, 0]
+            elif not self.tridimensional_mode and len(cat_array.shape) == 4:
+                cat_array = cat_array[:, :, 0]
         if self.return_label_rank:
             rankIm = np.zeros(labelIms.shape, dtype=np.int32)
             prevLabelArr = np.zeros(labelIms.shape[:1]+(n_motion, self.n_label_max), dtype=np.int32) if self.tracking else None
             nextLabelArr = np.zeros(labelIms.shape[:1] + (n_motion, self.n_label_max), dtype=np.int32) if self.tracking else None
-            centerArr = np.zeros(labelIms.shape[:1]+labelIms.shape[-1:]+(self.n_label_max,2), dtype=np.float32) # B, C, N, 2
+            n_spatial = 3 if self.tridimensional_mode else 2
+            centerArr = np.zeros(labelIms.shape[:1]+labelIms.shape[-1:]+(self.n_label_max, n_spatial), dtype=np.float32) # B, C, N, ndim
             centerArr.fill(np.nan)
         if self.return_link_multiplicity:
             linkMultiplicityIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
@@ -349,47 +360,52 @@ class DyDxIterator(TrackingIterator):
                     sel = [c, c+1]
                     l_c = [labels_and_centers[(i,s)] for s in sel]
                     o_s = [object_slices[(i, s)] for s in sel]
-                    _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dyIm[i,...,c] if self.tracking else None, dxIm[i,...,c] if self.tracking else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,...,frame_window] if self.return_center and sel[1] == frame_window else None, cdmImPrev=centerIm[i,...,c] if self.return_center else None, edmIm = edm[i,...,frame_window] if self.scale_edm else None, edmImPrev = edm[i,...,c] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryImPrev=categoryIm[i,...,c] if self.category_array_idx>=0 else None, categoryArrayPrev=cat_array[bidx, :, c] if self.category_array_idx>=0 else None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,...,frame_window] if self.return_label_rank and sel[1] == frame_window else None, rankImPrev=rankIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and self.tracking and ndisp else None, centerArr=centerArr[i,frame_window] if self.return_label_rank and sel[1] == frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
+                    _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,...,c] if self.tracking else None, dxIm=dxIm[i,...,c] if self.tracking else None, dzImNext=dzImNext[i,...,c] if ndisp and self.tridimensional_mode else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,...,frame_window] if self.return_center and sel[1] == frame_window else None, cdmImPrev=centerIm[i,...,c] if self.return_center else None, edmIm = edm[i,...,frame_window] if self.scale_edm else None, edmImPrev = edm[i,...,c] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryImPrev=categoryIm[i,...,c] if self.category_array_idx>=0 else None, categoryArrayPrev=cat_array[bidx, :, c] if self.category_array_idx>=0 else None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,...,frame_window] if self.return_label_rank and sel[1] == frame_window else None, rankImPrev=rankIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and self.tracking and ndisp else None, centerArr=centerArr[i,frame_window] if self.return_label_rank and sel[1] == frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
                 if return_next:
                     for c in range(frame_window, 2*frame_window):
                         sel = [c, c+1]
                         l_c = [labels_and_centers[(i, s)] for s in sel]
                         o_s = [object_slices[(i, s)] for s in sel]
-                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dyIm[i,...,c] if self.tracking else None, dxIm[i,...,c] if self.tracking else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,..., c + 1] if self.return_center else None, edmIm = edm[i,...,c+1] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,..., c + 1] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, c+1] if self.category_array_idx>=0 else None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,..., c + 1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i, c + 1] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
+                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,...,c] if self.tracking else None, dxIm=dxIm[i,...,c] if self.tracking else None, dzImNext=dzImNext[i,...,c] if ndisp and self.tridimensional_mode else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,..., c + 1] if self.return_center else None, edmIm = edm[i,...,c+1] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,..., c + 1] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, c+1] if self.category_array_idx>=0 else None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,..., c + 1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i, c + 1] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
                 if long_term:
                     off = 2*frame_window if return_next else frame_window
                     for c in range(0, frame_window-1):
                         sel = [c, frame_window]
                         l_c = [labels_and_centers[(i, s)] for s in sel]
                         o_s = [object_slices[(i, s)] for s in sel]
-                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dyIm[i,..., c + off], dxIm[i,..., c + off], dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode)
+                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,..., c + off], dxIm=dxIm[i,..., c + off], dzImNext=dzImNext[i,...,c] if ndisp and self.tridimensional_mode else None, dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
                     if return_next:
                         for c in range(frame_window-1, 2*(frame_window-1)):
                             sel = [frame_window, c+3]
                             l_c = [labels_and_centers[(i, s)] for s in sel]
                             o_s = [object_slices[(i, s)] for s in sel]
-                            _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dyIm[i,..., c + off], dxIm[i,..., c + off], dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode)
+                            _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,..., c + off], dxIm=dxIm[i,..., c + off], dzImNext=dzImNext[i,...,c] if ndisp and self.tridimensional_mode else None, dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
             else:
                 l_c = [labels_and_centers[(i, 0)]]
                 o_s = [object_slices[(i, 0)]]
-                _compute_outputs(l_c, labelIms[i][...,0:1], None, o_s, None, None, cdmIm=centerIm[i,...,0] if self.return_center else None, edmIm = edm[i,...,0] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,0] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 else None, rankIm=rankIm[i,...,0] if self.return_label_rank else None, centerArr=centerArr[i,0] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode)
+                _compute_outputs(l_c, labelIms[i][...,0:1], None, o_s, cdmIm=centerIm[i,...,0] if self.return_center else None, edmIm = edm[i,...,0] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,0] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 else None, rankIm=rankIm[i,...,0] if self.return_label_rank else None, centerArr=centerArr[i,0] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
 
         if edm is not None:
             edm[edm == 0] = -1
         if self.return_edm_derivatives:
             der_y, der_x = np.zeros_like(edm), np.zeros_like(edm)
+            if self.tridimensional_mode:
+                der_z = np.zeros_like(edm)
             c_range = range(edm.shape[-1]) if not self.output_central_only else range(frame_window, frame_window - 1)
             for b, c in itertools.product(range(edm.shape[0]), c_range):
-                derivatives_labelwise(edm[b, ..., c], -1, der_y[b, ..., c], der_x[b, ..., c], labelIms[b, ..., c],  object_slices[(b, c)])
+                derivatives_labelwise(edm[b, ..., c], -1, der_z[b, ..., c] if self.tridimensional_mode else None, der_y[b, ..., c], der_x[b, ..., c], labelIms[b, ..., c],  object_slices[(b, c)])
             if self.output_central_only:
                 der_y = der_y[..., 1:-1]
                 der_x = der_x[..., 1:-1]
+                if self.tridimensional_mode:
+                    der_z = der_z[..., 1:-1]
 
         if self.output_central_only: # select only central frame for edm / center and only displacement / link multiplicity related to central frame
             edm = edm[..., 1:-1] if edm is not None else None
             centerIm = centerIm[..., 1:-1] if self.return_center else None
             dyIm = dyIm[..., :1] if self.tracking else None
             dxIm = dxIm[..., :1] if self.tracking else None
+            dzIm = dzIm[..., :1] if self.tracking and self.tridimensional_mode else None
             if self.return_link_multiplicity:
                 linkMultiplicityIm = linkMultiplicityIm[..., :1]
             if self.category_array_idx>=0:
@@ -397,6 +413,8 @@ class DyDxIterator(TrackingIterator):
             if ndisp:
                 dyImNext = dyImNext[..., 1:]
                 dxImNext = dxImNext[..., 1:]
+                if self.tridimensional_mode:
+                    dzImNext = dzImNext[..., 1:]
                 if self.return_link_multiplicity:
                     linkMultiplicityImNext = linkMultiplicityImNext[..., 1:]
             if self.return_label_rank:
@@ -406,24 +424,38 @@ class DyDxIterator(TrackingIterator):
                 if ndisp:
                     nextLabelArr = nextLabelArr[:, 1:]
         if self.return_edm_derivatives:
-            edm = np.concatenate([edm, der_y, der_x], -1)
+            if self.tridimensional_mode:
+                edm = np.concatenate([edm, der_z, der_y, der_x], -1)
+            else:
+                edm = np.concatenate([edm, der_y, der_x], -1)
         all_channels = []
         if edm is not None:
             all_channels.append(edm)
         if self.return_center:
             all_channels.append(centerIm)
         downscale_factor = 1./self.downscale if self.downscale>1 else 0
-        scale = [1, downscale_factor, downscale_factor, 1]
+        if self.tridimensional_mode:
+            scale = [1, 1, downscale_factor, downscale_factor, 1]  # don't downscale Z
+        else:
+            scale = [1, downscale_factor, downscale_factor, 1]
         if self.downscale>1 and self.tracking:
             dyIm = rescale(dyIm, scale, anti_aliasing= False, order=0)
             dxIm = rescale(dxIm, scale, anti_aliasing= False, order=0)
+            if dzIm is not None:
+                dzIm = rescale(dzIm, scale, anti_aliasing= False, order=0)
             if ndisp:
                 dyImNext = rescale(dyImNext, scale, anti_aliasing= False, order=0)
                 dxImNext = rescale(dxImNext, scale, anti_aliasing= False, order=0)
+                if dzImNext is not None:
+                    dzImNext = rescale(dzImNext, scale, anti_aliasing= False, order=0)
         if ndisp:
             dyIm = np.concatenate([dyIm, dyImNext], -1)
             dxIm = np.concatenate([dxIm, dxImNext], -1)
+            if dzIm is not None:
+                dzIm = np.concatenate([dzIm, dzImNext], -1)
         if self.tracking:
+            if dzIm is not None:
+                all_channels.append(dzIm)
             all_channels.append(dyIm)
             all_channels.append(dxIm)
         if self.return_link_multiplicity:
@@ -462,10 +494,10 @@ class DyDxIterator(TrackingIterator):
                 for b, c in itertools.product(range(labelIms.shape[0]), range(labelIms.shape[-1])):
                     cur_labels = labelIms[b, ..., c].astype(np.int32)
                     object_slices = find_objects(cur_labels)
-                    edm[b, ..., c] = edt_smooth(cur_labels, object_slices)
+                    edm[b, ..., c] = edt_smooth(cur_labels, object_slices, z_radius=self.z_radius)
                     labels_and_centers = _get_labels_and_centers(cur_labels, edm[b, ..., c], "MEDOID")
                     centers[(b, c)] = labels_and_centers.values() # record for output batch
-                    _draw_centers(gdcm[b,...,c], labels_and_centers, cur_labels, object_slices, "GEODESIC")
+                    _draw_centers(gdcm[b,...,c], labels_and_centers, cur_labels, object_slices, "GEODESIC", z_radius=self.z_radius)
                 inputs.append(edm)
                 inputs.append(gdcm)
         return inputs
@@ -483,14 +515,20 @@ class DyDxIterator(TrackingIterator):
 def _get_small_objects_at_edges_to_erase(labelIm, min_size):
     if min_size<=0:
         return dict()
-    y_labels= set(np.unique(labelIm[[-1,0], :].ravel()))
-    x_labels= set(np.unique(labelIm[:, [-1,0]].ravel()))
-    edge_labels = set.union(y_labels, x_labels)
-    if 0 in edge_labels:
-        edge_labels.remove(0)
+    ndim = labelIm.ndim
+    edge_labels = set()
+    # only check Y and X edges (last 2 axes), not Z
+    for axis in range(ndim - 2, ndim):
+        slc_lo = [slice(None)] * ndim
+        slc_hi = [slice(None)] * ndim
+        slc_lo[axis] = 0
+        slc_hi[axis] = -1
+        edge_labels.update(np.unique(labelIm[tuple(slc_lo)].ravel()))
+        edge_labels.update(np.unique(labelIm[tuple(slc_hi)].ravel()))
+    edge_labels.discard(0)
     if len(edge_labels)>0:
         objects = find_objects(labelIm, max_label=max(edge_labels))
-        return {idx+1 : slice for idx, slice in enumerate(objects) if slice is not None and idx+1 in edge_labels and np.sum(labelIm[slice] == idx+1)<=min_size}
+        return {idx+1 : sl for idx, sl in enumerate(objects) if sl is not None and idx+1 in edge_labels and np.sum(labelIm[sl] == idx+1)<=min_size}
     else:
         return dict()
 
@@ -504,7 +542,7 @@ def _get_labels_and_centers(labelIm, edm, center_mode = "GEOMETRICAL", input_cen
     if input_centers is not None: # map input center to labels and get other centers if necessary
         l_c = dict()
         for center in input_centers:
-            l = labelIm[int(round(center[0])), int(round(center[1]))]
+            l = labelIm[tuple(int(round(c)) for c in center)]
             if l>0:
                 l_c[l] = center
         # remove labels with known centers
@@ -525,7 +563,7 @@ def _get_labels_and_centers(labelIm, edm, center_mode = "GEOMETRICAL", input_cen
         assert edm is not None and edm.shape == labelIm.shape
         centers = center_of_mass(edm, labelIm, labels)
     elif center_mode == "SKELETON":
-        edm_lap = der.laplacian_2d(gaussian_filter(edm, sigma=1.5))
+        edm_lap = der.laplacian(gaussian_filter(edm, sigma=1.5))
         skeleton = edm_lap<0.25
         centers = [get_medoid(*np.asarray( (labelIm == l) & skeleton).nonzero()) for l in labels]
     elif center_mode == "MEDOID":
@@ -639,7 +677,7 @@ def _get_link_multiplicity(n_neigh):
     else:
         return 2
 
-def _compute_outputs(labels_map_centers, labelIm, labels_map_prev, object_slices, dyIm, dxIm, dyImNext=None, dxImNext=None, cdmIm=None, cdmImPrev=None, edmIm=None, edmImPrev=None, scale_edm:bool=False, categoryIm=None, categoryArray=None, categoryImPrev=None, categoryArrayPrev=None, linkMultiplicityIm=None, linkMultiplicityImNext=None, rankIm=None, rankImPrev=None, prevLabelArr=None, nextLabelArr=None, centerArr=None, centerArrPrev=None, center_distance_mode:str= "GEODESIC"):
+def _compute_outputs(labels_map_centers, labelIm, labels_map_prev, object_slices, dzIm=None, dyIm=None, dxIm=None, dzImNext=None, dyImNext=None, dxImNext=None, cdmIm=None, cdmImPrev=None, edmIm=None, edmImPrev=None, scale_edm:bool=False, categoryIm=None, categoryArray=None, categoryImPrev=None, categoryArrayPrev=None, linkMultiplicityIm=None, linkMultiplicityImNext=None, rankIm=None, rankImPrev=None, prevLabelArr=None, nextLabelArr=None, centerArr=None, centerArrPrev=None, center_distance_mode:str= "GEODESIC", z_radius:float=None):
     assert (dxImNext is None) == (dyImNext is None)
     curLabelIm = labelIm[...,-1]
     labels_prev = labels_map_centers[0].keys()
@@ -651,10 +689,10 @@ def _compute_outputs(labels_map_centers, labelIm, labels_map_prev, object_slices
         if len(label_prevs)==1:
             label_prev = next(iter(label_prevs))
             center_prev = labels_map_centers[0][label_prev]
-            dy = center[0] - center_prev[0] # axis 0 is y
-            dx = center[1] - center_prev[1] # axis 1 is x
-            dyIm[mask] = dy
-            dxIm[mask] = dx
+            dyIm[mask] = center[-2] - center_prev[-2]
+            dxIm[mask] = center[-1] - center_prev[-1]
+            if dzIm is not None:
+                dzIm[mask] = center[0] - center_prev[0]
             if prevLabelArr is not None:
                 prevLabelArr[rank] = labels_prev_rank[label_prev]+1
         if linkMultiplicityIm is not None:
@@ -677,10 +715,10 @@ def _compute_outputs(labels_map_centers, labelIm, labels_map_prev, object_slices
             if len(label_nexts)==1:
                 label_next = next(iter(label_nexts))
                 center_next = labels_map_centers[-1][label_next]
-                dy = center[0] - center_next[0] # axis 0 is y
-                dx = center[1] - center_next[1] # axis 1 is x
-                dyImNext[mask] = dy
-                dxImNext[mask] = dx
+                dyImNext[mask] = center[-2] - center_next[-2]
+                dxImNext[mask] = center[-1] - center_next[-1]
+                if dzImNext is not None:
+                    dzImNext[mask] = center[0] - center_next[0]
                 if nextLabelArr is not None:
                     nextLabelArr[rank] = labels_next_rank[label_next]+1
             if linkMultiplicityImNext is not None:
@@ -696,22 +734,26 @@ def _compute_outputs(labels_map_centers, labelIm, labels_map_prev, object_slices
                 rankImPrev[mask] = rank + 1
     if cdmIm is not None:
         assert cdmIm.shape == curLabelIm.shape, "invalid shape for center image"
-        _draw_centers(cdmIm, labels_map_centers[-1], curLabelIm, object_slices[-1], center_distance_mode=center_distance_mode)
+        _draw_centers(cdmIm, labels_map_centers[-1], curLabelIm, object_slices[-1], center_distance_mode=center_distance_mode, z_radius=z_radius)
     if cdmImPrev is not None:
         assert cdmImPrev.shape == curLabelIm.shape, "invalid shape for center image prev"
-        _draw_centers(cdmImPrev, labels_map_centers[0], labelIm[...,0], object_slices[0], center_distance_mode=center_distance_mode)
+        _draw_centers(cdmImPrev, labels_map_centers[0], labelIm[...,0], object_slices[0], center_distance_mode=center_distance_mode, z_radius=z_radius)
     if centerArr is not None:
         for rank, (label, center) in enumerate(labels_map_centers[-1].items()):
-            centerArr[rank,0] = center[0]
-            centerArr[rank,1] = center[1]
+            for dim in range(len(center)):
+                centerArr[rank, dim] = center[dim]
     if centerArrPrev is not None:
         for rank, (label, center) in enumerate(labels_map_centers[0].items()):
-            centerArrPrev[rank,0] = center[0]
-            centerArrPrev[rank,1] = center[1]
+            for dim in range(len(center)):
+                centerArrPrev[rank, dim] = center[dim]
 
-def _draw_centers(centerIm, labels_map_centers, labelIm, object_slices, center_distance_mode:str):
+def _center_has_nan(center):
+    return any(isnan(c) for c in center)
+
+def _draw_centers(centerIm, labels_map_centers, labelIm, object_slices, center_distance_mode:str, z_radius:float=None):
     if len(labels_map_centers)==0:
         return
+    ndim = centerIm.ndim
     # geodesic distance to center
     if center_distance_mode == "GEODESIC":
         shape = centerIm.shape
@@ -721,64 +763,87 @@ def _draw_centers(centerIm, labels_map_centers, labelIm, object_slices, center_d
         for (i, sl) in enumerate(object_slices):
             if sl is not None:
                 center = labels_map_centers.get(i+1)
-                if not (isnan(center[0]) or isnan(center[1])):
+                if not _center_has_nan(center):
                     sl = tuple( [slice(max(0, s.start - 2), min(s.stop + 2, ax), s.step) for s, ax in zip(sl, shape)])
                     mask = labelIm_dil[sl] == i + 1
                     m = np.ones_like(mask)
-                    #print(f"label: {i+1} slice: {sl}, center: {center}, sub_m {sub_m.shape}, coord: {(int(round(center[0]))-sl[0].start, int(round(center[1]))-sl[1].start)}", flush=True)
-                    m[int(round(center[0]))-sl[0].start, int(round(center[1]))-sl[1].start] = 0
+                    center_idx = tuple(int(round(center[dim])) - sl[dim].start for dim in range(ndim))
+                    m[center_idx] = 0
                     m = ma.masked_array(m, ~mask)
-                    centerIm[sl][mask] = skfmm.distance(m)[mask]
+                    if ndim == 3:
+                        anisotropy = (z_radius, 1.0, 1.0) if z_radius is not None and z_radius != 1.0 else 1.0
+                    else:
+                        anisotropy = 1.0
+                    centerIm[sl][mask] = skfmm.distance(m, dx=anisotropy)[mask]
     elif center_distance_mode == "EUCLIDEAN": # EDM to centers in the whole image space
         centers = []
         for (i, sl) in enumerate(object_slices):
             if sl is not None:
                 center = labels_map_centers.get(i+1)
-                if not (isnan(center[0]) or isnan(center[1])):
-                    centers.append([center[0], center[1]])
+                if not _center_has_nan(center):
+                    centers.append(list(center))
         compute_edm(centers, centerIm)
     else: # euclidean distance to center inside cells only
-        Y, X = centerIm.shape
-        Y, X = np.meshgrid(np.arange(Y, dtype = np.float32), np.arange(X, dtype = np.float32), indexing = 'ij')
-        for i, (label, center) in enumerate(labels_map_centers.items()): # in case center prediction is a classification
-            if isnan(center[0]) or isnan(center[1]):
+        grids = np.meshgrid(*[np.arange(s, dtype=np.float32) for s in centerIm.shape], indexing='ij')
+        for i, (label, center) in enumerate(labels_map_centers.items()):
+            if _center_has_nan(center):
                 pass
             else:
-                # distance to center
                 mask = labelIm==label
                 if mask.sum()>0:
-                    d = np.sqrt(np.square(Y-center[0])+np.square(X-center[1]))
-                    centerIm[mask] = d[mask]
+                    d2 = sum(np.square(g - c) for g, c in zip(grids, center))
+                    if ndim == 3 and z_radius is not None and z_radius != 1.0:
+                        # scale Z contribution by z_radius
+                        d2 = d2 - np.square(grids[0] - center[0]) + np.square((grids[0] - center[0]) * z_radius)
+                    centerIm[mask] = np.sqrt(d2)[mask]
 
 
-def edt_smooth(labelIm, object_slices):
+def edt_smooth(labelIm, object_slices, z_radius=None):
     shape = labelIm.shape
-    upsampled = np.kron(labelIm, np.ones((2, 2))) # upsample by factor 2
-    w=np.ones(shape=(3, 3), dtype=np.int8)
+    ndim = labelIm.ndim
+    upsample_kernel = tuple([2] * ndim)
+    upsampled = np.kron(labelIm, np.ones(upsample_kernel))
+    w = np.ones(shape=tuple([3] * ndim), dtype=np.int8)
+    threshold = w.size // 2
     for (i, sl) in enumerate(object_slices):
         if sl is not None:
             sl = tuple([slice(max(s.start*2 - 1, 0), min(s.stop*2 + 1, ax*2), s.step) for s, ax in zip(sl, shape)])
             sub_labelIm = upsampled[sl]
             mask = sub_labelIm == i + 1
-            new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > 4 # smooth borders
-            sub_labelIm[mask] = 0  # replace mask by smoothed
+            new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > threshold
+            sub_labelIm[mask] = 0
             sub_labelIm[new_mask] = i + 1
-    edm = edt.edt(upsampled)
-    edm = edm.reshape((shape[0], 2, shape[1], 2)).mean(-1).mean(1) # downsample (bin) by factor 2
-    edm = np.divide(edm + 0.5, 2)  #convert to pixel unit
+    if ndim == 3:
+        anisotropy = (z_radius, 1.0, 1.0) if z_radius is not None and z_radius != 1.0 else None
+    else:
+        anisotropy = None
+    edm = edt.edt(upsampled, black_border=False, anisotropy=anisotropy)
+    # downsample (bin) by factor 2: reshape each spatial dim as (orig, 2) then mean
+    reshape_shape = tuple(val for s in shape for val in (s, 2))
+    edm = edm.reshape(reshape_shape)
+    for ax in range(ndim - 1, -1, -1):
+        edm = edm.mean(axis=2 * ax + 1)
+    edm = np.divide(edm + 0.5, 2)
     edm[edm <= 0.5] = 0
     return edm
 
 
-def derivatives_labelwise(image, bck_value, der_y, der_x, labelIm, object_slices):
+def derivatives_labelwise(image, bck_value, der_z, der_y, der_x, labelIm, object_slices):
     shape = labelIm.shape
+    ndim = labelIm.ndim
     for (i, sl) in enumerate(object_slices):
         if sl is not None:
             sl = tuple([slice(max(s.start - 1, 0), min(s.stop + 1, ax), s.step) for s, ax in zip(sl, shape)])
             mask = labelIm[sl] == i + 1
             sub_im = np.copy(image[sl])
             sub_im[np.logical_not(mask)] = bck_value # erase neighboring cells
-            sub_der_y, sub_der_x = der.der_2d(sub_im, 0, 1)
+            sub_derivatives = der.der(sub_im, *range(ndim))
+            if ndim == 3:
+                sub_der_z, sub_der_y, sub_der_x = sub_derivatives
+                if der_z is not None:
+                    der_z[sl][mask] = sub_der_z[mask]
+            else:
+                sub_der_y, sub_der_x = sub_derivatives
             der_y[sl][mask] = sub_der_y[mask]
             der_x[sl][mask] = sub_der_x[mask]
     return der_y, der_x

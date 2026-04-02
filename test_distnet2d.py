@@ -28,8 +28,8 @@ from dataset_iterator import extract_tile_random_zoom_function
 #path = "/data/DL/DistNet2D/IntermediateChannels/train8s_sub8_12_16.h5"
 #path = "/data/DL/DiSTNet2D/PhC_C2DH_PA14.h5"
 path = "/data/Images/TestFluo/test.h5"
-from distnet_2d.data import DyDxIterator
-from distnet_2d.data.dydx_iterator import CHANNEL_KEYWORDS, ARRAY_KEYWORDS
+from distnet_2d.data import DistnetIterator
+from distnet_2d.data.distnet_iterator import CHANNEL_KEYWORDS, ARRAY_KEYWORDS
 from dataset_iterator.image_data_generator import IlluminationImageGenerator, ScalingImageGenerator, ImageGeneratorList, get_image_data_generator
 from dataset_iterator.datasetIO import get_datasetIO, MemoryIO
 from distnet_2d.model import get_distnet_2d, architectures, get_distnet_2d_seg
@@ -70,16 +70,16 @@ if not seg:
         mask_generator = get_image_data_generator(scaling_parameters=[], affine_transform_parameters=affine_transform_parameters_mask)
 
         tiling_parameters = {"tile_shape":(128, 128), "n_tiles":1, "interpolation_order":1,"perform_augmentation":True,"augmentation_rotate":"true","zoom_range":[0.8333333333333334,1.2],"aspect_ratio_range":[0.8333333333333334,1.2],"random_stride":True,"random_channel_jitter_shape":[10,10]}
-        it = DyDxIterator(dataset=path, group_keyword=None, frame_window=5, erase_edge_cell_size=50, center_mode="MEDOID",
-                                center_distance_mode="EUCLIDEAN",
-                                channel_keywords=CHANNEL_KEYWORDS.copy() + ['/Fluo'],
-                                input_label_keywords=["/Bacteria"],
-                                array_keywords=ARRAY_KEYWORDS,
-                                elasticdeform_parameters={},
-                                return_edm_derivatives=False,
-                                image_data_generators=[data_generator, mask_generator, data_generator],
-                                batch_size=1, step_number=0, extract_tile_function= extract_tile_random_zoom_function(**tiling_parameters),
-                                aug_frame_subsampling=15, verbose=False, shuffle=False, return_image_index=False)
+        it = DistnetIterator(dataset=path, group_keyword=None, frame_window=5, erase_edge_cell_size=50, center_mode="MEDOID",
+                             center_distance_mode="EUCLIDEAN",
+                             channel_keywords=CHANNEL_KEYWORDS.copy() + ['/Fluo'],
+                             input_label_keywords=["/Bacteria"],
+                             array_keywords=ARRAY_KEYWORDS,
+                             elasticdeform_parameters={},
+                             return_edm_derivatives=False,
+                             image_data_generators=[data_generator, mask_generator, data_generator],
+                             batch_size=1, step_number=0, extract_tile_function= extract_tile_random_zoom_function(**tiling_parameters),
+                             aug_frame_subsampling=15, verbose=False, shuffle=False, return_image_index=False)
 
         it.disable_random_transforms(True, True)
 
