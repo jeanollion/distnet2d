@@ -109,13 +109,13 @@ class DistnetIterator(TrackingIterator):
                     image_data_generators.append(image_data_generators[1])
         else:
             self.label_input_channels = []
-        self.tridimensional_mode = tridimensional_mode
         self.z_radius = z_radius
         super().__init__(dataset=dataset,
                          channel_keywords=channel_keywords,
                          array_keywords = array_keywords,
                          input_channels=[0] + [i for i in range(2, nchan)] + self.label_input_channels,
                          output_channels=[1],
+                         n_spatial_dims=3 if tridimensional_mode else 2,
                          channels_prev=[True]*len(channel_keywords),
                          channels_next=[future_frames] * len(channel_keywords),
                          mask_channels=[1] + self.label_input_channels,
@@ -214,7 +214,7 @@ class DistnetIterator(TrackingIterator):
                 batch_by_channel[c] = batch_by_channel[c].astype('float16')
         if self.return_image_index: # reshape to match image shape
             n_chan = self.frame_window * (2 if self.channels_next[1] else 1) + 1
-            spatial_axis = (1, 1, 1) if self.tridimensional_mode else (1, 1)
+            spatial_axis = (1, 1, 1) if self.n_spatial_dims == 3 else (1, 1)
             batch_by_channel["image_idx"] = np.reshape(batch_by_channel["image_idx"], (-1,) + spatial_axis + (n_chan,))
         return batch_by_channel, aug_param_array, ref_channel
 
@@ -314,11 +314,11 @@ class DistnetIterator(TrackingIterator):
         n_motion = 2 * frame_window if return_next else frame_window
         if long_term:
             n_motion = n_motion + (2 * ( frame_window - 1 ) if return_next else frame_window -1)
-        dzIm = np.zeros(labelIms.shape[:-1] + (n_motion,), dtype=self.dtype) if self.tracking and self.tridimensional_mode else None
+        dzIm = np.zeros(labelIms.shape[:-1] + (n_motion,), dtype=self.dtype) if self.tracking and self.n_spatial_dims == 3 else None
         dyIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype) if self.tracking else None
         dxIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype) if self.tracking else None
         if ndisp:
-            dzImNext = np.zeros(labelIms.shape[:-1] + (n_motion,), dtype=self.dtype) if self.tridimensional_mode else None
+            dzImNext = np.zeros(labelIms.shape[:-1] + (n_motion,), dtype=self.dtype) if self.n_spatial_dims == 3 else None
             dyImNext = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
             dxImNext = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
             if self.return_link_multiplicity:
@@ -327,16 +327,15 @@ class DistnetIterator(TrackingIterator):
         categoryIm = np.zeros(labelIms.shape, dtype=self.dtype) if self.category_array_idx>=0 else None
         cat_array = batch_by_channel['arrays'][self.category_array_idx] if self.category_array_idx>=0 else None
         if cat_array is not None:
-            if self.tridimensional_mode and len(cat_array.shape) == 5:
+            if self.n_spatial_dims == 3 and len(cat_array.shape) == 5:
                 cat_array = cat_array[:, :, :, 0]
-            elif not self.tridimensional_mode and len(cat_array.shape) == 4:
+            elif not self.n_spatial_dims == 3 and len(cat_array.shape) == 4:
                 cat_array = cat_array[:, :, 0]
         if self.return_label_rank:
             rankIm = np.zeros(labelIms.shape, dtype=np.int32)
             prevLabelArr = np.zeros(labelIms.shape[:1]+(n_motion, self.n_label_max), dtype=np.int32) if self.tracking else None
             nextLabelArr = np.zeros(labelIms.shape[:1] + (n_motion, self.n_label_max), dtype=np.int32) if self.tracking else None
-            n_spatial = 3 if self.tridimensional_mode else 2
-            centerArr = np.zeros(labelIms.shape[:1]+labelIms.shape[-1:]+(self.n_label_max, n_spatial), dtype=np.float32) # B, C, N, ndim
+            centerArr = np.zeros(labelIms.shape[:1]+labelIms.shape[-1:]+(self.n_label_max, self.n_spatial_dims), dtype=np.float32) # B, C, N, ndim
             centerArr.fill(np.nan)
         if self.return_link_multiplicity:
             linkMultiplicityIm = np.zeros(labelIms.shape[:-1]+(n_motion,), dtype=self.dtype)
@@ -360,26 +359,26 @@ class DistnetIterator(TrackingIterator):
                     sel = [c, c+1]
                     l_c = [labels_and_centers[(i,s)] for s in sel]
                     o_s = [object_slices[(i, s)] for s in sel]
-                    _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,...,c] if self.tracking else None, dxIm=dxIm[i,...,c] if self.tracking else None, dzImNext=dzImNext[i,...,c] if ndisp and self.tridimensional_mode else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,...,frame_window] if self.return_center and sel[1] == frame_window else None, cdmImPrev=centerIm[i,...,c] if self.return_center else None, edmIm = edm[i,...,frame_window] if self.scale_edm else None, edmImPrev = edm[i,...,c] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryImPrev=categoryIm[i,...,c] if self.category_array_idx>=0 else None, categoryArrayPrev=cat_array[bidx, :, c] if self.category_array_idx>=0 else None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,...,frame_window] if self.return_label_rank and sel[1] == frame_window else None, rankImPrev=rankIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and self.tracking and ndisp else None, centerArr=centerArr[i,frame_window] if self.return_label_rank and sel[1] == frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
+                    _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,...,c] if self.tracking else None, dxIm=dxIm[i,...,c] if self.tracking else None, dzImNext=dzImNext[i,...,c] if ndisp and self.n_spatial_dims == 3 else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,...,frame_window] if self.return_center and sel[1] == frame_window else None, cdmImPrev=centerIm[i,...,c] if self.return_center else None, edmIm = edm[i,...,frame_window] if self.scale_edm else None, edmImPrev = edm[i,...,c] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 and sel[1] == frame_window else None, categoryImPrev=categoryIm[i,...,c] if self.category_array_idx>=0 else None, categoryArrayPrev=cat_array[bidx, :, c] if self.category_array_idx>=0 else None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,...,frame_window] if self.return_label_rank and sel[1] == frame_window else None, rankImPrev=rankIm[i,...,c] if self.return_label_rank else None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and self.tracking and ndisp else None, centerArr=centerArr[i,frame_window] if self.return_label_rank and sel[1] == frame_window else None, centerArrPrev=centerArr[i,c] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
                 if return_next:
                     for c in range(frame_window, 2*frame_window):
                         sel = [c, c+1]
                         l_c = [labels_and_centers[(i, s)] for s in sel]
                         o_s = [object_slices[(i, s)] for s in sel]
-                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,...,c] if self.tracking else None, dxIm=dxIm[i,...,c] if self.tracking else None, dzImNext=dzImNext[i,...,c] if ndisp and self.tridimensional_mode else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,..., c + 1] if self.return_center else None, edmIm = edm[i,...,c+1] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,..., c + 1] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, c+1] if self.category_array_idx>=0 else None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,..., c + 1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i, c + 1] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
+                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c] if self.tracking else None, o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,...,c] if self.tracking else None, dxIm=dxIm[i,...,c] if self.tracking else None, dzImNext=dzImNext[i,...,c] if ndisp and self.n_spatial_dims == 3 else None, dyImNext=dyImNext[i,...,c] if ndisp else None, dxImNext=dxImNext[i,...,c] if ndisp else None, cdmIm=centerIm[i,..., c + 1] if self.return_center else None, edmIm = edm[i,...,c+1] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,..., c + 1] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, c+1] if self.category_array_idx>=0 else None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,...,c] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,...,c] if self.return_link_multiplicity and ndisp else None, rankIm=rankIm[i,..., c + 1] if self.return_label_rank else None, rankImPrev=None, prevLabelArr=prevLabelArr[i,c] if self.return_label_rank and self.tracking else None, nextLabelArr=nextLabelArr[i,c] if self.return_label_rank and ndisp else None, centerArr=centerArr[i, c + 1] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
                 if long_term:
                     off = 2*frame_window if return_next else frame_window
                     for c in range(0, frame_window-1):
                         sel = [c, frame_window]
                         l_c = [labels_and_centers[(i, s)] for s in sel]
                         o_s = [object_slices[(i, s)] for s in sel]
-                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,..., c + off], dxIm=dxIm[i,..., c + off], dzImNext=dzImNext[i,...,c] if ndisp and self.tridimensional_mode else None, dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
+                        _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,..., c + off], dxIm=dxIm[i,..., c + off], dzImNext=dzImNext[i,...,c] if ndisp and self.n_spatial_dims == 3 else None, dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
                     if return_next:
                         for c in range(frame_window-1, 2*(frame_window-1)):
                             sel = [frame_window, c+3]
                             l_c = [labels_and_centers[(i, s)] for s in sel]
                             o_s = [object_slices[(i, s)] for s in sel]
-                            _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,..., c + off], dxIm=dxIm[i,..., c + off], dzImNext=dzImNext[i,...,c] if ndisp and self.tridimensional_mode else None, dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
+                            _compute_outputs(l_c, labelIms[i][...,sel], labels_map_prev[bidx][c + off], o_s, dzIm=dzIm[i, ..., c] if dzIm is not None else None, dyIm=dyIm[i,..., c + off], dxIm=dxIm[i,..., c + off], dzImNext=dzImNext[i,...,c] if ndisp and self.n_spatial_dims == 3 else None, dyImNext=dyImNext[i,..., c + off] if ndisp else None, dxImNext=dxImNext[i,..., c + off] if ndisp else None, cdmIm=None, cdmImPrev=None, linkMultiplicityIm=linkMultiplicityIm[i,..., c + off] if self.return_link_multiplicity else None, linkMultiplicityImNext=linkMultiplicityImNext[i,..., c + off] if self.return_link_multiplicity and ndisp else None, rankIm=None, rankImPrev=None, prevLabelArr=prevLabelArr[i, c + off] if self.return_label_rank else None, nextLabelArr=nextLabelArr[i, c + off] if self.return_label_rank and ndisp else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
             else:
                 l_c = [labels_and_centers[(i, 0)]]
                 o_s = [object_slices[(i, 0)]]
@@ -389,15 +388,15 @@ class DistnetIterator(TrackingIterator):
             edm[edm == 0] = -1
         if self.return_edm_derivatives:
             der_y, der_x = np.zeros_like(edm), np.zeros_like(edm)
-            if self.tridimensional_mode:
+            if self.n_spatial_dims == 3:
                 der_z = np.zeros_like(edm)
             c_range = range(edm.shape[-1]) if not self.output_central_only else range(frame_window, frame_window - 1)
             for b, c in itertools.product(range(edm.shape[0]), c_range):
-                derivatives_labelwise(edm[b, ..., c], -1, der_z[b, ..., c] if self.tridimensional_mode else None, der_y[b, ..., c], der_x[b, ..., c], labelIms[b, ..., c],  object_slices[(b, c)])
+                derivatives_labelwise(edm[b, ..., c], -1, der_z[b, ..., c] if self.n_spatial_dims == 3 else None, der_y[b, ..., c], der_x[b, ..., c], labelIms[b, ..., c],  object_slices[(b, c)])
             if self.output_central_only:
                 der_y = der_y[..., 1:-1]
                 der_x = der_x[..., 1:-1]
-                if self.tridimensional_mode:
+                if self.n_spatial_dims == 3:
                     der_z = der_z[..., 1:-1]
 
         if self.output_central_only: # select only central frame for edm / center and only displacement / link multiplicity related to central frame
@@ -405,7 +404,7 @@ class DistnetIterator(TrackingIterator):
             centerIm = centerIm[..., 1:-1] if self.return_center else None
             dyIm = dyIm[..., :1] if self.tracking else None
             dxIm = dxIm[..., :1] if self.tracking else None
-            dzIm = dzIm[..., :1] if self.tracking and self.tridimensional_mode else None
+            dzIm = dzIm[..., :1] if self.tracking and self.n_spatial_dims == 3 else None
             if self.return_link_multiplicity:
                 linkMultiplicityIm = linkMultiplicityIm[..., :1]
             if self.category_array_idx>=0:
@@ -413,7 +412,7 @@ class DistnetIterator(TrackingIterator):
             if ndisp:
                 dyImNext = dyImNext[..., 1:]
                 dxImNext = dxImNext[..., 1:]
-                if self.tridimensional_mode:
+                if self.n_spatial_dims == 3:
                     dzImNext = dzImNext[..., 1:]
                 if self.return_link_multiplicity:
                     linkMultiplicityImNext = linkMultiplicityImNext[..., 1:]
@@ -424,7 +423,7 @@ class DistnetIterator(TrackingIterator):
                 if ndisp:
                     nextLabelArr = nextLabelArr[:, 1:]
         if self.return_edm_derivatives:
-            if self.tridimensional_mode:
+            if self.n_spatial_dims == 3:
                 edm = np.concatenate([edm, der_z, der_y, der_x], -1)
             else:
                 edm = np.concatenate([edm, der_y, der_x], -1)
@@ -434,7 +433,7 @@ class DistnetIterator(TrackingIterator):
         if self.return_center:
             all_channels.append(centerIm)
         downscale_factor = 1./self.downscale if self.downscale>1 else 0
-        if self.tridimensional_mode:
+        if self.n_spatial_dims == 3:
             scale = [1, 1, downscale_factor, downscale_factor, 1]  # don't downscale Z
         else:
             scale = [1, downscale_factor, downscale_factor, 1]

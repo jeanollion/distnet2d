@@ -423,12 +423,15 @@ def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, dow
         return target_kernel, target_dilation
     spa_dimensions = ensure_multiplicity(ndims, spa_dimensions)
     if isinstance(target_kernel, int):
-        target_kernel = [min(3, target_kernel), target_kernel, target_kernel] # Z, Y, X
+        if tridimensional_mode:
+            target_kernel = [min(3, target_kernel), target_kernel, target_kernel] # Z, Y, X
     kernel = ensure_multiplicity(ndims, target_kernel)
     if isinstance(target_dilation, int):
-        target_dilation = [1, target_dilation, target_dilation] # Z, Y, X
+        if tridimensional_mode:
+            target_dilation = [1, target_dilation, target_dilation] # Z, Y, X
     dilation = ensure_multiplicity(ndims, target_dilation)
-    spa_dimensions = [d/downsampling if d is not None and d>0 else None for d in spa_dimensions]
+    downsampling = ensure_multiplicity(ndims, downsampling)
+    spa_dimensions = [d/ds if d is not None and d>0 else None for d, ds in zip(spa_dimensions, downsampling)]
     for i in range(len(spa_dimensions)):
         while not test_ker_dil(kernel[i], dilation[i], spa_dimensions[i]):
             if dilation[i] > 1:
@@ -475,11 +478,13 @@ def spatial_contraction_product(*down):
 def limit_radius(target_radius, spa_dimensions, downsampling, message:str=None):
     if target_radius == 0 or spa_dimensions is None:
         return target_radius
-    spa_dimensions = ensure_multiplicity(2, spa_dimensions)
-    rad = ensure_multiplicity(2, target_radius)
-    spa_dimensions = [d // downsampling if d is not None and d > 0 else None for d in spa_dimensions]
+    ndims = len(spa_dimensions)
+    spa_dimensions = ensure_multiplicity(ndims, spa_dimensions)
+    rad = ensure_multiplicity(ndims, target_radius)
+    downsampling = ensure_multiplicity(ndims, downsampling)
+    spa_dimensions = [d // ds if d is not None and d > 0 else None for d, ds in zip(spa_dimensions, downsampling)]
     rad = [min(s, r) for r, s in zip(rad, spa_dimensions)]
-    if rad[0] == rad[1]:
+    if all(r == rad[0] for r in rad):
         rad = rad[0]
     if message is not None:
         print(f"{message} rad: target={target_radius} -> actual={rad} for dim: {spa_dimensions}")

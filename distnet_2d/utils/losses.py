@@ -116,39 +116,66 @@ class FocalCrossEntropy(tf.keras.losses.Loss):
         return config
 
 
-def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, pred_dy=None, pred_dx=None, pred_lap=None, mask=None, der_mask=None, derivative_loss: bool = False, laplacian_loss: bool = False, weight_map=None):
+def _apply_der_mask(tensor, der_mask):
+    return tf.where(der_mask, tensor, 0) if der_mask is not None else tensor
+
+
+def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, pred_dy=None, pred_dx=None, pred_lap=None, true_dz=None, pred_dz=None, mask=None, der_mask=None, derivative_loss: bool = False, laplacian_loss: bool = False, weight_map=None):
     loss = loss_fun(true, tf.where(mask, pred, 0) if mask is not None else pred)
     if weight_map is not None:
         loss = loss * weight_map
-    #print(f"compute loss with mask: {mask is not None} interior: {mask_interior is not None} der: {derivative_loss} grad: {gradient_loss} lap: {laplacian_loss} pred lap: {y_pred_lap is not None} pred dy: {y_pred_dy is not None} pred dx: {y_pred_dx is not None}", flush=True)
-    if derivative_loss or laplacian_loss or pred_dy is not None or pred_dx is not None or pred_lap is not None:
+    has_pred_ders = pred_dy is not None or pred_dx is not None or pred_dz is not None
+    if derivative_loss or laplacian_loss or has_pred_ders or pred_lap is not None:
         if der_mask is None:
             der_mask = mask
-        if true_dy is None:
-            true_dy = der.der_2d(true, 1)
-        if true_dx is None:
-            true_dx = der.der_2d(true, 2)
+        tridim = len(true.shape) == 5
+        # compute true derivatives
+        if tridim:
+            if true_dz is None:
+                true_dz = der.der(true, 1)
+            if true_dy is None:
+                true_dy = der.der(true, 2)
+            if true_dx is None:
+                true_dx = der.der(true, 3)
+        else:
+            if true_dy is None:
+                true_dy = der.der(true, 1)
+            if true_dx is None:
+                true_dx = der.der(true, 2)
         if derivative_loss or laplacian_loss:
-            dy_pred, dx_pred = der.der_2d(pred, 1), der.der_2d(pred, 2)
+            if tridim:
+                pred_dz_comp = der.der(pred, 1)
+                pred_dy_comp = der.der(pred, 2)
+                pred_dx_comp = der.der(pred, 3)
+            else:
+                pred_dy_comp = der.der(pred, 1)
+                pred_dx_comp = der.der(pred, 2)
         if laplacian_loss or pred_lap is not None:
-            true_lap = der.laplacian_2d(None, true_dy, true_dx)
+            if tridim:
+                true_lap = der.laplacian(derivatives=[true_dz, true_dy, true_dx])
+            else:
+                true_lap = der.laplacian(derivatives=[true_dy, true_dx])
         if pred_lap is not None:
-            pred_lap = tf.where(der_mask, pred_lap, 0) if der_mask is not None else pred_lap
-            loss = loss + loss_fun(true_lap, pred_lap)
+            loss = loss + loss_fun(true_lap, _apply_der_mask(pred_lap, der_mask))
         if laplacian_loss:
-            lap_pred = der.laplacian_2d(None, dy_pred, dx_pred)
-            lap_pred = tf.where(der_mask, lap_pred, 0) if der_mask is not None else lap_pred
-            loss = loss + loss_fun(true_lap, lap_pred)
+            if tridim:
+                lap_pred = der.laplacian(derivatives=[pred_dz_comp, pred_dy_comp, pred_dx_comp])
+            else:
+                lap_pred = der.laplacian(derivatives=[pred_dy_comp, pred_dx_comp])
+            loss = loss + loss_fun(true_lap, _apply_der_mask(lap_pred, der_mask))
+        # explicit predicted derivatives (from network heads)
+        if pred_dz is not None:
+            loss = loss + loss_fun(true_dz, _apply_der_mask(pred_dz, der_mask))
         if pred_dy is not None:
-            pred_dy = tf.where(der_mask, pred_dy, 0) if der_mask is not None else pred_dy
-            loss = loss + loss_fun(true_dy, pred_dy)
+            loss = loss + loss_fun(true_dy, _apply_der_mask(pred_dy, der_mask))
         if pred_dx is not None:
-            pred_dx = tf.where(der_mask, pred_dx, 0) if der_mask is not None else pred_dx
-            loss = loss + loss_fun(true_dx, pred_dx)
+            loss = loss + loss_fun(true_dx, _apply_der_mask(pred_dx, der_mask))
+        # derivative loss (from computed derivatives of prediction)
         if derivative_loss:
-            dy_pred = tf.where(der_mask, dy_pred, 0) if der_mask is not None else dy_pred
-            dx_pred = tf.where(der_mask, dx_pred, 0) if der_mask is not None else dx_pred
-            loss = loss + loss_fun(true_dy, dy_pred) + loss_fun(true_dx, dx_pred)
+            if tridim:
+                loss = loss + loss_fun(true_dz, _apply_der_mask(pred_dz_comp, der_mask))
+            loss = loss + loss_fun(true_dy, _apply_der_mask(pred_dy_comp, der_mask))
+            loss = loss + loss_fun(true_dx, _apply_der_mask(pred_dx_comp, der_mask))
     return loss
 
 

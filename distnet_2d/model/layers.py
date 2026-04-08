@@ -244,7 +244,6 @@ class Combine(tf.keras.layers.Layer):
         self.combine_conv = ConvBNDrop(
             filters=filters,
             kernel_size=self.kernel_size,
-            padding='same',
             activation=self.activation,
             dropout_rate=0,
             l2_reg=self.l2_reg,
@@ -578,8 +577,10 @@ class UpSamplingWithDtype(tf.keras.layers.Layer):
         self.interpolation = interpolation
 
     def build(self, input_shape):
-        op = tf.keras.layers.UpSampling3D if len(input_shape)==5 else tf.keras.layers.UpSampling2D
-        self.up_op = op(size=self.size, interpolation=self.interpolation, name="up_op")
+        if len(input_shape) == 5:
+            self.up_op = tf.keras.layers.UpSampling3D(size=self.size, name="up_op")
+        else:
+            self.up_op = tf.keras.layers.UpSampling2D(size=self.size, interpolation=self.interpolation, name="up_op")
 
     def call(self, inputs):
         output = self.up_op(inputs)
@@ -807,7 +808,8 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
 
     def call(self, frame_index): # (B, 1, 1, FW) or (B, 1, 1, 1, FW)
         offset = tf.cast(self.offset, tf.int32)
-        frame_distance = tf.cast( tf.gather(frame_index[:, 0, 0], self.frame_next_idx, axis=-1) - tf.gather(frame_index[:, 0, 0], self.frame_prev_idx, axis=-1), tf.int32 ) + offset # (B, N)
+        fi = frame_index[:, 0, 0, 0] if self.tridim_mode else frame_index[:, 0, 0]  # (B, FW)
+        frame_distance = tf.cast( tf.gather(fi, self.frame_next_idx, axis=-1) - tf.gather(fi, self.frame_prev_idx, axis=-1), tf.int32 ) + offset # (B, N)
         frame_distance_emb = self.embedding(frame_distance) # (B, N, C)
         frame_distance_emb = tf.transpose(frame_distance_emb, perm=[1, 0, 2]) # (N, B, C)
         if self.tridim_mode:

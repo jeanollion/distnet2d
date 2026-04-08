@@ -108,7 +108,7 @@ class SpatialAttention(tf.keras.layers.Layer):
                 cos_x = tf.cos(spa_index[:, tf.newaxis] * div_term)
                 pe = tf.stack([sin_x, cos_x], axis=-1)
                 pe = tf.reshape(pe, (self.spatial_dim, -1))[..., :input_shape[-1]]
-                self.pos_enc = tf.reshape(pe, (self.spatial_dims[0], self.spatial_dims[1],  input_shape[-1]))  # for broadcasting purpose
+                self.pos_enc = tf.reshape(pe, (*self.spatial_dims, input_shape[-1]))  # for broadcasting purpose
 
         elif "rotary" in self.positional_encoding or "rope" in self.positional_encoding:
             assert input_shape[-1] % 2 == 0, "Attention filters must be divisible by two for RoPE mode"
@@ -134,7 +134,7 @@ class SpatialAttention(tf.keras.layers.Layer):
 
                 # Combine y and x angles
                 angles = tf.stack([y_angles, x_angles], axis=-1)  # Shape: (y, x, d_model//4, 2)
-                angles = tf.reshape(angles, (self.spatial_dims[0], self.spatial_dims[1], -1))[..., :input_shape[-1] // 2]  # Shape: (y, x, d_model//2)
+                angles = tf.reshape(angles, (*self.spatial_dims, -1))[..., :input_shape[-1] // 2]  # Shape: (y, x, d_model//2)
                 # Create cosine and sine tensors
                 self.pos_enc_cos = tf.cos(angles)  # Shape: (y, x, d_model//2)
                 self.pos_enc_sin = tf.sin(angles)  # Shape: (y, x, d_model//2)
@@ -147,7 +147,7 @@ class SpatialAttention(tf.keras.layers.Layer):
 
                 # Compute rotation angles for y and x positions
                 angles = tf.einsum('i,j->ij', spa_index, div_term)  # Shape: (yx, d_model//2)
-                angles = tf.reshape(angles, (self.spatial_dims[0], self.spatial_dims[1], -1))
+                angles = tf.reshape(angles, (*self.spatial_dims, -1))
 
                 self.pos_enc_cos = tf.cos(angles)  # Shape: (y, x, d_model//2)
                 self.pos_enc_sin = tf.sin(angles)  # Shape: y, x, d_model//2)
@@ -202,7 +202,7 @@ class SpatialAttention(tf.keras.layers.Layer):
             else:
                 spa_index = tf.range(self.spatial_dim, dtype=tf.int32)
                 pos_emb = self.pos_embedding(spa_index) # (spa_dim, self.filters)
-                pos_emb = tf.reshape(pos_emb, (self.spatial_dims[0], self.spatial_dims[1], self.filters)) #for broadcasting purpose
+                pos_emb = tf.reshape(pos_emb, (*self.spatial_dims, self.filters)) #for broadcasting purpose
                 query = query + pos_emb # broadcast
                 key = key + pos_emb # broadcast
         else :
