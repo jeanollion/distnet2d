@@ -397,7 +397,7 @@ class ResConv(tf.keras.layers.Layer):
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+            self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
             self.bn1 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
             self.bn2 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
@@ -484,7 +484,7 @@ class ConvBNDrop(tf.keras.layers.Layer):
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+            self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
             self.bn = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
         if self.layer_norm:
@@ -551,7 +551,7 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"Dropout")
+            self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         if self.batch_norm:
             self.bn = tf.keras.layers.BatchNormalization(name = f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
         elif self.layer_norm:

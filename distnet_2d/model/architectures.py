@@ -34,8 +34,7 @@ def get_architecture(architecture_type:str, **kwargs):
 class ArchBase:
     def __init__(self, filters:int,
                  n_inputs:int=1,
-                 spatial_dimensions=None,
-                 tridimensional_mode: bool = False,
+                 spatial_dimensions=[None, None],
                  frame_window:int = 3,
                  category_number: int = 0,  # category for each cell instance (segmentation level), <=1 means do not predict category
                  inference_gap_number: int = 0,
@@ -54,8 +53,9 @@ class ArchBase:
                  frame_aware:bool=False, frame_max_distance:int=0,
                  predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False,
                  ):
+        assert spatial_dimensions is not None and 3 >= len(spatial_dimensions) >= 2, f"invalid spatial dimensions: {spatial_dimensions}"
         self.spatial_dimensions=spatial_dimensions
-        self.tridimensional_mode=tridimensional_mode
+        self.tridimensional_mode=len(spatial_dimensions)==3
         self.n_inputs = n_inputs
         self.frame_window = frame_window
         self.segmentation = segmentation
@@ -106,7 +106,6 @@ class ArchDepth(ArchBase):
 class D2(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
-        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**2} x {self.spatial_dimensions[1] / 2**2}")
         down_ker0 = get_downsampling_factor(2, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
         down1 = down_ker0
@@ -120,6 +119,7 @@ class D2(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        print(f"spatial dimensions at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, down2)]}")
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -174,7 +174,7 @@ class D2(ArchDepth):
 class D3(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
-        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**3} x {self.spatial_dimensions[1] / 2**3}")
+
         down_ker0 = get_downsampling_factor(2, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
         down1 = down_ker0
@@ -190,7 +190,7 @@ class D3(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
-
+        print(f"spatial dimensions at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, down3)]}")
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -251,7 +251,6 @@ class D3(ArchDepth):
 class D4(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
-        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**4} x {self.spatial_dimensions[1] / 2**4}")
         down_ker0 = get_downsampling_factor(2, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
         ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
         down1 = down_ker0
@@ -273,7 +272,7 @@ class D4(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
-
+        print(f"spatial dimensions at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, down4)]}")
         self.encoder_settings = [
             [
                 {"filters": 16, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -450,7 +449,7 @@ def test_ker_dil(ker, dil, dim):
     size = (ker-1)*dil
     return dim >= size * 2
 
-def get_downsampling_factor(target_downsampling, spa_dimensions, downsampling, tridimensional_mode:bool=False):
+def get_downsampling_factor(target_downsampling, spa_dimensions, downsampling, tridimensional_mode:bool):
     ndims = 2 if not tridimensional_mode else 3
     if spa_dimensions is None:
         return target_downsampling

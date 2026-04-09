@@ -309,8 +309,8 @@ class DistnetIterator(TrackingIterator):
         edm = np.zeros(shape=labelIms.shape, dtype=np.float32) if self.segmentation or ("edm" in self.center_mode and self.input_label_center_idx < 0) else None
         if edm is not None:
             for b,c in itertools.product(range(edm.shape[0]), range(edm.shape[-1])):
-                edm[b,...,c] = edt_smooth(labelIms[b,...,c], object_slices[(b, c)], z_radius=self.z_radius) # TODO: in 3D: check speed
-                #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False, anisotropy=(z_radius, 1.0, 1.0) if z_radius is not None and z_radius != 1.0 else None)
+                edm[b,...,c] = edt_smooth(labelIms[b,...,c], object_slices[(b, c)], z_radius=self.z_radius)
+                #edm[b,...,c] = edt.edt(labelIms[b,...,c], black_border=False, anisotropy=(self.z_radius, 1.0, 1.0) if self.z_radius is not None and self.z_radius != 1.0 else None)
         n_motion = 2 * frame_window if return_next else frame_window
         if long_term:
             n_motion = n_motion + (2 * ( frame_window - 1 ) if return_next else frame_window -1)
@@ -494,6 +494,7 @@ class DistnetIterator(TrackingIterator):
                     cur_labels = labelIms[b, ..., c].astype(np.int32)
                     object_slices = find_objects(cur_labels)
                     edm[b, ..., c] = edt_smooth(cur_labels, object_slices, z_radius=self.z_radius)
+                    #edm[b, ..., c] = edt.edt(cur_labels, black_border=False, anisotropy=(self.z_radius, 1.0, 1.0) if self.z_radius is not None and self.z_radius != 1.0 else None)
                     labels_and_centers = _get_labels_and_centers(cur_labels, edm[b, ..., c], "MEDOID")
                     centers[(b, c)] = labels_and_centers.values() # record for output batch
                     _draw_centers(gdcm[b,...,c], labels_and_centers, cur_labels, object_slices, "GEODESIC", z_radius=self.z_radius)
@@ -800,30 +801,50 @@ def _draw_centers(centerIm, labels_map_centers, labelIm, object_slices, center_d
 def edt_smooth(labelIm, object_slices, z_radius=None):
     shape = labelIm.shape
     ndim = labelIm.ndim
-    upsample_kernel = tuple([2] * ndim)
-    upsampled = np.kron(labelIm, np.ones(upsample_kernel))
-    w = np.ones(shape=tuple([3] * ndim), dtype=np.int8)
-    threshold = w.size // 2
-    for (i, sl) in enumerate(object_slices):
-        if sl is not None:
-            sl = tuple([slice(max(s.start*2 - 1, 0), min(s.stop*2 + 1, ax*2), s.step) for s, ax in zip(sl, shape)])
-            sub_labelIm = upsampled[sl]
-            mask = sub_labelIm == i + 1
-            new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > threshold
-            sub_labelIm[mask] = 0
-            sub_labelIm[new_mask] = i + 1
     if ndim == 3:
-        anisotropy = (z_radius, 1.0, 1.0) if z_radius is not None and z_radius != 1.0 else None
+        # Smooth only in YX: upsample and convolve each Z-slice independently
+        Z = shape[0]
+        yx_shape = shape[1:]
+        upsample_kernel = (1, 2, 2)
+        w = np.ones(shape=(3, 3), dtype=np.int8)
+        threshold = w.size // 2
+        upsampled = np.kron(labelIm, np.ones(upsample_kernel))
+        for (i, sl) in enumerate(object_slices):
+            if sl is not None:
+                sl_z = sl[0]
+                sl_yx = tuple([slice(max(s.start*2 - 1, 0), min(s.stop*2 + 1, ax*2), s.step) for s, ax in zip(sl[1:], yx_shape)])
+                for z in range(sl_z.start, sl_z.stop):
+                    sub_labelIm = upsampled[(z,) + sl_yx]
+                    mask = sub_labelIm == i + 1
+                    new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > threshold
+                    sub_labelIm[mask] = 0
+                    sub_labelIm[new_mask] = i + 1
+        effective_z = (z_radius if z_radius is not None else 1.0) * 2  # Z not upsampled, YX upsampled 2x
+        anisotropy = (effective_z, 1.0, 1.0)
+        edm = edt.edt(upsampled, black_border=False, anisotropy=anisotropy)
+        # downsample YX only by factor 2
+        edm = edm.reshape(Z, yx_shape[0], 2, yx_shape[1], 2)
+        edm = edm.mean(axis=(2, 4))
+        edm = np.divide(edm, 2)
+        edm[edm <= 0.25] = 0
     else:
-        anisotropy = None
-    edm = edt.edt(upsampled, black_border=False, anisotropy=anisotropy)
-    # downsample (bin) by factor 2: reshape each spatial dim as (orig, 2) then mean
-    reshape_shape = tuple(val for s in shape for val in (s, 2))
-    edm = edm.reshape(reshape_shape)
-    for ax in range(ndim - 1, -1, -1):
-        edm = edm.mean(axis=2 * ax + 1)
-    edm = np.divide(edm + 0.5, 2)
-    edm[edm <= 0.5] = 0
+        upsample_kernel = (2, 2)
+        upsampled = np.kron(labelIm, np.ones(upsample_kernel))
+        w = np.ones(shape=(3, 3), dtype=np.int8)
+        threshold = w.size // 2
+        for (i, sl) in enumerate(object_slices):
+            if sl is not None:
+                sl = tuple([slice(max(s.start*2 - 1, 0), min(s.stop*2 + 1, ax*2), s.step) for s, ax in zip(sl, shape)])
+                sub_labelIm = upsampled[sl]
+                mask = sub_labelIm == i + 1
+                new_mask = convolve(mask.astype(np.int8), weights=w, mode="nearest") > threshold
+                sub_labelIm[mask] = 0
+                sub_labelIm[new_mask] = i + 1
+        edm = edt.edt(upsampled, black_border=False)
+        edm = edm.reshape(shape[0], 2, shape[1], 2)
+        edm = edm.mean(axis=(1, 3))
+        edm = np.divide(edm + 0.5, 2)
+        edm[edm <= 0.5] = 0
     return edm
 
 
