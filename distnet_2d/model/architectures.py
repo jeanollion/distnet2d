@@ -119,7 +119,7 @@ class D2(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
-        print(f"spatial dimensions at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, down2)]}")
+        print(f"spatial dimension at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down2))]}")
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -190,7 +190,7 @@ class D3(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
-        print(f"spatial dimensions at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, down3)]}")
+        print(f"spatial dimension at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down3))]}")
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -272,7 +272,7 @@ class D4(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
-        print(f"spatial dimensions at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, down4)]}")
+        print(f"spatial dimension at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down4))]}")
         self.encoder_settings = [
             [
                 {"filters": 16, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -481,7 +481,7 @@ def limit_radius(target_radius, spa_dimensions, downsampling, message:str=None):
     spa_dimensions = ensure_multiplicity(ndims, spa_dimensions)
     rad = ensure_multiplicity(ndims, target_radius)
     downsampling = ensure_multiplicity(ndims, downsampling)
-    spa_dimensions = [d // ds if d is not None and d > 0 else None for d, ds in zip(spa_dimensions, downsampling)]
+    spa_dimensions = [max(1, d // ds) if d is not None and d > 0 else None for d, ds in zip(spa_dimensions, downsampling)]
     rad = [min(s, r) for r, s in zip(rad, spa_dimensions)]
     if all(r == rad[0] for r in rad):
         rad = rad[0]
