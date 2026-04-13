@@ -53,6 +53,8 @@ class DistnetIterator(TrackingIterator):
                  frame_aware:bool=False,  # return actual frame (relative to central frame)
                  tridimensional_mode:bool=False,
                  z_radius:float=1., # to take into account anisotropy: z radius considering that x=y=1
+                 return_weight_map:bool=False,
+                 category_frequencies:list=None,  # per-category frequencies for balanced sampling. length = number of categories
                  **kwargs):
         assert len(channel_keywords)>=2, 'keyword should contain at least 2 elements in this order: grayscale input images, object labels, [other grayscale input images]'
         if frame_window == 0:
@@ -110,6 +112,15 @@ class DistnetIterator(TrackingIterator):
         else:
             self.label_input_channels = []
         self.z_radius = z_radius
+        self.return_weight_map = return_weight_map
+        if category_frequencies is not None:
+            category_frequencies = np.array(category_frequencies, dtype=np.float64)
+            assert category_frequencies.ndim == 1, "category_frequencies must be a 1D array"
+            min_freq = np.min(category_frequencies[category_frequencies > 0])
+            # keep_probability: rarest category = 1.0, more common categories < 1.0
+            self.category_keep_prob = min_freq / np.maximum(category_frequencies, 1e-10)
+        else:
+            self.category_keep_prob = None
         super().__init__(dataset=dataset,
                          channel_keywords=channel_keywords,
                          array_keywords = array_keywords,
@@ -476,6 +487,59 @@ class DistnetIterator(TrackingIterator):
             if self.tracking:
                 all_channels.append(prevLabelArr)
             all_channels.append(centerArr)
+        if self.return_weight_map:
+            weight_map = np.ones(labelIms.shape, dtype=np.float32)
+            if self.category_keep_prob is not None and self.category_array_idx >= 0:
+                if self.tracking and labels_map_prev is not None:
+                    # Tracking mode: exclude whole cell lines
+                    for b in range(labelIms.shape[0]):
+                        bidx = get_idx(b)
+                        # Decide exclusions based on central frame
+                        excluded_labels = {c: set() for c in range(labelIms.shape[-1])}
+                        central_c = frame_window
+                        cur_cat = cat_array[bidx, :, central_c]
+                        for obj_idx, sl in enumerate(object_slices[(b, central_c)]):
+                            if sl is not None:
+                                cat = int(cur_cat[obj_idx])
+                                if 0 <= cat < len(self.category_keep_prob):
+                                    if np.random.random() >= self.category_keep_prob[cat]:
+                                        excluded_labels[central_c].add(obj_idx + 1)
+                        # Trace backward: labels_map_prev[bidx][c] maps labels in frame c+1 → frame c
+                        for c in range(central_c - 1, -1, -1):
+                            lmp = labels_map_prev[bidx][c]
+                            for label in excluded_labels[c + 1]:
+                                for prev_label in lmp.get(label, []):
+                                    excluded_labels[c].add(prev_label)
+                        # Trace forward: invert labels_map_prev to get frame c → frame c+1
+                        n_total_frames = labelIms.shape[-1]
+                        for c in range(central_c, n_total_frames - 1):
+                            lmp = labels_map_prev[bidx][c]  # maps frame c+1 → frame c
+                            fwd = {}
+                            for next_label, prev_labels in lmp.items():
+                                for pl in prev_labels:
+                                    fwd.setdefault(pl, []).append(next_label)
+                            for label in excluded_labels[c]:
+                                for next_label in fwd.get(label, []):
+                                    excluded_labels[c + 1].add(next_label)
+                        # Apply exclusions to weight map
+                        for c in range(n_total_frames):
+                            for label in excluded_labels[c]:
+                                mask = labelIms[b, ..., c] == label
+                                weight_map[b, ..., c][mask] = 0
+                else:
+                    # Non-tracking mode: exclude per-frame independently
+                    for b, c in itertools.product(range(labelIms.shape[0]), range(labelIms.shape[-1])):
+                        bidx = get_idx(b)
+                        cur_cat = cat_array[bidx, :, c] if cat_array is not None else None
+                        if cur_cat is not None:
+                            for obj_idx, sl in enumerate(object_slices[(b, c)]):
+                                if sl is not None:
+                                    cat = int(cur_cat[obj_idx])
+                                    if 0 <= cat < len(self.category_keep_prob):
+                                        if np.random.random() >= self.category_keep_prob[cat]:
+                                            mask = labelIms[b, ..., c][sl] == obj_idx + 1
+                                            weight_map[b, ..., c][sl][mask] = 0
+            all_channels.append(weight_map)
         return all_channels
 
     def _get_input_batch(self, batch_by_channel, ref_chan_idx, aug_param_array):

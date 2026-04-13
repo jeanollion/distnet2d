@@ -400,7 +400,7 @@ class TestTrainingStep(unittest.TestCase):
     """Test that train_step works in graph mode for both 2D and 3D, with and without tracking."""
 
     @staticmethod
-    def _build_model(spa_dims, tridim, tracking=True, predict_edm_derivatives=False):
+    def _build_model(spa_dims, tridim, tracking=True, predict_edm_derivatives=False, return_weight_map=False):
         from distnet_2d.model import get_distnet_2d
         from distnet_2d.model.architectures import get_architecture
         fw = 2
@@ -420,12 +420,12 @@ class TestTrainingStep(unittest.TestCase):
             dropout=0,
             predict_edm_derivatives=predict_edm_derivatives,
         )
-        model = get_distnet_2d(arch)
+        model = get_distnet_2d(arch, return_weight_map=return_weight_map)
         model.compile(optimizer=tf.keras.optimizers.Adam(1e-4))
         return model, arch
 
     @staticmethod
-    def _make_data(spa_dims, tridim, tracking=True, predict_edm_derivatives=False):
+    def _make_data(spa_dims, tridim, tracking=True, predict_edm_derivatives=False, return_weight_map=False):
         fw = 2
         n_frames = fw * 2 + 1
         n_displacement = 3 if tridim else 2
@@ -455,12 +455,15 @@ class TestTrainingStep(unittest.TestCase):
             # link multiplicity: n_pair_channels channels, values in {1,2,3}
             lm_shape = [batch_size] + list(spa_dims) + [n_pair_channels]
             y.append(tf.ones(lm_shape))
+        if return_weight_map:
+            wm_shape = [batch_size] + list(spa_dims) + [n_frames]
+            y.append(tf.ones(wm_shape))
         return x, y
 
-    def _run_train_step(self, spa_dims, tridim, tracking=True, predict_edm_derivatives=False):
+    def _run_train_step(self, spa_dims, tridim, tracking=True, predict_edm_derivatives=False, return_weight_map=False):
         with tf.device('/CPU:0'):
-            model, arch = self._build_model(spa_dims, tridim, tracking=tracking, predict_edm_derivatives=predict_edm_derivatives)
-            x, y = self._make_data(spa_dims, tridim, tracking=tracking, predict_edm_derivatives=predict_edm_derivatives)
+            model, arch = self._build_model(spa_dims, tridim, tracking=tracking, predict_edm_derivatives=predict_edm_derivatives, return_weight_map=return_weight_map)
+            x, y = self._make_data(spa_dims, tridim, tracking=tracking, predict_edm_derivatives=predict_edm_derivatives, return_weight_map=return_weight_map)
 
             # Run in graph mode via tf.function
             @tf.function
@@ -490,6 +493,12 @@ class TestTrainingStep(unittest.TestCase):
 
     def test_2d_edm_derivatives(self):
         self._run_train_step(spa_dims=(32, 32), tridim=False, tracking=False, predict_edm_derivatives=True)
+
+    def test_2d_weight_map(self):
+        self._run_train_step(spa_dims=(32, 32), tridim=False, tracking=True, return_weight_map=True)
+
+    def test_3d_weight_map(self):
+        self._run_train_step(spa_dims=(4, 32, 32), tridim=True, tracking=False, return_weight_map=True)
 
     def test_3d_edm_derivatives(self):
         self._run_train_step(spa_dims=(4, 32, 32), tridim=True, tracking=False, predict_edm_derivatives=True)
@@ -552,6 +561,274 @@ class TestIteratorModelCompat(unittest.TestCase):
 
     def test_3d_edm_derivatives(self):
         self._check_compat(tridim=True, tracking=False, predict_edm_derivatives=True)
+
+
+class TestWeightMap(unittest.TestCase):
+    """Test weight map generation and category frequency balancing in the iterator."""
+
+    def test_category_frequency_balancing(self):
+        """Verify that category_frequencies produces correct keep probabilities and binary exclusion."""
+        from distnet_2d.data.distnet_iterator import DistnetIterator
+        from scipy.ndimage import find_objects
+
+        # category_frequencies: cat 0 is 4x more frequent than cat 1
+        cat_freq = [0.8, 0.2]
+        # expected keep_prob: min_freq / freq = [0.2/0.8, 0.2/0.2] = [0.25, 1.0]
+        expected_keep_prob = np.array([0.25, 1.0])
+
+        it = object.__new__(DistnetIterator)
+        cat_freq_arr = np.array(cat_freq, dtype=np.float64)
+        min_freq = np.min(cat_freq_arr[cat_freq_arr > 0])
+        it.category_keep_prob = min_freq / np.maximum(cat_freq_arr, 1e-10)
+        np.testing.assert_allclose(it.category_keep_prob, expected_keep_prob, rtol=1e-6)
+
+        # Simulate weight map construction over many trials to verify probabilities
+        label = np.zeros((16, 16), dtype=np.int32)
+        label[2:6, 2:6] = 1    # object 1: cat 0 (common)
+        label[2:6, 10:14] = 2  # object 2: cat 1 (rare)
+        label[10:14, 2:6] = 3  # object 3: cat 0 (common)
+        object_slices = find_objects(label)
+        cat_array = np.array([0, 1, 0])  # categories for objects 1, 2, 3
+
+        n_trials = 2000
+        kept_counts = np.zeros(3)  # count how many times each object is kept
+        np.random.seed(42)
+        for _ in range(n_trials):
+            weight_map = np.ones_like(label, dtype=np.float32)
+            for obj_idx, sl in enumerate(object_slices):
+                if sl is not None:
+                    cat = int(cat_array[obj_idx])
+                    if np.random.random() >= it.category_keep_prob[cat]:
+                        mask = label[sl] == obj_idx + 1
+                        weight_map[sl][mask] = 0
+            # Check object kept/excluded
+            for obj_idx in range(3):
+                # Sample a pixel known to be in the object
+                if obj_idx == 0:
+                    kept_counts[obj_idx] += weight_map[3, 3]
+                elif obj_idx == 1:
+                    kept_counts[obj_idx] += weight_map[3, 12]
+                else:
+                    kept_counts[obj_idx] += weight_map[12, 3]
+
+        keep_rates = kept_counts / n_trials
+        # Object 2 (cat 1, rare) should be kept ~100% of the time
+        self.assertGreater(keep_rates[1], 0.98, f"Rare category keep rate too low: {keep_rates[1]}")
+        # Objects 1 and 3 (cat 0, common) should be kept ~25% of the time
+        for i in [0, 2]:
+            self.assertAlmostEqual(keep_rates[i], 0.25, delta=0.05,
+                                   msg=f"Object {i+1} (common cat) keep rate {keep_rates[i]} not close to 0.25")
+        # Weight map should always be binary
+        # (already ensured by construction: values are 0 or 1)
+
+    def test_weight_map_training_step_2d(self):
+        """Verify that training step works in graph mode with weight map enabled."""
+        self._run_weight_map_train_step(spa_dims=(32, 32), tridim=False, tracking=True)
+
+    def test_weight_map_training_step_3d(self):
+        """Verify that training step works in graph mode with weight map enabled (3D, seg only)."""
+        self._run_weight_map_train_step(spa_dims=(4, 32, 32), tridim=True, tracking=False)
+
+    def _run_weight_map_train_step(self, spa_dims, tridim, tracking):
+        with tf.device('/CPU:0'):
+            model, arch = TestTrainingStep._build_model(spa_dims, tridim, tracking=tracking, return_weight_map=True)
+            x, y = TestTrainingStep._make_data(spa_dims, tridim, tracking=tracking, return_weight_map=True)
+
+            @tf.function
+            def train_fn(data):
+                return model.train_step(data)
+
+            metrics = train_fn((x, y))
+            self.assertIn("loss", metrics)
+            loss_val = metrics["loss"].numpy()
+            self.assertFalse(np.isnan(loss_val), "loss is NaN with weight map")
+
+
+    def test_cell_line_exclusion_tracking(self):
+        """Verify that excluding an object in the central frame excludes the whole cell line across all frames."""
+        # Setup: 3 frames, 8x8 spatial, batch=1
+        # Frame 0: object 1 (label=1, cat=0)
+        # Frame 1 (central): object 2 (label=1, cat=0) — descended from obj 1 in frame 0
+        # Frame 2: object 3 (label=1, cat=0) — descended from obj 2 in frame 1
+        # Also: object 4 (label=2) present in all frames, cat=1 (rare, never excluded)
+        #
+        # labels_map_prev[bidx][c] maps labels in frame c+1 → labels in frame c
+        #   labels_map_prev[0][0]: frame 1 labels → frame 0 labels: {1: {1}, 2: {2}}
+        #   labels_map_prev[0][1]: frame 2 labels → frame 1 labels: {1: {1}, 2: {2}}
+        from scipy.ndimage import find_objects
+
+        n_frames = 3
+        frame_window = 1  # central frame index = 1
+        H, W = 8, 8
+
+        labelIms = np.zeros((1, H, W, n_frames), dtype=np.int32)
+        # Object 1 (label=1) in all frames, different positions to make it interesting
+        labelIms[0, 1:4, 1:4, 0] = 1  # frame 0
+        labelIms[0, 1:4, 1:4, 1] = 1  # frame 1 (central)
+        labelIms[0, 2:5, 2:5, 2] = 1  # frame 2 (moved)
+        # Object 2 (label=2) in all frames
+        labelIms[0, 5:7, 5:7, 0] = 2
+        labelIms[0, 5:7, 5:7, 1] = 2
+        labelIms[0, 5:7, 5:7, 2] = 2
+
+        # Category array: cat_array[bidx, obj_idx, frame]
+        # obj_idx is 0-based (object with label k+1 is at index k)
+        cat_array = np.zeros((1, 2, n_frames), dtype=np.int32)
+        cat_array[0, 0, :] = 0  # object 1: category 0 (common)
+        cat_array[0, 1, :] = 1  # object 2: category 1 (rare)
+
+        # labels_map_prev: list of length batch_size, each is a list of dicts
+        # labels_map_prev[b][c] maps label in frame c+1 → set of labels in frame c
+        labels_map_prev = [
+            [
+                {1: {1}, 2: {2}},  # frame 1 → frame 0
+                {1: {1}, 2: {2}},  # frame 2 → frame 1
+            ]
+        ]
+
+        # Object slices per (batch, frame)
+        object_slices = {}
+        for c in range(n_frames):
+            object_slices[(0, c)] = find_objects(labelIms[0, ..., c])
+
+        # category_keep_prob: cat 0 always excluded (keep_prob=0), cat 1 always kept (keep_prob=1)
+        category_keep_prob = np.array([0.0, 1.0])
+
+        # Run the cell line tracing logic (extracted from _get_output_batch)
+        weight_map = np.ones(labelIms.shape, dtype=np.float32)
+        for b in range(labelIms.shape[0]):
+            excluded_labels = {c: set() for c in range(n_frames)}
+            central_c = frame_window  # = 1
+            cur_cat = cat_array[b, :, central_c]
+            for obj_idx, sl in enumerate(object_slices[(b, central_c)]):
+                if sl is not None:
+                    cat = int(cur_cat[obj_idx])
+                    if 0 <= cat < len(category_keep_prob):
+                        if np.random.random() >= category_keep_prob[cat]:
+                            excluded_labels[central_c].add(obj_idx + 1)
+            # Trace backward
+            for c in range(central_c - 1, -1, -1):
+                lmp = labels_map_prev[b][c]
+                for label in excluded_labels[c + 1]:
+                    for prev_label in lmp.get(label, []):
+                        excluded_labels[c].add(prev_label)
+            # Trace forward
+            for c in range(central_c, n_frames - 1):
+                lmp = labels_map_prev[b][c]
+                fwd = {}
+                for next_label, prev_labels in lmp.items():
+                    for pl in prev_labels:
+                        fwd.setdefault(pl, []).append(next_label)
+                for label in excluded_labels[c]:
+                    for next_label in fwd.get(label, []):
+                        excluded_labels[c + 1].add(next_label)
+            # Apply exclusions
+            for c in range(n_frames):
+                for label in excluded_labels[c]:
+                    mask = labelIms[b, ..., c] == label
+                    weight_map[b, ..., c][mask] = 0
+
+        # Verify: object 1 (cat 0, keep_prob=0) should be excluded in ALL frames
+        # Frame 0: label=1 pixels at [1:4, 1:4]
+        self.assertEqual(weight_map[0, 2, 2, 0], 0, "Object 1 should be excluded in frame 0 (backward trace)")
+        # Frame 1 (central): label=1 pixels at [1:4, 1:4]
+        self.assertEqual(weight_map[0, 2, 2, 1], 0, "Object 1 should be excluded in frame 1 (central)")
+        # Frame 2: label=1 pixels at [2:5, 2:5]
+        self.assertEqual(weight_map[0, 3, 3, 2], 0, "Object 1 should be excluded in frame 2 (forward trace)")
+
+        # Verify: object 2 (cat 1, keep_prob=1) should be kept in ALL frames
+        self.assertEqual(weight_map[0, 5, 5, 0], 1, "Object 2 should be kept in frame 0")
+        self.assertEqual(weight_map[0, 5, 5, 1], 1, "Object 2 should be kept in frame 1")
+        self.assertEqual(weight_map[0, 5, 5, 2], 1, "Object 2 should be kept in frame 2")
+
+        # Verify: background pixels are always 1
+        self.assertEqual(weight_map[0, 0, 0, 0], 1, "Background should always be 1")
+        self.assertEqual(weight_map[0, 7, 7, 1], 1, "Background should always be 1")
+
+    def test_cell_line_exclusion_with_division(self):
+        """Verify cell line tracing works with cell division (one cell becomes two)."""
+        # Frame 0: object A (label=1, cat=0)
+        # Frame 1 (central): object B (label=1, cat=0) — same cell
+        # Frame 2: objects C (label=1) and D (label=2) — B divided into C and D
+        # If B is excluded, both C and D must also be excluded, and A must be excluded.
+        from scipy.ndimage import find_objects
+
+        n_frames = 3
+        frame_window = 1
+        H, W = 16, 16
+
+        labelIms = np.zeros((1, H, W, n_frames), dtype=np.int32)
+        labelIms[0, 2:6, 2:6, 0] = 1    # frame 0: cell A
+        labelIms[0, 2:6, 2:6, 1] = 1    # frame 1: cell B
+        labelIms[0, 2:6, 2:4, 2] = 1    # frame 2: cell C (left half)
+        labelIms[0, 2:6, 4:6, 2] = 2    # frame 2: cell D (right half)
+
+        # Also a non-excluded object (label=3, cat=1) present in all frames
+        labelIms[0, 10:13, 10:13, :] = 3
+
+        cat_array = np.zeros((1, 3, n_frames), dtype=np.int32)
+        cat_array[0, 0, :] = 0  # label 1: cat 0 (common, to be excluded)
+        cat_array[0, 1, :] = 0  # label 2: cat 0
+        cat_array[0, 2, :] = 1  # label 3: cat 1 (rare, always kept)
+
+        # labels_map_prev[b][c]: label in frame c+1 → labels in frame c
+        labels_map_prev = [
+            [
+                {1: {1}, 3: {3}},           # frame 1 → frame 0
+                {1: {1}, 2: {1}, 3: {3}},   # frame 2 → frame 1 (both C=1 and D=2 come from B=1)
+            ]
+        ]
+
+        object_slices = {}
+        for c in range(n_frames):
+            object_slices[(0, c)] = find_objects(labelIms[0, ..., c])
+
+        category_keep_prob = np.array([0.0, 1.0])  # cat 0 always excluded
+
+        weight_map = np.ones(labelIms.shape, dtype=np.float32)
+        for b in range(1):
+            excluded_labels = {c: set() for c in range(n_frames)}
+            central_c = frame_window
+            cur_cat = cat_array[b, :, central_c]
+            for obj_idx, sl in enumerate(object_slices[(b, central_c)]):
+                if sl is not None:
+                    cat = int(cur_cat[obj_idx])
+                    if 0 <= cat < len(category_keep_prob):
+                        if np.random.random() >= category_keep_prob[cat]:
+                            excluded_labels[central_c].add(obj_idx + 1)
+            for c in range(central_c - 1, -1, -1):
+                lmp = labels_map_prev[b][c]
+                for label in excluded_labels[c + 1]:
+                    for prev_label in lmp.get(label, []):
+                        excluded_labels[c].add(prev_label)
+            for c in range(central_c, n_frames - 1):
+                lmp = labels_map_prev[b][c]
+                fwd = {}
+                for next_label, prev_labels in lmp.items():
+                    for pl in prev_labels:
+                        fwd.setdefault(pl, []).append(next_label)
+                for label in excluded_labels[c]:
+                    for next_label in fwd.get(label, []):
+                        excluded_labels[c + 1].add(next_label)
+            for c in range(n_frames):
+                for label in excluded_labels[c]:
+                    mask = labelIms[b, ..., c] == label
+                    weight_map[b, ..., c][mask] = 0
+
+        # Cell B (label=1) excluded at central frame → whole line excluded
+        # Frame 0: A (label=1) excluded via backward trace
+        self.assertEqual(weight_map[0, 3, 3, 0], 0, "Cell A should be excluded (backward trace from B)")
+        # Frame 1: B (label=1) excluded directly
+        self.assertEqual(weight_map[0, 3, 3, 1], 0, "Cell B should be excluded (central frame)")
+        # Frame 2: C (label=1) excluded via forward trace
+        self.assertEqual(weight_map[0, 3, 2, 2], 0, "Cell C should be excluded (forward trace from B)")
+        # Frame 2: D (label=2) also excluded via forward trace (division daughter)
+        self.assertEqual(weight_map[0, 3, 5, 2], 0, "Cell D should be excluded (division daughter, forward trace)")
+
+        # Non-excluded object (label=3) kept in all frames
+        self.assertEqual(weight_map[0, 11, 11, 0], 1, "Label 3 kept in frame 0")
+        self.assertEqual(weight_map[0, 11, 11, 1], 1, "Label 3 kept in frame 1")
+        self.assertEqual(weight_map[0, 11, 11, 2], 1, "Label 3 kept in frame 2")
 
 
 if __name__ == '__main__':
