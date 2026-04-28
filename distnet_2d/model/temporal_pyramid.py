@@ -300,6 +300,7 @@ class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
         except:
             pass
         self.T = features_level0_shape[0]
+        self.single_level = len(features_level1_shape) == len(global_features_shape)
         n_conv = len(self.prev_idx)
         # Create T independent 1x1 convolutions
         conv_op = tf.keras.layers.Conv3D if len(global_features_shape) == 5 else tf.keras.layers.Conv2D
@@ -351,7 +352,7 @@ class TemporalFeaturePairReconstructor(InferenceLayer, tf.keras.layers.Layer):
         idx_list = self.inference_idx if not training and self.inference_mode and self.inference_idx is not None else list(range(len(self.prev_idx)))
         for i, p, n in zip(idx_list, prev_idx_list, next_idx_list):
             input_list = [features_level0[p], features_level0[n], global_features]
-            if p+1 == n: # successive pairs: also use 1st level idx
+            if p+1 == n and not self.single_level: # successive pairs: also use 1st level idx
                 idx_p = self.feature_level1_indices[p]
                 idx_n = self.feature_level1_indices[n]
                 idx = list(set(idx_p) & set(idx_n))
