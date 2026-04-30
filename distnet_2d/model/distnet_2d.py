@@ -46,9 +46,11 @@ class DiSTNetModel(tf.keras.Model):
                  gradient_accumulation_steps:int=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False, scale_losses:bool = True,
                  tridimensional_mode:bool=False,
+                 return_weight_map:bool=False,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.tridimensional_mode = tridimensional_mode
+        self.return_weight_map = return_weight_map
         self.edm_weight = edm_loss_weight
         if edm_class_weights is not None:
             assert len(edm_class_weights) == 2 , "edm_class_weights must be a list of len 2"
@@ -192,8 +194,17 @@ class DiSTNetModel(tf.keras.Model):
         category_weight = self.category_weight / float(n_frames) # manual sum at loss computation so no mean reduction
         fgbg_category_weight = self.category_weight
         n_displacement = 3 if self.tridimensional_mode else 2
-        expected_true_outputs = int(edm_weight>0) + int(center_weight>0) + n_displacement*int(displacement_weight>0) + int(link_multiplicity_weight>0) + int(category_weight>0)
+        expected_true_outputs = int(edm_weight>0) + int(center_weight>0) + n_displacement*int(displacement_weight>0) + int(link_multiplicity_weight>0) + int(category_weight>0) + int(self.return_weight_map)
         assert len(y) == expected_true_outputs , f"invalid number of output. Expected: {expected_true_outputs} actual {len(y)}"
+
+        # extract exclusion weight map if present (last output from iterator)
+        if self.return_weight_map:
+            exclusion_weight_map = y[-1]  # [B, (Z,) Y, X, n_frames]
+            exclusion_weight_map_pairs = self._to_pair_mask(exclusion_weight_map) if fw > 0 else None  # [B, (Z,) Y, X, n_pair_channels]
+            y = y[:-1]
+        else:
+            exclusion_weight_map = None
+            exclusion_weight_map_pairs = None
 
         cdm_idx = int(edm_weight > 0)
         lm_idx = cdm_idx + int(center_weight > 0) + n_displacement * int(displacement_weight > 0)
@@ -239,6 +250,8 @@ class DiSTNetModel(tf.keras.Model):
             # edm
             if edm_weight>0: # TODO: add a "heat map" mode: predict a gaussian
                 weight_map = tf.where(cell_mask, self.edm_class_weights[1], self.edm_class_weights[0]) if self.edm_class_weights is not None else None
+                if exclusion_weight_map is not None:
+                    weight_map = exclusion_weight_map if weight_map is None else weight_map * exclusion_weight_map
                 edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, true_dz=true_edm_dz, pred_dy=edm_dy, pred_dx=edm_dx, pred_dz=edm_dz, der_mask=None, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
                 edm_loss = tf.reduce_mean(edm_loss)
                 losses["EDM"] = edm_loss
@@ -249,12 +262,14 @@ class DiSTNetModel(tf.keras.Model):
                 if self.cdm_loss_radius <= 0: # GCDM mode : interior of cell
                     cdm_mask = cell_mask # was cell_mask
                     cdm_mask_interior = cell_mask_interior
-                    weight_map = None # tf.where(cell_mask, 1., 0.01) # instead of mask: force predict 0 outside
+                    weight_map = exclusion_weight_map
                 else: # ECDM mode: also exterior of object
                     cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
                     half_rad = tf.cast(self.cdm_loss_radius, cdm_true.dtype) / tf.cast(2, cdm_true.dtype)
                     weight_map = tf.math.exp(- tf.math.square(cdm_true / half_rad ) )
                     weight_map = tf.where(cdm_mask, weight_map, 0)
+                    if exclusion_weight_map is not None:
+                        weight_map = weight_map * exclusion_weight_map
                     cdm_mask_interior = cdm_mask
                 center_loss = compute_loss_derivatives(cdm_true, cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, pred_dz=cdm_dz, mask=cdm_mask, der_mask=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
@@ -266,11 +281,14 @@ class DiSTNetModel(tf.keras.Model):
                     cat_pred = y_pred[..., :-2]
                     fg_bg_pred = y_pred[..., -2:]
                     fg_bg_true = tf.cast(cell_mask, fg_bg_pred.dtype)
-                    losses["FgBg"] = tf.reduce_mean(self.fgbg_category_loss(fg_bg_true, fg_bg_pred))
+                    fg_bg_loss = self.fgbg_category_loss(fg_bg_true, fg_bg_pred)
+                    if exclusion_weight_map is not None:
+                        fg_bg_loss = fg_bg_loss * exclusion_weight_map
+                    losses["FgBg"] = tf.reduce_mean(fg_bg_loss)
                     loss_weights["FgBg"] = fgbg_category_weight
                 else:
                     cat_pred = y_pred[cat_idx]
-                cat_loss = self._compute_category_loss(y[cat_idx], cat_pred, cell_mask, n_frames)
+                cat_loss = self._compute_category_loss(y[cat_idx], cat_pred, cell_mask, n_frames, weight_map=exclusion_weight_map)
                 losses["category"] = tf.reduce_mean(cat_loss)
                 loss_weights["category"] = category_weight
 
@@ -279,10 +297,15 @@ class DiSTNetModel(tf.keras.Model):
                 displacement_losses = self._compute_displacement_loss(y, y_pred, cell_mask)
                 if self.tridimensional_mode:
                     loss_dZ, loss_dY, loss_dX = displacement_losses
+                    if exclusion_weight_map_pairs is not None:
+                        loss_dZ = loss_dZ * exclusion_weight_map_pairs
                     losses["dZ"] = tf.reduce_mean(loss_dZ)
                     loss_weights["dZ"] = displacement_weight
                 else:
                     loss_dY, loss_dX = displacement_losses
+                if exclusion_weight_map_pairs is not None:
+                    loss_dY = loss_dY * exclusion_weight_map_pairs
+                    loss_dX = loss_dX * exclusion_weight_map_pairs
                 losses["dY"] = tf.reduce_mean(loss_dY)
                 loss_weights["dY"] = displacement_weight
                 losses["dX"] = tf.reduce_mean(loss_dX)
@@ -290,7 +313,7 @@ class DiSTNetModel(tf.keras.Model):
 
             # link_multiplicity loss
             if link_multiplicity_weight>0:
-                link_multiplicity_loss = self._compute_link_multiplicity_loss(y[lm_idx], y_pred[lm_idx], n_frame_pairs, n_fp_mul)
+                link_multiplicity_loss = self._compute_link_multiplicity_loss(y[lm_idx], y_pred[lm_idx], n_frame_pairs, n_fp_mul, weight_map_pairs=exclusion_weight_map_pairs)
                 link_multiplicity_loss = tf.reduce_mean(link_multiplicity_loss)
                 losses["link_multiplicity"] = link_multiplicity_loss
                 loss_weights["link_multiplicity"] = link_multiplicity_weight
@@ -394,43 +417,54 @@ class DiSTNetModel(tf.keras.Model):
             dx = tf.where(mask, y_pred[idx+1], 0)
             return self.displacement_loss(y[idx], dy), self.displacement_loss(y[idx+1], dx)
 
-    def _to_pair_mask(self, cell_mask):
+
+    def _to_pair_mask(self, frame_mask):
+        """
+            Convert frame-based tensor [B,(Z,)Y,X,n_frames] to pair-based [B,(Z,)Y,X,n_pair_channels].
+        """
         fw = self.frame_window
-        mask = cell_mask[..., 1:]
-        mask_next = cell_mask[..., :-1] if self.predict_fw else None
+        mask = frame_mask[..., 1:]
+        mask_next = frame_mask[..., :-1] if self.predict_fw else None
         if self.long_term and fw > 1:
-            tile_shape = [1] * (len(cell_mask.shape) - 1) + [fw - 1]
+            tile_shape = [1] * (len(frame_mask.shape) - 1) + [fw - 1]
             mask_center = tf.tile(mask[..., fw - 1:fw], tile_shape)
             if self.predict_fw:
                 if self.future_frames:
                     mask = tf.concat(
-                        [mask, mask_center, cell_mask[..., -fw + 1:], mask_next, cell_mask[..., :fw - 1], mask_center],
+                        [mask, mask_center, frame_mask[..., -fw + 1:], mask_next, frame_mask[..., :fw - 1], mask_center],
                         -1)
                 else:
-                    mask = tf.concat([mask, mask_center, mask_next, cell_mask[..., :fw - 1]], -1)
+                    mask = tf.concat([mask, mask_center, mask_next, frame_mask[..., :fw - 1]], -1)
             else:
                 if self.future_frames:
-                    mask = tf.concat([mask, mask_center, cell_mask[..., -fw + 1:]], -1)
+                    mask = tf.concat([mask, mask_center, frame_mask[..., -fw + 1:]], -1)
                 else:
                     mask = tf.concat([mask, mask_center], -1)
         elif self.predict_fw:
             mask = tf.concat([mask, mask_next], -1)
         return mask
 
-    def _compute_category_loss(self, y, y_pred, cell_mask, n_frames): # TODO use split instead of loop
+
+    def _compute_category_loss(self, y, y_pred, cell_mask, n_frames, weight_map=None): # TODO use split instead of loop
         cn = self.category_number
         cat_loss = 0.
         for i in range(n_frames):
             cat_pred_inside = tf.where(cell_mask[..., i:i + 1], y_pred[..., cn * i:cn * i + cn], 1)
-            cat_loss = cat_loss + self.category_loss(y[..., i:i + 1], cat_pred_inside)
+            frame_loss = self.category_loss(y[..., i:i + 1], cat_pred_inside)
+            if weight_map is not None:
+                frame_loss = frame_loss * weight_map[..., i:i + 1]
+            cat_loss = cat_loss + frame_loss
         return cat_loss
 
-    def _compute_link_multiplicity_loss(self, y, y_pred, n_frame_pairs, n_fp_mul): # TODO use split instead of loop
+    def _compute_link_multiplicity_loss(self, y, y_pred, n_frame_pairs, n_fp_mul, weight_map_pairs=None): # TODO use split instead of loop
         lm_loss = 0.
         for i in range(n_frame_pairs * n_fp_mul):
             inside_mask = tf.math.greater(y[..., i:i + 1], 0)
             lm_pred_inside = tf.where(inside_mask, y_pred[..., 3 * i:3 * i + 3], 1)
-            lm_loss = lm_loss + self.link_multiplicity_loss(y[..., i:i + 1], lm_pred_inside)
+            pair_loss = self.link_multiplicity_loss(y[..., i:i + 1], lm_pred_inside)
+            if weight_map_pairs is not None:
+                pair_loss = pair_loss * weight_map_pairs[..., i:i + 1]
+            lm_loss = lm_loss + pair_loss
         return lm_loss
 
     def set_inference(self, inference:bool=True):

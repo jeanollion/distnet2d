@@ -156,26 +156,34 @@ def compute_loss_derivatives(true, pred, loss_fun, true_dy=None, true_dx=None, p
             else:
                 true_lap = der.laplacian(derivatives=[true_dy, true_dx])
         if pred_lap is not None:
-            loss = loss + loss_fun(true_lap, _apply_der_mask(pred_lap, der_mask))
+            der_loss = loss_fun(true_lap, _apply_der_mask(pred_lap, der_mask))
+            loss = loss + (der_loss * weight_map if weight_map is not None else der_loss)
         if laplacian_loss:
             if tridim:
                 lap_pred = der.laplacian(derivatives=[pred_dz_comp, pred_dy_comp, pred_dx_comp])
             else:
                 lap_pred = der.laplacian(derivatives=[pred_dy_comp, pred_dx_comp])
-            loss = loss + loss_fun(true_lap, _apply_der_mask(lap_pred, der_mask))
+            der_loss = loss_fun(true_lap, _apply_der_mask(lap_pred, der_mask))
+            loss = loss + (der_loss * weight_map if weight_map is not None else der_loss)
         # explicit predicted derivatives (from network heads)
         if pred_dz is not None:
-            loss = loss + loss_fun(true_dz, _apply_der_mask(pred_dz, der_mask))
+            der_loss = loss_fun(true_dz, _apply_der_mask(pred_dz, der_mask))
+            loss = loss + (der_loss * weight_map if weight_map is not None else der_loss)
         if pred_dy is not None:
-            loss = loss + loss_fun(true_dy, _apply_der_mask(pred_dy, der_mask))
+            der_loss = loss_fun(true_dy, _apply_der_mask(pred_dy, der_mask))
+            loss = loss + (der_loss * weight_map if weight_map is not None else der_loss)
         if pred_dx is not None:
-            loss = loss + loss_fun(true_dx, _apply_der_mask(pred_dx, der_mask))
+            der_loss = loss_fun(true_dx, _apply_der_mask(pred_dx, der_mask))
+            loss = loss + (der_loss * weight_map if weight_map is not None else der_loss)
         # derivative loss (from computed derivatives of prediction)
         if derivative_loss:
             if tridim:
-                loss = loss + loss_fun(true_dz, _apply_der_mask(pred_dz_comp, der_mask))
-            loss = loss + loss_fun(true_dy, _apply_der_mask(pred_dy_comp, der_mask))
-            loss = loss + loss_fun(true_dx, _apply_der_mask(pred_dx_comp, der_mask))
+                der_loss = loss_fun(true_dz, _apply_der_mask(pred_dz_comp, der_mask))
+                loss = loss + (der_loss * weight_map if weight_map is not None else der_loss)
+            der_loss = loss_fun(true_dy, _apply_der_mask(pred_dy_comp, der_mask))
+            loss = loss + (der_loss * weight_map if weight_map is not None else der_loss)
+            der_loss = loss_fun(true_dx, _apply_der_mask(pred_dx_comp, der_mask))
+            loss = loss + (der_loss * weight_map if weight_map is not None else der_loss)
     return loss
 
 
