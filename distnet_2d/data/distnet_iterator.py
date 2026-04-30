@@ -52,9 +52,9 @@ class DistnetIterator(TrackingIterator):
                  return_next_displacement:bool = True,
                  frame_aware:bool=False,  # return actual frame (relative to central frame)
                  tridimensional_mode:bool=False,
-                 z_radius:float=1., # to take into account anisotropy: z radius considering that x=y=1
-                 return_weight_map:bool=False,
-                 category_frequencies:list=None,  # per-category frequencies for balanced sampling. length = number of categories
+                 z_radius:float=1.,  # to take into account anisotropy: z radius considering that x=y=1
+                 return_loss_mask:bool=False,
+                 category_keep_probabilities:list=None,  # per-category probability for balanced sampling. length = number of categories
                  **kwargs):
         assert len(channel_keywords)>=2, 'keyword should contain at least 2 elements in this order: grayscale input images, object labels, [other grayscale input images]'
         if frame_window == 0:
@@ -112,15 +112,10 @@ class DistnetIterator(TrackingIterator):
         else:
             self.label_input_channels = []
         self.z_radius = z_radius
-        self.return_weight_map = return_weight_map
-        if category_frequencies is not None:
-            category_frequencies = np.array(category_frequencies, dtype=np.float64)
-            assert category_frequencies.ndim == 1, "category_frequencies must be a 1D array"
-            min_freq = np.min(category_frequencies[category_frequencies > 0])
-            # keep_probability: rarest category = 1.0, more common categories < 1.0
-            self.category_keep_prob = min_freq / np.maximum(category_frequencies, 1e-10)
-        else:
-            self.category_keep_prob = None
+        self.return_exclusion_weight_map = return_loss_mask
+        self.category_keep_probabilities=category_keep_probabilities
+        if return_loss_mask :
+            print(f"Category keep probabilities: {category_keep_probabilities}")
         super().__init__(dataset=dataset,
                          channel_keywords=channel_keywords,
                          array_keywords = array_keywords,
@@ -487,9 +482,9 @@ class DistnetIterator(TrackingIterator):
             if self.tracking:
                 all_channels.append(prevLabelArr)
             all_channels.append(centerArr)
-        if self.return_weight_map:
+        if self.return_exclusion_weight_map:
             weight_map = np.ones(labelIms.shape, dtype=np.float32)
-            if self.category_keep_prob is not None and self.category_array_idx >= 0:
+            if self.category_keep_probabilities is not None and self.category_array_idx >= 0:
                 if self.tracking and labels_map_prev is not None:
                     # Tracking mode: exclude whole cell lines
                     for b in range(labelIms.shape[0]):
@@ -501,8 +496,8 @@ class DistnetIterator(TrackingIterator):
                         for obj_idx, sl in enumerate(object_slices[(b, central_c)]):
                             if sl is not None:
                                 cat = int(cur_cat[obj_idx])
-                                if 0 <= cat < len(self.category_keep_prob):
-                                    if np.random.random() >= self.category_keep_prob[cat]:
+                                if 0 <= cat < len(self.category_keep_probabilities):
+                                    if np.random.random() >= self.category_keep_probabilities[cat]:
                                         excluded_labels[central_c].add(obj_idx + 1)
                         # Trace backward: labels_map_prev[bidx][c] maps labels in frame c+1 → frame c
                         for c in range(central_c - 1, -1, -1):
@@ -535,8 +530,8 @@ class DistnetIterator(TrackingIterator):
                             for obj_idx, sl in enumerate(object_slices[(b, c)]):
                                 if sl is not None:
                                     cat = int(cur_cat[obj_idx])
-                                    if 0 <= cat < len(self.category_keep_prob):
-                                        if np.random.random() >= self.category_keep_prob[cat]:
+                                    if 0 <= cat < len(self.category_keep_probabilities):
+                                        if np.random.random() >= self.category_keep_probabilities[cat]:
                                             mask = labelIms[b, ..., c][sl] == obj_idx + 1
                                             weight_map[b, ..., c][sl][mask] = 0
             all_channels.append(weight_map)

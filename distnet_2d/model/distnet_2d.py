@@ -200,7 +200,7 @@ class DiSTNetModel(tf.keras.Model):
         # extract exclusion weight map if present (last output from iterator)
         if self.return_weight_map:
             exclusion_weight_map = y[-1]  # [B, (Z,) Y, X, n_frames]
-            exclusion_weight_map_pairs = self._to_pair_channels(exclusion_weight_map) if fw > 0 else None  # [B, (Z,) Y, X, n_pair_channels]
+            exclusion_weight_map_pairs = self._to_pair_mask(exclusion_weight_map) if fw > 0 else None  # [B, (Z,) Y, X, n_pair_channels]
             y = y[:-1]
         else:
             exclusion_weight_map = None
@@ -417,35 +417,33 @@ class DiSTNetModel(tf.keras.Model):
             dx = tf.where(mask, y_pred[idx+1], 0)
             return self.displacement_loss(y[idx], dy), self.displacement_loss(y[idx+1], dx)
 
-    def _to_pair_channels(self, tensor):
-        """Convert frame-based tensor [B,(Z,)Y,X,n_frames] to pair-based [B,(Z,)Y,X,n_pair_channels].
 
-        Uses the same frame selection logic as _to_pair_mask.
+    def _to_pair_mask(self, frame_mask):
+        """
+            Convert frame-based tensor [B,(Z,)Y,X,n_frames] to pair-based [B,(Z,)Y,X,n_pair_channels].
         """
         fw = self.frame_window
-        result = tensor[..., 1:]
-        next_part = tensor[..., :-1] if self.predict_fw else None
+        mask = frame_mask[..., 1:]
+        mask_next = frame_mask[..., :-1] if self.predict_fw else None
         if self.long_term and fw > 1:
-            tile_shape = [1] * (len(tensor.shape) - 1) + [fw - 1]
-            center = tf.tile(result[..., fw - 1:fw], tile_shape)
+            tile_shape = [1] * (len(frame_mask.shape) - 1) + [fw - 1]
+            mask_center = tf.tile(mask[..., fw - 1:fw], tile_shape)
             if self.predict_fw:
                 if self.future_frames:
-                    result = tf.concat(
-                        [result, center, tensor[..., -fw + 1:], next_part, tensor[..., :fw - 1], center],
+                    mask = tf.concat(
+                        [mask, mask_center, frame_mask[..., -fw + 1:], mask_next, frame_mask[..., :fw - 1], mask_center],
                         -1)
                 else:
-                    result = tf.concat([result, center, next_part, tensor[..., :fw - 1]], -1)
+                    mask = tf.concat([mask, mask_center, mask_next, frame_mask[..., :fw - 1]], -1)
             else:
                 if self.future_frames:
-                    result = tf.concat([result, center, tensor[..., -fw + 1:]], -1)
+                    mask = tf.concat([mask, mask_center, frame_mask[..., -fw + 1:]], -1)
                 else:
-                    result = tf.concat([result, center], -1)
+                    mask = tf.concat([mask, mask_center], -1)
         elif self.predict_fw:
-            result = tf.concat([result, next_part], -1)
-        return result
+            mask = tf.concat([mask, mask_next], -1)
+        return mask
 
-    def _to_pair_mask(self, cell_mask):
-        return self._to_pair_channels(cell_mask)
 
     def _compute_category_loss(self, y, y_pred, cell_mask, n_frames, weight_map=None): # TODO use split instead of loop
         cn = self.category_number
