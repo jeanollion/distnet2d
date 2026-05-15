@@ -214,15 +214,6 @@ class DiSTNetModel(tf.keras.Model):
             if training and self.use_grad_acc: # for batch norm handling
                 self.gradient_accumulator.post_forward_step()
             n_der = n_displacement  # 3 for 3D (dz,dy,dx), 2 for 2D (dy,dx)
-            if edm_weight > 0:
-                if self.predict_edm_derivatives:
-                    edm_splits = tf.split(y_pred[0], num_or_size_splits=n_der + 1, axis=-1)
-                    edm = edm_splits[0]
-                    edm_dz = edm_splits[1] if self.tridimensional_mode else None
-                    edm_dy = edm_splits[-2]
-                    edm_dx = edm_splits[-1]
-                else:
-                    edm, edm_dz, edm_dy, edm_dx = y_pred[0], None, None, None
             if self.predict_edm_derivatives or self.edm_derivative_loss:
                 true_edm_splits = tf.split(y[0], num_or_size_splits=n_der + 1, axis=-1)
                 true_edm = true_edm_splits[0]
@@ -231,47 +222,60 @@ class DiSTNetModel(tf.keras.Model):
                 true_edm_dx = true_edm_splits[-1]
             else:
                 true_edm, true_edm_dz, true_edm_dy, true_edm_dx = y[0], None, None, None
-            if center_weight > 0:
-                if self.predict_cdm_derivatives:
-                    cdm_splits = tf.split(y_pred[1], num_or_size_splits=n_der + 1, axis=-1)
-                    cdm = cdm_splits[0]
-                    cdm_dz = cdm_splits[1] if self.tridimensional_mode else None
-                    cdm_dy = cdm_splits[-2]
-                    cdm_dx = cdm_splits[-1]
-                else:
-                    cdm, cdm_dz, cdm_dy, cdm_dx = y_pred[1], None, None, None
 
             # compute loss
             losses = dict()
             loss_weights = dict()
-
             cell_mask = tf.math.greater(true_edm, 0)
             cell_mask_interior = tf.math.greater(true_edm, 1) if self.cdm_derivative_loss or self.predict_cdm_derivatives else None
             # edm
             if edm_weight>0: # TODO: add a "heat map" mode: predict a gaussian
+                if self.predict_edm_derivatives:
+                    edm_splits = tf.split(y_pred[0], num_or_size_splits=n_der + 1, axis=-1)
+                    edm = edm_splits[0]
+                    edm_dz = edm_splits[1] if self.tridimensional_mode else None
+                    edm_dy = edm_splits[-2]
+                    edm_dx = edm_splits[-1]
+                else:
+                    edm, edm_dz, edm_dy, edm_dx = y_pred[0], None, None, None
                 weight_map = tf.where(cell_mask, self.edm_class_weights[1], self.edm_class_weights[0]) if self.edm_class_weights is not None else None
                 if exclusion_weight_map is not None:
                     weight_map = exclusion_weight_map if weight_map is None else weight_map * exclusion_weight_map
-                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, true_dz=true_edm_dz, pred_dy=edm_dy, pred_dx=edm_dx, pred_dz=edm_dz, der_mask=None, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
+                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dz=true_edm_dz, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dz=edm_dz, pred_dy=edm_dy, pred_dx=edm_dx, der_mask=None, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
                 edm_loss = tf.reduce_mean(edm_loss)
                 losses["EDM"] = edm_loss
                 loss_weights["EDM"] = edm_weight
             # center
             if center_weight>0:
-                cdm_true = y[cdm_idx]
+                if self.predict_cdm_derivatives:
+                    cdm_splits = tf.split(y_pred[cdm_idx], num_or_size_splits=n_der + 1, axis=-1)
+                    cdm = cdm_splits[0]
+                    cdm_dz = cdm_splits[1] if self.tridimensional_mode else None
+                    cdm_dy = cdm_splits[-2]
+                    cdm_dx = cdm_splits[-1]
+                else:
+                    cdm, cdm_dz, cdm_dy, cdm_dx = y_pred[cdm_idx], None, None, None
+                if False and (self.predict_cdm_derivatives or self.cdm_derivative_loss): # CDM derivatives computed on the fly
+                    true_cdm_splits = tf.split(y[1], num_or_size_splits=n_der + 1, axis=-1)
+                    true_cdm = true_cdm_splits[0]
+                    true_cdm_dz = true_cdm_splits[1] if self.tridimensional_mode else None
+                    true_cdm_dy = true_cdm_splits[-2]
+                    true_cdm_dx = true_cdm_splits[-1]
+                else:
+                    true_cdm, true_cdm_dz, true_cdm_dy, true_cdm_dx = y[1], None, None, None
                 if self.cdm_loss_radius <= 0: # GCDM mode : interior of cell
                     cdm_mask = cell_mask # was cell_mask
                     cdm_mask_interior = cell_mask_interior
                     weight_map = exclusion_weight_map
                 else: # ECDM mode: also exterior of object
-                    cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
-                    half_rad = tf.cast(self.cdm_loss_radius, cdm_true.dtype) / tf.cast(2, cdm_true.dtype)
-                    weight_map = tf.math.exp(- tf.math.square(cdm_true / half_rad ) )
+                    cdm_mask = tf.math.less_equal(true_cdm, self.cdm_loss_radius)
+                    half_rad = tf.cast(self.cdm_loss_radius, true_cdm.dtype) / tf.cast(2, true_cdm.dtype)
+                    weight_map = tf.math.exp(- tf.math.square(true_cdm / half_rad ) )
                     weight_map = tf.where(cdm_mask, weight_map, 0)
                     if exclusion_weight_map is not None:
                         weight_map = weight_map * exclusion_weight_map
                     cdm_mask_interior = cdm_mask
-                center_loss = compute_loss_derivatives(cdm_true, cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, pred_dz=cdm_dz, mask=cdm_mask, der_mask=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
+                center_loss = compute_loss_derivatives(true_cdm, cdm, self.cdm_loss, true_dz=true_cdm_dz, true_dy=true_cdm_dy, true_dx=true_cdm_dx, pred_dz=cdm_dz, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, der_mask=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
                 losses["CDM"] = center_loss
                 loss_weights["CDM"] = center_weight

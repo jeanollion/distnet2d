@@ -4,7 +4,7 @@ from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun
     FP
 
 
-def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = False, segmentation:bool=True, tracking:bool=True):
+def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = False, segmentation:bool=True, tracking:bool=True, tridimensional_mode:bool=False):
     """
     return metric function for disnet2D
     assumes iterator in return_central_only= True mode (thus framewindow = 1 and next = true)
@@ -18,7 +18,7 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
     -------
 
     """
-
+    # TODO : check that those functions work in 3D
     coord_distance_function = coord_distance_fun(max=True, sqrt=True, pop_fraction=0.25)
     spa_max_fun = get_argmax_2d_by_object_fun()
     mean_fun = get_mean_by_object_fun()
@@ -29,18 +29,19 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
     def fun(args):
         if category:
             if tracking:
-                edm, gdcm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+                edm, gdcm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
             elif segmentation:
                 edm, gdcm, cat, true_edm, true_cat, labels, true_center_ob = args
             else:
                 cat, labels, true_center_ob = args
         else:
             if tracking:
-                edm, gdcm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+                edm, gdcm, dZ, dY, dX, lm, true_edm, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
             else:
                 edm, gdcm, true_edm, labels, true_center_ob = args
-
-        labels = tf.transpose(labels, perm=[2, 0, 1])  # (1, Y, X)
+        perm3 = [3, 0, 1, 2] if tridimensional_mode else [2, 0, 1]
+        perm4 = [3, 0, 1, 2, 4] if tridimensional_mode else [2, 0, 1, 3]
+        labels = tf.transpose(labels, perm=perm3)  # (1, Y, X) / (1, Z, Y, X)
         ids, sizes, N = get_label_size(labels, max_objects_number)  # (1, N), (1, N)
         ids = ids[0]
         sizes = sizes[0]
@@ -48,18 +49,18 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
 
         if segmentation:
             zero = tf.cast(0, edm.dtype)
-            edm = tf.transpose(edm, perm=[2, 0, 1])  # (1, Y, X)
-            gdcm = tf.transpose(gdcm, perm=[2, 0, 1])  # (1, Y, X)
+            edm = tf.transpose(edm, perm=perm3)  # 1, Y, X / 1, Z, Y, X
+            gdcm = tf.transpose(gdcm, perm=perm3)  # 1, Y, X / 1, Z, Y, X
             center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, tf.cast(scale / 2., tf.float32))))
         if tracking:
-            motion_shape = tf.shape(dY) # Y, X, T
-            lm = tf.reshape(lm, shape=tf.concat([motion_shape[:2], motion_shape[-1:], [3]], 0)) # Y, X, T, 3
-            lm = tf.transpose(lm, perm=[2, 0, 1, 3])  # T, Y, X, 3
-            true_lm = tf.transpose(true_lm, perm=[2, 0, 1]) # T, Y, X
-            dYX = tf.stack([dY, dX], -1)  # Y, X, T, 2
-            dYX = tf.transpose(dYX, perm=[2, 0, 1, 3])  # T, Y, X, 2
-            true_dYX = tf.stack([true_dY, true_dX], -1)  # Y, X, T, 2
-            true_dYX = tf.transpose(true_dYX, perm=[2, 0, 1, 3])  # T, Y, X, 2
+            motion_shape = tf.shape(dY) # Y, X, T / Z, Y, T
+            lm = tf.reshape(lm, shape=tf.concat([motion_shape[:2], motion_shape[-1:], [3]], 0)) # Y, X, T, 3 / Z, X, T, 3
+            lm = tf.transpose(lm, perm=perm4)  # T, Y, X, 3 / T, Z, Y, X, 3
+            true_lm = tf.transpose(true_lm, perm=perm3) # T, Y, X
+            dYX = tf.stack([dZ, dY, dX], -1) if tridimensional_mode else tf.stack([dY, dX], -1)  # Y, X, T, 2/ Z, Y, X, T, 3
+            dYX = tf.transpose(dYX, perm=perm4)  # T, Y, X, 2 / T, Z, Y, X, 3
+            true_dYX = tf.stack([true_dZ, true_dY, true_dX], -1) if tridimensional_mode else tf.stack([true_dY, true_dX], -1)  # Y, X, T, 2 / Z, Y, X, T, 3
+            true_dYX = tf.transpose(true_dYX, perm=perm4)  # T, Y, X, 2 / T, Z, Y, X, 3
 
         metrics = []
         if segmentation:
@@ -123,8 +124,8 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
         return tf.stack(metrics)
     if category:
         if tracking:
-            def metrics_fun(edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
-                return tf.map_fn(fun, (edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
+            def metrics_fun(edm, gcdm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
+                return tf.map_fn(fun, (edm, gcdm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
         elif segmentation:
             def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
                 return tf.map_fn(fun, (edm, gcdm, cat, true_edm, true_cat, labels, true_center_array), fn_output_signature=tf.float32)
@@ -133,8 +134,8 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
                 return tf.map_fn(fun, (cat, labels, true_center_array), fn_output_signature=tf.float32)
     else:
         if tracking:
-            def metrics_fun(edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
-                return tf.map_fn(fun, (edm, gcdm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
+            def metrics_fun(edm, gcdm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
+                return tf.map_fn(fun, (edm, gcdm, dZ, dY, dX, lm, true_edm, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
         else:
             def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
                 return tf.map_fn(fun, (edm, gcdm, true_edm, labels, true_center_array), fn_output_signature=tf.float32)
