@@ -146,7 +146,7 @@ class DistnetIterator(TrackingIterator):
         if "aug_frame_subsampling" in parameters:
             self.aug_frame_subsampling = parameters["aug_frame_subsampling"]
 
-    def _get_batch_by_channel(self, index_array, perform_augmentation, input_only=False, perform_elasticdeform=True, perform_tiling=True, **kwargs):
+    def _get_batch_by_channel(self, index_array, perform_augmentation, input_only=False, perform_elasticdeform:bool=True, perform_tiling:bool=True, perform_channels_postprocessing:bool=True, **kwargs):
         if self.frame_window > 0:
             if self.aug_remove_prob>0 and random() < self.aug_remove_prob:
                 n_frames = 0 # flag that aug_remove = true
@@ -169,7 +169,7 @@ class DistnetIterator(TrackingIterator):
             #print(f"frame increment: {frames}")
             kwargs.update({"frame_increment_per_channel": {c:frames for c in range(len(self.channel_keywords)) if c!=1 }})
             kwargs.update({"frame_increment_per_array": {self.category_array_idx : frames}})
-        batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False, **kwargs)
+        batch_by_channel, aug_param_array, ref_channel = super()._get_batch_by_channel(index_array, perform_augmentation, input_only, perform_elasticdeform=False, perform_tiling=False, perform_channels_postprocessing=False, **kwargs)
         ref_shape = batch_by_channel[0].shape
         for c in range(1, len(self.channel_keywords)):
             assert batch_by_channel[c].shape[:3] == ref_shape[:3], f"channel {c} shape is {batch_by_channel[c].shape} differs from channel 0: {ref_shape}"
@@ -203,6 +203,8 @@ class DistnetIterator(TrackingIterator):
             batch_by_channel[1] = batch_by_channel[1][..., sel]
             if self.return_image_index:
                 batch_by_channel["image_idx"] = batch_by_channel["image_idx"][:, sel]
+        if perform_channels_postprocessing and self.channels_postprocessing_function is not None:
+            self.channels_postprocessing_function(batch_by_channel)
 
         if perform_elasticdeform or perform_tiling: ## elastic deform do not support float16 type -> temporarily convert to float32
             channels = [c for c in batch_by_channel.keys() if not isinstance(c, str) and c>=0]
