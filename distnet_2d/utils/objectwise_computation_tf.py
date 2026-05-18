@@ -65,49 +65,53 @@ def get_soft_argmax_2d_by_object_fun(Y, X, beta=1e2):
     return sam
 
 
-def get_argmax_2d_by_object_fun(nan=float('NaN')):
+def get_argmax_2d_by_object_fun(nan=float('NaN'), tridimensional_mode:bool=False):
     nan = tf.cast(nan, tf.float32)
-    def fun(data, mask, size): # (Y, X)
+    ndim = 3 if tridimensional_mode else 2
+    nan_return = tf.stack([nan] * ndim)
+    def fun(data, mask, size): # (Y, X) or (Z, Y, X)
         def non_null():
             shape = tf.shape(data)
             data_masked = tf.math.multiply_no_nan(data, mask)
-            data_masked = tf.reshape(data_masked, (-1,)) # (X * Y,)
+            data_masked = tf.reshape(data_masked, (-1,)) # (Y*X,) or (Z*Y*X,)
             idx_max = tf.math.argmax(data_masked, axis=0, output_type=tf.dtypes.int32)
             return tf.cast(tf.unravel_index(idx_max, dims=shape), tf.float32)
-        return tf.cond(tf.math.equal(size, 0), lambda:tf.stack([nan, nan]), non_null) # when no values should return nan
+        return tf.cond(tf.math.equal(size, 0), lambda: nan_return, non_null) # when no values should return nan
     return fun
 
 
-def get_mean_by_object_fun(nan=float('NaN'), channel_axis:bool=True):
+def get_mean_by_object_fun(nan=float('NaN'), channel_axis:bool=True, tridimensional_mode:bool=False):
     nan = tf.cast(nan, tf.float32)
+    spatial_axes = [0, 1, 2] if tridimensional_mode else [0, 1]
     if channel_axis:
-        def fun(data, mask, size): # (Y, X, C), (Y, X), (1,) -> (C,)
+        def fun(data, mask, size): # (Y, X, C) or (Z, Y, X, C), mask: spatial, size: scalar -> (C,)
             mask = tf.expand_dims(mask, -1)
             null = lambda: tf.repeat(nan, repeats=tf.shape(data)[-1])
-            non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False), tf.cast(size, tf.float32))
+            non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=spatial_axes, keepdims=False), tf.cast(size, tf.float32))
             return tf.cond(tf.math.equal(size, 0), null, non_null)
         return fun
     else:
-        def fun(data, mask, size): # (Y, X), (Y, X), (1,) -> (1,)
+        def fun(data, mask, size): # (Y, X) or (Z, Y, X), mask: same, size: scalar -> scalar
             null = lambda: nan
-            non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False), tf.cast(size, tf.float32))
+            non_null = lambda: tf.math.divide(tf.reduce_sum(tf.math.multiply_no_nan(data, mask), axis=spatial_axes, keepdims=False), tf.cast(size, tf.float32))
             return tf.cond(tf.math.equal(size, 0), null, non_null)
         return fun
 
 
-def get_max_by_object_fun(nan=float('NaN'), channel_axis:bool=True):
+def get_max_by_object_fun(nan=float('NaN'), channel_axis:bool=True, tridimensional_mode:bool=False):
     nan = tf.cast(nan, tf.float32)
+    spatial_axes = [0, 1, 2] if tridimensional_mode else [0, 1]
     if channel_axis:
-        def fun(data, mask, size):  # (Y, X, C), (Y, X), (1,) -> (1,)
+        def fun(data, mask, size):  # (Y, X, C) or (Z, Y, X, C) -> (C,)
             mask = tf.expand_dims(mask, -1)
             null = lambda: tf.repeat(nan, repeats=tf.shape(data)[-1])
-            non_null = lambda: tf.reduce_max(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False)
+            non_null = lambda: tf.reduce_max(tf.math.multiply_no_nan(data, mask), axis=spatial_axes, keepdims=False)
             return tf.cond(tf.math.equal(size, 0), null, non_null)
         return fun
     else:
-        def fun(data, mask, size):  # (Y, X), (Y, X), (1,)
+        def fun(data, mask, size):  # (Y, X) or (Z, Y, X) -> scalar
             null = lambda: nan
-            non_null = lambda: tf.reduce_max(tf.math.multiply_no_nan(data, mask), axis=[0, 1], keepdims=False)
+            non_null = lambda: tf.reduce_max(tf.math.multiply_no_nan(data, mask), axis=spatial_axes, keepdims=False)
             return tf.cond(tf.math.equal(size, 0), null, non_null)
         return fun
 
@@ -211,17 +215,63 @@ def _generate_kernel(sizeY, sizeX, C=1, O=0):
     return kernel
 
 
-def IoU(true_foreground, pred_foreground, tolerance_radius:float=0):
-    true_foreground_dil = _dilate_mask(true_foreground, radius=tolerance_radius, symmetric_padding=True) if tolerance_radius>=1 else true_foreground
+# Convolution / morphology modes ------------------------------------------------
+# Used by _convolve, _dilate_mask, _erode_mask, _compute_contours, IoU and FP
+# to choose the spatial behavior without runtime rank inspection (graph safe).
+#
+# CONV_2D:        image (B, Y, X) and kernel (KY, KX) — plain 2D conv
+# CONV_3D:        image (B, Z, Y, X) and kernel (KZ, KY, KX) — true 3D conv
+# CONV_2D_SLICEWISE: image (B, Z, Y, X) and kernel (KY, KX) — 2D conv applied
+#                independently to each Z-slice. Used for anisotropic 3D data
+#                where Z connectivity should not be implied (e.g. IoU/FP).
+CONV_2D = "2d"
+CONV_3D = "3d"
+CONV_2D_SLICEWISE = "2d_slicewise"
+
+
+def _auto_mode(image, mode):
+    """Resolve the convolution `mode` against an input tensor.
+
+    Graph-compatible: `len(image.shape)` is the static rank known at trace time,
+    never a runtime value, and the returned value is a Python string (not a tensor).
+
+    Resolution rules:
+      - rank 3 (B, Y, X):       always CONV_2D (mode=CONV_3D/SLICEWISE is invalid).
+      - rank 4 (B, Z, Y, X):
+          * mode=None       → CONV_3D       (default for 3D inputs)
+          * mode=CONV_2D    → CONV_2D_SLICEWISE  (compatibility escalation)
+          * mode=CONV_2D_SLICEWISE → CONV_2D_SLICEWISE
+          * mode=CONV_3D    → CONV_3D
+    """
+    rank = len(image.shape)
+    if rank == 3:
+        return CONV_2D
+    if rank == 4:
+        if mode is None or mode == CONV_3D:
+            return CONV_3D
+        if mode == CONV_2D:
+            return CONV_2D_SLICEWISE  # compatibility escalation
+        return mode  # honor explicit CONV_2D_SLICEWISE
+    raise ValueError(f"Cannot auto-detect convolution mode for tensor of rank {rank}; expected 3 or 4")
+
+
+def IoU(true_foreground, pred_foreground, tolerance_radius:float=0, mode:str=None):
+    mode = _auto_mode(true_foreground, mode)
+    if tolerance_radius>=1:
+        true_foreground_dil = _dilate_mask(true_foreground, radius=tolerance_radius, symmetric_padding=True, mode=mode)
+    else:
+        true_foreground_dil = true_foreground
     intersection = tf.math.count_nonzero(tf.math.logical_and(true_foreground_dil, pred_foreground), keepdims=False)
     union = tf.math.count_nonzero(tf.math.logical_or(true_foreground, pred_foreground), keepdims=False)
     return tf.cond(tf.math.equal(union, tf.cast(0, union.dtype)), lambda: tf.cast(1., tf.float32), lambda: tf.math.divide(tf.cast(intersection, tf.float32), tf.cast(union, tf.float32)))  # if union is null -> metric is 1
 
 
-def FP(true_foreground, pred_foreground, rate:bool = False, tolerance_radius:float=0):
+def FP(true_foreground, pred_foreground, rate:bool = False, tolerance_radius:float=0, mode:str=None):
+    mode = _auto_mode(true_foreground, mode)
     true_background = tf.math.logical_not(true_foreground)
     false_positives = tf.logical_and(pred_foreground, true_background)
-    false_positives = _erode_mask(false_positives, radius=tolerance_radius, symmetric_padding=False) if tolerance_radius>=1 else false_positives
+    if tolerance_radius>=1:
+        false_positives = _erode_mask(false_positives, radius=tolerance_radius, symmetric_padding=False, mode=mode)
     fp = tf.math.count_nonzero(false_positives, keepdims=False)
     if rate: # FPR
         tn = tf.math.count_nonzero(true_background, keepdims=False) # for FRP
@@ -232,21 +282,39 @@ def FP(true_foreground, pred_foreground, rate:bool = False, tolerance_radius:flo
         return tf.math.divide(tf.cast(fp, tf.float32), tf.cast(npix, tf.float32))
 
 
-def _dilate_mask(maskBYX, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=True):
+def _dilate_mask(mask, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=True, mode:str=None):
+    """Dilate a mask.
+
+    Input shape depends on `mode`:
+      - CONV_2D:           (B, Y, X)
+      - CONV_3D:           (B, Z, Y, X) — true 3D dilation (spherical kernel)
+      - CONV_2D_SLICEWISE: (B, Z, Y, X) — 2D dilation applied per Z-slice
+
+    When `mode=None`, auto-detects from the static rank: 3 → CONV_2D, 4 → CONV_3D.
+    """
     assert 0<=tolerance<0.5
-    maskBYX = tf.cast(maskBYX, tf.int32)
-    ker, rad = circular_kernel(radius)
+    mask = tf.cast(mask, tf.int32)
+    mode = _auto_mode(mask, mode)
+    if mode == CONV_3D:
+        ker, rad = spherical_kernel(radius)
+    else:
+        ker, rad = circular_kernel(radius)
     thld = tf.math.floor(tf.cast(tf.math.reduce_sum(ker), tf.float32) * tf.cast(tolerance, tf.float32))
-    conv = _convolve(maskBYX, ker, rad, symmetric_padding=symmetric_padding)
+    conv = _convolve(mask, ker, rad, symmetric_padding=symmetric_padding, mode=mode)
     return tf.math.greater(conv, tf.cast(thld, tf.int32))
 
 
-def _erode_mask(maskBYX, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=False):
+def _erode_mask(mask, radius:float=1.5, tolerance:float=0.25, symmetric_padding:bool=False, mode:str=None):
+    """Erode a mask. See `_dilate_mask` for the meaning of `mode`."""
     assert 0 <= tolerance < 0.5
-    maskBYX = tf.cast(maskBYX, tf.int32)
-    ker, rad = circular_kernel(radius)
+    mask = tf.cast(mask, tf.int32)
+    mode = _auto_mode(mask, mode)
+    if mode == CONV_3D:
+        ker, rad = spherical_kernel(radius)
+    else:
+        ker, rad = circular_kernel(radius)
     thld = tf.math.ceil(tf.cast(tf.math.reduce_sum(ker), tf.float32) * tf.cast(1 - tolerance, tf.float32))
-    conv = _convolve(maskBYX, ker, rad, symmetric_padding=symmetric_padding)
+    conv = _convolve(mask, ker, rad, symmetric_padding=symmetric_padding, mode=mode)
     return tf.math.greater_equal(conv, tf.cast(thld, tf.int32))
 
 
@@ -278,21 +346,107 @@ def circular_kernel(radius: float) :
     return kernel, radius_int
 
 
-def _contour_IoU_fun(pred_contour, mask, size):
-    true_contours = _compute_contours(mask)
-    return IoU(true_contours, pred_contour)
+def spherical_kernel(radius: float):
+    """
+    Create a spherical 3D kernel of ones with a given float radius.
+    Args:
+        radius: The radius of the sphere (float).
+    Returns:
+        A 3D TensorFlow tensor representing the spherical kernel (dtype: tf.int32).
+    """
+    radius_int = tf.cast(radius, tf.int32)
+    diameter = tf.cast(2 * radius_int + 1, tf.int32)
+    center = diameter // 2
+
+    z = tf.range(-center, diameter - center, dtype=tf.float32)
+    y = tf.range(-center, diameter - center, dtype=tf.float32)
+    x = tf.range(-center, diameter - center, dtype=tf.float32)
+    z_grid, y_grid, x_grid = tf.meshgrid(z, y, x, indexing='ij')
+
+    distance = tf.math.sqrt(x_grid**2 + y_grid**2 + z_grid**2)
+
+    kernel = tf.zeros((diameter, diameter, diameter), dtype=tf.int32)
+    kernel = tf.where(distance <= radius, tf.ones_like(kernel, dtype=tf.int32), kernel)
+
+    return kernel, radius_int
 
 
-def _compute_contours(maskBYX):
-    kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]])
-    conv = _convolve(maskBYX, kernel, 1, symmetric_padding=True)
-    return tf.math.greater(conv, tf.cast(0, conv.dtype)) # detect at least one zero in the neighborhood
+def _contour_IoU_fun(pred_contour, mask, size, mode:str=None):
+    true_contours = _compute_contours(mask, mode=mode)
+    return IoU(true_contours, pred_contour, mode=mode)
 
 
-def _convolve(imageBYX, kernel, radius, symmetric_padding:bool):
-    if symmetric_padding:
-        imageBYX = tf.pad(imageBYX, [[0, 0], [radius, radius], [radius, radius]], 'SYMMETRIC')
-    imageBYX = imageBYX[..., tf.newaxis]
-    kernel = tf.cast(kernel, imageBYX.dtype)
-    conv = tf.nn.conv2d(imageBYX, kernel[:, :, tf.newaxis, tf.newaxis], strides=1, padding='VALID' if symmetric_padding else "SAME")
-    return conv[..., 0]
+def _compute_contours(mask, mode:str=None):
+    """Compute contours via a Laplacian-like kernel.
+
+    Input shape depends on `mode`:
+      - CONV_2D:           (B, Y, X)            kernel 3x3
+      - CONV_3D:           (B, Z, Y, X)         kernel 3x3x3 (26-connected Laplacian)
+      - CONV_2D_SLICEWISE: (B, Z, Y, X)         kernel 3x3 applied per Z-slice
+
+    When `mode=None`, auto-detects from the static rank: 3 → CONV_2D, 4 → CONV_3D.
+    """
+    mode = _auto_mode(mask, mode)
+    mask = tf.cast(mask, tf.int32)
+    if mode == CONV_3D:
+        # 26-connected 3D Laplacian: center has 26 neighbors at +/- 1 in each axis
+        kernel = np.full((3, 3, 3), -1, dtype=np.int32)
+        kernel[1, 1, 1] = 26
+    else:
+        kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.int32)
+    conv = _convolve(mask, kernel, 1, symmetric_padding=True, mode=mode)
+    return tf.math.greater(conv, tf.cast(0, conv.dtype))
+
+
+def _convolve(image, kernel, radius, symmetric_padding:bool, mode:str=None):
+    """Convolve image with kernel. Graph-compatible.
+
+      - CONV_2D:           image (B, Y, X),    kernel (KY, KX),  tf.nn.conv2d
+      - CONV_3D:           image (B, Z, Y, X), kernel (KZ, KY, KX), tf.nn.conv3d
+      - CONV_2D_SLICEWISE: image (B, Z, Y, X), kernel (KY, KX),
+                           reshape to (B*Z, Y, X) → conv2d → reshape back
+
+    When `mode=None`, auto-detects from the static rank: 3 → CONV_2D, 4 → CONV_3D.
+    """
+    mode = _auto_mode(image, mode)
+    if mode == CONV_2D:
+        if symmetric_padding:
+            image = tf.pad(image, [[0, 0], [radius, radius], [radius, radius]], 'SYMMETRIC')
+        image = image[..., tf.newaxis]
+        kernel = tf.cast(kernel, image.dtype)
+        conv = tf.nn.conv2d(image, kernel[:, :, tf.newaxis, tf.newaxis], strides=1,
+                            padding='VALID' if symmetric_padding else "SAME")
+        return conv[..., 0]
+    if mode == CONV_2D_SLICEWISE:
+        # Fold Z into the batch dim → standard 2D conv per slice
+        shape = tf.shape(image)
+        B, Z = shape[0], shape[1]
+        # (B, Z, Y, X) → (B*Z, Y, X) via dynamic reshape
+        flat = tf.reshape(image, tf.concat([[B * Z], shape[2:]], 0))
+        if symmetric_padding:
+            flat = tf.pad(flat, [[0, 0], [radius, radius], [radius, radius]], 'SYMMETRIC')
+        flat = flat[..., tf.newaxis]
+        kernel_2d = tf.cast(kernel, flat.dtype)
+        conv = tf.nn.conv2d(flat, kernel_2d[:, :, tf.newaxis, tf.newaxis], strides=1,
+                            padding='VALID' if symmetric_padding else "SAME")
+        conv = conv[..., 0]
+        # (B*Z, Y, X) → (B, Z, Y, X)
+        return tf.reshape(conv, tf.concat([[B, Z], tf.shape(conv)[1:]], 0))
+    if mode == CONV_3D:
+        if symmetric_padding:
+            image = tf.pad(image, [[0, 0], [radius, radius], [radius, radius], [radius, radius]], 'SYMMETRIC')
+        image = image[..., tf.newaxis]
+        orig_dtype = image.dtype
+        if orig_dtype.is_floating:
+            kernel_3d = tf.cast(kernel, orig_dtype)[:, :, :, tf.newaxis, tf.newaxis]
+            conv = tf.nn.conv3d(image, kernel_3d, strides=[1, 1, 1, 1, 1],
+                                padding='VALID' if symmetric_padding else 'SAME')
+        else:
+            # conv3d only supports float types: cast in, round + cast back for ints
+            image_f = tf.cast(image, tf.float32)
+            kernel_3d = tf.cast(kernel, tf.float32)[:, :, :, tf.newaxis, tf.newaxis]
+            conv = tf.nn.conv3d(image_f, kernel_3d, strides=[1, 1, 1, 1, 1],
+                                padding='VALID' if symmetric_padding else 'SAME')
+            conv = tf.cast(tf.math.round(conv), orig_dtype)
+        return conv[..., 0]
+    raise ValueError(f"Unknown convolution mode: {mode!r}")

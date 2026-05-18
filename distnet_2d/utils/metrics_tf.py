@@ -1,7 +1,7 @@
 import tensorflow as tf
 from .objectwise_computation_tf import get_max_by_object_fun, coord_distance_fun, get_argmax_2d_by_object_fun, \
     get_mean_by_object_fun, get_label_size, IoU, objectwise_compute, objectwise_compute_channel, reduce_pop_size, \
-    FP
+    FP, CONV_2D
 
 
 def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = False, segmentation:bool=True, tracking:bool=True, tridimensional_mode:bool=False):
@@ -18,13 +18,15 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
     -------
 
     """
-    # TODO : check that those functions work in 3D
     coord_distance_function = coord_distance_fun(max=True, sqrt=True, pop_fraction=0.25)
-    spa_max_fun = get_argmax_2d_by_object_fun()
-    mean_fun = get_mean_by_object_fun()
-    max_fun = get_max_by_object_fun(nan=1., channel_axis=False)
-    mean_fun_true_lm = get_mean_by_object_fun(nan=1., channel_axis=False)
-    mean_fun_lm = get_mean_by_object_fun(nan=0.)
+    spa_max_fun = get_argmax_2d_by_object_fun(tridimensional_mode=tridimensional_mode)
+    mean_fun = get_mean_by_object_fun(tridimensional_mode=tridimensional_mode)
+    max_fun = get_max_by_object_fun(nan=1., channel_axis=False, tridimensional_mode=tridimensional_mode)
+    mean_fun_true_lm = get_mean_by_object_fun(nan=1., channel_axis=False, tridimensional_mode=tridimensional_mode)
+    mean_fun_lm = get_mean_by_object_fun(nan=0., tridimensional_mode=tridimensional_mode)
+    # 3D data is typically anisotropic — request 2D behavior; _auto_mode
+    # escalates CONV_2D to CONV_2D_SLICEWISE for 3D inputs automatically.
+    conv_mode = CONV_2D
 
     def fun(args):
         if category:
@@ -53,25 +55,25 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
             gdcm = tf.transpose(gdcm, perm=perm3)  # 1, Y, X / 1, Z, Y, X
             center_values = tf.math.exp(-tf.math.square(tf.math.divide(gdcm, tf.cast(scale / 2., tf.float32))))
         if tracking:
-            motion_shape = tf.shape(dY) # Y, X, T / Z, Y, T
-            lm = tf.reshape(lm, shape=tf.concat([motion_shape[:2], motion_shape[-1:], [3]], 0)) # Y, X, T, 3 / Z, X, T, 3
-            lm = tf.transpose(lm, perm=perm4)  # T, Y, X, 3 / T, Z, Y, X, 3
-            true_lm = tf.transpose(true_lm, perm=perm3) # T, Y, X
-            dYX = tf.stack([dZ, dY, dX], -1) if tridimensional_mode else tf.stack([dY, dX], -1)  # Y, X, T, 2/ Z, Y, X, T, 3
-            dYX = tf.transpose(dYX, perm=perm4)  # T, Y, X, 2 / T, Z, Y, X, 3
-            true_dYX = tf.stack([true_dZ, true_dY, true_dX], -1) if tridimensional_mode else tf.stack([true_dY, true_dX], -1)  # Y, X, T, 2 / Z, Y, X, T, 3
-            true_dYX = tf.transpose(true_dYX, perm=perm4)  # T, Y, X, 2 / T, Z, Y, X, 3
+            motion_shape = tf.shape(dY)  # 2D: (Y, X, T) / 3D: (Z, Y, X, T)
+            lm = tf.reshape(lm, shape=tf.concat([motion_shape, [3]], 0))  # 2D: (Y, X, T, 3) / 3D: (Z, Y, X, T, 3)
+            lm = tf.transpose(lm, perm=perm4)  # 2D: (T, Y, X, 3) / 3D: (T, Z, Y, X, 3)
+            true_lm = tf.transpose(true_lm, perm=perm3) # T, Y, X / T, Z, Y, X
+            dYX = tf.stack([dZ, dY, dX], -1) if tridimensional_mode else tf.stack([dY, dX], -1)  # 2D: (Y, X, T, 2) / 3D: (Z, Y, X, T, 3)
+            dYX = tf.transpose(dYX, perm=perm4)  # 2D: (T, Y, X, 2) / 3D: (T, Z, Y, X, 3)
+            true_dYX = tf.stack([true_dZ, true_dY, true_dX], -1) if tridimensional_mode else tf.stack([true_dY, true_dX], -1)
+            true_dYX = tf.transpose(true_dYX, perm=perm4)  # 2D: (T, Y, X, 2) / 3D: (T, Z, Y, X, 3)
 
         metrics = []
         if segmentation:
             # EDM : foreground/background IoU
             pred_foreground = tf.math.greater(edm, tf.cast(0, edm.dtype))
             true_foreground = tf.math.greater(labels, tf.cast(0, labels.dtype))
-            edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=0) #
+            edm_IoU = IoU(true_foreground, pred_foreground, tolerance_radius=0, mode=conv_mode) #
             metrics.append(edm_IoU)
 
             # Surface-based False Positive Density (FPD) based on EDM
-            fp = FP(true_foreground, pred_foreground, rate=False, tolerance_radius = 1 + scale / 6.) # higher tolerance_radius radius to focus on instances
+            fp = FP(true_foreground, pred_foreground, rate=False, tolerance_radius = 1 + scale / 6., mode=conv_mode) # higher tolerance_radius radius to focus on instances
             metrics.append(-fp)
 
             # contour IoU : problem: true positive contours are usually not precise enough.

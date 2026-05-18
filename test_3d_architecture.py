@@ -831,5 +831,514 @@ class TestWeightMap(unittest.TestCase):
         self.assertEqual(weight_map[0, 11, 11, 2], 1, "Label 3 kept in frame 2")
 
 
+class TestObjectwiseHelpers3D(unittest.TestCase):
+    """Tests for objectwise_computation_tf helpers in 3D mode."""
+
+    def test_argmax_by_object_2d(self):
+        from distnet_2d.utils.objectwise_computation_tf import get_argmax_2d_by_object_fun
+        fun = get_argmax_2d_by_object_fun(tridimensional_mode=False)
+        data = tf.constant([[0., 1., 0.], [0., 0., 5.], [0., 0., 0.]], dtype=tf.float32)  # max at (1, 2)
+        mask = tf.ones_like(data)
+        out = fun(data, mask, 9).numpy()
+        np.testing.assert_array_equal(out, [1.0, 2.0])
+
+    def test_argmax_by_object_3d(self):
+        from distnet_2d.utils.objectwise_computation_tf import get_argmax_2d_by_object_fun
+        fun = get_argmax_2d_by_object_fun(tridimensional_mode=True)
+        data = np.zeros((4, 8, 8), dtype=np.float32)
+        data[2, 3, 5] = 10.0  # max at (z=2, y=3, x=5)
+        mask = np.ones_like(data)
+        out = fun(tf.constant(data), tf.constant(mask), 4 * 8 * 8).numpy()
+        np.testing.assert_array_equal(out, [2.0, 3.0, 5.0])
+
+    def test_argmax_by_object_3d_nan_return(self):
+        from distnet_2d.utils.objectwise_computation_tf import get_argmax_2d_by_object_fun
+        fun = get_argmax_2d_by_object_fun(tridimensional_mode=True)
+        data = tf.zeros((4, 8, 8), dtype=tf.float32)
+        mask = tf.zeros_like(data)
+        out = fun(data, mask, 0).numpy()
+        self.assertEqual(out.shape, (3,))  # 3D should return 3 nan values
+        self.assertTrue(np.all(np.isnan(out)))
+
+    def test_mean_by_object_2d(self):
+        from distnet_2d.utils.objectwise_computation_tf import get_mean_by_object_fun
+        fun = get_mean_by_object_fun(channel_axis=False, tridimensional_mode=False)
+        data = tf.constant([[1., 2., 3.], [4., 5., 6.], [7., 8., 9.]], dtype=tf.float32)
+        mask = tf.cast(tf.constant([[1, 1, 0], [1, 1, 0], [0, 0, 0]]), tf.float32)
+        out = fun(data, mask, 4).numpy()
+        np.testing.assert_allclose(out, (1 + 2 + 4 + 5) / 4)
+
+    def test_mean_by_object_3d(self):
+        from distnet_2d.utils.objectwise_computation_tf import get_mean_by_object_fun
+        fun = get_mean_by_object_fun(channel_axis=False, tridimensional_mode=True)
+        data = np.arange(2 * 3 * 3, dtype=np.float32).reshape(2, 3, 3)
+        mask = np.zeros_like(data)
+        mask[0, 0, 0] = 1
+        mask[1, 2, 2] = 1
+        out = fun(tf.constant(data), tf.constant(mask), 2).numpy()
+        expected = (data[0, 0, 0] + data[1, 2, 2]) / 2
+        np.testing.assert_allclose(out, expected)
+
+    def test_mean_by_object_3d_with_channel(self):
+        from distnet_2d.utils.objectwise_computation_tf import get_mean_by_object_fun
+        fun = get_mean_by_object_fun(channel_axis=True, tridimensional_mode=True)
+        # data: (Z, Y, X, C) = (2, 2, 2, 3)
+        data = np.arange(2 * 2 * 2 * 3, dtype=np.float32).reshape(2, 2, 2, 3)
+        mask = np.ones((2, 2, 2), dtype=np.float32)
+        out = fun(tf.constant(data), tf.constant(mask), 8).numpy()
+        self.assertEqual(out.shape, (3,))  # one mean per channel
+        expected = data.mean(axis=(0, 1, 2))
+        np.testing.assert_allclose(out, expected)
+
+    def test_max_by_object_3d(self):
+        from distnet_2d.utils.objectwise_computation_tf import get_max_by_object_fun
+        fun = get_max_by_object_fun(channel_axis=False, tridimensional_mode=True)
+        data = np.zeros((3, 4, 5), dtype=np.float32)
+        data[1, 2, 3] = 42.0
+        mask = np.ones_like(data)
+        out = fun(tf.constant(data), tf.constant(mask), 60).numpy()
+        np.testing.assert_allclose(out, 42.0)
+
+    def test_objectwise_compute_3d(self):
+        from distnet_2d.utils.objectwise_computation_tf import (
+            get_label_size, get_mean_by_object_fun, objectwise_compute
+        )
+        labels = np.zeros((1, 2, 3, 3), dtype=np.int32)  # (1, Z, Y, X)
+        labels[0, 0, 0:2, 0:2] = 1  # object 1
+        labels[0, 1, 1:3, 1:3] = 2  # object 2
+        data = np.ones((2, 3, 3), dtype=np.float32) * 5.0  # (Z, Y, X)
+        ids, sizes, N = get_label_size(tf.constant(labels), max_objects_number=2)
+        mean_fun = get_mean_by_object_fun(channel_axis=False, tridimensional_mode=True)
+        out = objectwise_compute(tf.constant(data), mean_fun, tf.constant(labels[0]), ids[0], sizes[0]).numpy()
+        np.testing.assert_allclose(out, [5.0, 5.0])
+
+    def test_spherical_kernel(self):
+        from distnet_2d.utils.objectwise_computation_tf import spherical_kernel
+        ker, rad = spherical_kernel(2.0)
+        ker = ker.numpy()
+        self.assertEqual(ker.shape, (5, 5, 5))
+        # Center should be 1
+        self.assertEqual(ker[2, 2, 2], 1)
+        # Corners should be 0 (distance > 2)
+        self.assertEqual(ker[0, 0, 0], 0)
+        # The kernel should be symmetric
+        np.testing.assert_array_equal(ker, ker[::-1, ::-1, ::-1])
+
+    def test_dilate_3d_slicewise(self):
+        from distnet_2d.utils.objectwise_computation_tf import _dilate_mask, CONV_2D
+        mask = np.zeros((1, 8, 16, 16), dtype=bool)
+        mask[0, 2:6, 4:12, 4:12] = True  # 4x8x8 = 256 voxels
+        n_before = mask.sum()
+        # CONV_2D on a 3D input escalates to CONV_2D_SLICEWISE via _auto_mode
+        @tf.function
+        def fn(m):
+            return _dilate_mask(m, radius=1.5, tolerance=0.25, mode=CONV_2D)
+        dilated = fn(tf.constant(mask)).numpy()
+        self.assertGreater(dilated.sum(), n_before)
+
+    def test_dilate_3d_slicewise_does_not_spread_along_z(self):
+        """CONV_2D on rank-4 input escalates to CONV_2D_SLICEWISE: empty Z-slices stay empty."""
+        from distnet_2d.utils.objectwise_computation_tf import _dilate_mask, CONV_2D
+        mask = np.zeros((1, 8, 16, 16), dtype=bool)
+        mask[0, 3, 4:12, 4:12] = True
+        @tf.function
+        def fn(m):
+            return _dilate_mask(m, radius=2.0, tolerance=0.25, mode=CONV_2D)
+        dilated = fn(tf.constant(mask)).numpy()
+        self.assertGreater(dilated[0, 3].sum(), mask[0, 3].sum())
+        for z in range(8):
+            if z != 3:
+                self.assertEqual(dilated[0, z].sum(), 0,
+                                 f"Dilation leaked into Z-slice {z} (expected empty)")
+
+    def test_dilate_3d_true_3d_spreads_along_z(self):
+        """CONV_3D dilation: a single-slice mask should spread into adjacent Z-slices."""
+        from distnet_2d.utils.objectwise_computation_tf import _dilate_mask, CONV_3D
+        mask = np.zeros((1, 8, 16, 16), dtype=bool)
+        mask[0, 3, 4:12, 4:12] = True
+        @tf.function
+        def fn(m):
+            return _dilate_mask(m, radius=2.0, tolerance=0.25, mode=CONV_3D)
+        dilated = fn(tf.constant(mask)).numpy()
+        # Neighbouring slices must now contain dilated voxels
+        self.assertGreater(dilated[0, 2].sum(), 0, "CONV_3D dilation should spread to Z=2")
+        self.assertGreater(dilated[0, 4].sum(), 0, "CONV_3D dilation should spread to Z=4")
+
+    def test_contours_3d(self):
+        """auto-mode on rank-4 input → CONV_3D contour detection."""
+        from distnet_2d.utils.objectwise_computation_tf import _compute_contours
+        mask = np.zeros((1, 6, 16, 16), dtype=bool)
+        mask[0, 1:5, 4:12, 4:12] = True  # 4x8x8 solid block
+        @tf.function
+        def fn(m):
+            return _compute_contours(m)  # auto: rank 4 → CONV_3D
+        contours = fn(tf.constant(mask)).numpy()
+        # Interior voxel (2,7,7) is surrounded by mask on all 6 faces — not a contour
+        self.assertFalse(contours[0, 2, 7, 7], "interior voxel should not be a contour")
+        # A face voxel should be a contour
+        self.assertTrue(contours[0, 1, 7, 7], "Z-face voxel must be a contour with CONV_3D")
+        self.assertTrue(contours[0, 2, 4, 7], "Y-face voxel must be a contour with CONV_3D")
+
+    def test_auto_mode_detection(self):
+        """mode=None should auto-detect: rank 3 → CONV_2D, rank 4 → CONV_3D."""
+        from distnet_2d.utils.objectwise_computation_tf import _auto_mode, CONV_2D, CONV_3D
+        img2d = tf.zeros((1, 8, 8), dtype=tf.float32)
+        img3d = tf.zeros((1, 4, 8, 8), dtype=tf.float32)
+        self.assertEqual(_auto_mode(img2d, None), CONV_2D)
+        self.assertEqual(_auto_mode(img3d, None), CONV_3D)
+        # explicit mode is honored
+        from distnet_2d.utils.objectwise_computation_tf import CONV_2D_SLICEWISE
+        self.assertEqual(_auto_mode(img3d, CONV_2D_SLICEWISE), CONV_2D_SLICEWISE)
+
+    def test_iou_fp_auto_mode(self):
+        """IoU/FP without explicit mode should auto-detect from input rank — in graph mode."""
+        from distnet_2d.utils.objectwise_computation_tf import IoU, FP
+
+        @tf.function
+        def iou_fn(t, p):
+            return IoU(t, p)
+
+        @tf.function
+        def fp_fn(t, p):
+            return FP(t, p)
+
+        # 2D inputs → CONV_2D path
+        m2d = np.zeros((1, 8, 8), dtype=bool)
+        m2d[0, 2:6, 2:6] = True
+        self.assertAlmostEqual(iou_fn(tf.constant(m2d), tf.constant(m2d)).numpy(), 1.0)
+        # 3D inputs → CONV_3D path (auto-detect)
+        m3d = np.zeros((1, 4, 8, 8), dtype=bool)
+        m3d[0, 1:3, 2:6, 2:6] = True
+        self.assertAlmostEqual(iou_fn(tf.constant(m3d), tf.constant(m3d)).numpy(), 1.0)
+        self.assertEqual(fp_fn(tf.constant(m3d), tf.constant(m3d)).numpy(), 0.0)
+
+    def test_convolve_modes_graph_compatible(self):
+        """All three conv modes must run inside @tf.function (no eager-only ops)."""
+        from distnet_2d.utils.objectwise_computation_tf import _convolve, circular_kernel, spherical_kernel, CONV_2D, CONV_3D, CONV_2D_SLICEWISE
+
+        @tf.function
+        def conv2d(img, ker, rad):
+            return _convolve(img, ker, rad, symmetric_padding=True, mode=CONV_2D)
+
+        @tf.function
+        def conv3d(img, ker, rad):
+            return _convolve(img, ker, rad, symmetric_padding=True, mode=CONV_3D)
+
+        @tf.function
+        def conv_slicewise(img, ker, rad):
+            return _convolve(img, ker, rad, symmetric_padding=True, mode=CONV_2D_SLICEWISE)
+
+        ker2, rad = circular_kernel(1.5)
+        ker3, _ = spherical_kernel(1.5)
+        img2d = tf.cast(tf.random.uniform((1, 8, 8), maxval=2, dtype=tf.int32), tf.int32)
+        img3d = tf.cast(tf.random.uniform((1, 4, 8, 8), maxval=2, dtype=tf.int32), tf.int32)
+        # Should not raise
+        out2 = conv2d(img2d, ker2, rad)
+        out3 = conv3d(img3d, ker3, rad)
+        out_s = conv_slicewise(img3d, ker2, rad)
+        self.assertEqual(out2.shape.as_list(), [1, 8, 8])
+        self.assertEqual(out3.shape.as_list(), [1, 4, 8, 8])
+        self.assertEqual(out_s.shape.as_list(), [1, 4, 8, 8])
+
+    def test_contours_2d_slicewise_ignores_z_boundaries(self):
+        """CONV_2D on rank-4 input escalates to CONV_2D_SLICEWISE: Z-faces are NOT contours."""
+        from distnet_2d.utils.objectwise_computation_tf import _compute_contours, CONV_2D
+        mask = np.zeros((1, 6, 16, 16), dtype=bool)
+        mask[0, 1:5, 4:12, 4:12] = True
+        @tf.function
+        def fn_slicewise(m):
+            return _compute_contours(m, mode=CONV_2D)  # rank 4: CONV_2D → CONV_2D_SLICEWISE
+        @tf.function
+        def fn_3d(m):
+            return _compute_contours(m)
+        c_slicewise = fn_slicewise(tf.constant(mask)).numpy()
+        c_3d = fn_3d(tf.constant(mask)).numpy()
+        # CONV_3D: Z-face voxel marked as contour; CONV_2D_SLICEWISE: interior of Y/X plane → not contour
+        self.assertTrue(c_3d[0, 1, 7, 7])
+        self.assertFalse(c_slicewise[0, 1, 7, 7],
+                         "slicewise must not flag Z-face voxel that is interior in its Y/X slice")
+
+    def test_FP_3d_slicewise(self):
+        from distnet_2d.utils.objectwise_computation_tf import FP, CONV_2D
+        true_fg = np.zeros((1, 8, 16, 16), dtype=bool)
+        true_fg[0, 3:5, 7:9, 7:9] = True
+        @tf.function
+        def fp_fn(tf_fg, pf_fg):
+            return FP(tf_fg, pf_fg, rate=False, tolerance_radius=0, mode=CONV_2D)
+        fp_perfect = fp_fn(tf.constant(true_fg), tf.constant(true_fg)).numpy()
+        self.assertEqual(fp_perfect, 0.0)
+        pred_fg = np.copy(true_fg)
+        pred_fg[0, 0, 0:6, 0:6] = True
+        fp = fp_fn(tf.constant(true_fg), tf.constant(pred_fg)).numpy()
+        self.assertGreater(fp, 0)
+
+    def test_IoU_3d_slicewise(self):
+        from distnet_2d.utils.objectwise_computation_tf import IoU, CONV_2D
+        true_fg = np.zeros((1, 4, 8, 8), dtype=bool)
+        true_fg[0, 1:3, 3:5, 3:5] = True
+        @tf.function
+        def iou_fn(t, p):
+            return IoU(t, p, tolerance_radius=0, mode=CONV_2D)
+        iou = iou_fn(tf.constant(true_fg), tf.constant(true_fg)).numpy()
+        np.testing.assert_allclose(iou, 1.0)
+        pred_fg2 = np.zeros_like(true_fg)
+        pred_fg2[0, 1:3, 3:5, 4:6] = True
+        iou2 = iou_fn(tf.constant(true_fg), tf.constant(pred_fg2)).numpy()
+        self.assertGreater(iou2, 0)
+        self.assertLess(iou2, 1.0)
+
+
+from dataset_iterator.datasetIO import DictDatasetIO
+
+
+def _build_synth_dataset(tridim, Z=4):
+    """Build an in-memory synthetic dataset with merge, division and moving rectangles.
+
+    Layout (5 frames, 32x32 spatial, optional Z dim):
+      - Cell 1: 5x5 rect moving diagonally — persists all 5 frames
+      - Cell 2: rect that DIVIDES at frame 2 into labels 2 and 3
+      - Cell 4 + cell 5: two rects that MERGE at frame 3 (both → label 4)
+    """
+    N_FRAMES, H, W = 5, 32, 32
+    spatial = (Z, H, W) if tridim else (H, W)
+
+    # raw — just random
+    raw = np.random.rand(N_FRAMES, *spatial).astype(np.float32)
+    labels = np.zeros((N_FRAMES,) + spatial, dtype=np.int32)
+
+    # In 3D, put cells on a 2-Z-slice slab — Z slice indices
+    def zslab(idx0):
+        return slice(idx0, idx0 + 2)
+
+    for t in range(N_FRAMES):
+        # Cell 1: diagonal motion
+        if tridim:
+            labels[t, zslab(0), 2+t:7+t, 2+t:7+t] = 1
+        else:
+            labels[t, 2+t:7+t, 2+t:7+t] = 1
+
+    # Cell 2 → divides at t=2
+    for t in [0, 1]:
+        if tridim:
+            labels[t, zslab(1), 2:7, 20-t:25-t] = 2
+        else:
+            labels[t, 2:7, 20-t:25-t] = 2
+    for t in [2, 3, 4]:
+        offset = t - 2
+        if tridim:
+            labels[t, zslab(1), 2:5, 18-offset:23-offset] = 2
+            labels[t, zslab(1), 5:8, 18-offset:23-offset] = 3
+        else:
+            labels[t, 2:5, 18-offset:23-offset] = 2
+            labels[t, 5:8, 18-offset:23-offset] = 3
+
+    # Cell 4 + 5 → merge at t=3
+    for t in [0, 1, 2]:
+        if tridim:
+            labels[t, zslab(2), 20:25, 5+2*t:10+2*t] = 4
+            labels[t, zslab(2), 20:25, 17-2*t:22-2*t] = 5
+        else:
+            labels[t, 20:25, 5+2*t:10+2*t] = 4
+            labels[t, 20:25, 17-2*t:22-2*t] = 5
+    for t in [3, 4]:
+        if tridim:
+            labels[t, zslab(2), 20:25, 9+t-3:18+t-3] = 4
+        else:
+            labels[t, 20:25, 9+t-3:18+t-3] = 4
+
+    # linksPrev: (N_entries, 2, N_FRAMES) — [current_label, prev_label]
+    max_entries = 5
+    links = np.zeros((max_entries, 2, N_FRAMES), dtype=np.int32)
+    # t=1 from t=0
+    links[0, :, 1] = [1, 1]; links[1, :, 1] = [2, 2]; links[2, :, 1] = [4, 4]; links[3, :, 1] = [5, 5]
+    # t=2 from t=1 — division of cell 2
+    links[0, :, 2] = [1, 1]; links[1, :, 2] = [2, 2]; links[2, :, 2] = [3, 2]
+    links[3, :, 2] = [4, 4]; links[4, :, 2] = [5, 5]
+    # t=3 from t=2 — merge of 4+5 → 4
+    links[0, :, 3] = [1, 1]; links[1, :, 3] = [2, 2]; links[2, :, 3] = [3, 3]
+    links[3, :, 3] = [4, 4]; links[4, :, 3] = [4, 5]
+    # t=4 from t=3 — stable
+    links[0, :, 4] = [1, 1]; links[1, :, 4] = [2, 2]; links[2, :, 4] = [3, 3]; links[3, :, 4] = [4, 4]
+
+    return DictDatasetIO({
+        "/posA/raw": raw,
+        "/posA/regionLabels": labels,
+        "/posA/linksPrev": links,
+    })
+
+
+def _make_iterator(ds_io, tridim, tracking, Z=4, metrics:bool=False):
+    """Build a DistnetIterator from an in-memory DictDatasetIO.
+
+    When `metrics=True` the iterator is configured to emit the extra outputs
+    used by `get_metrics_fun` (label rank, prev-label array, center array) and
+    only the central frame for masks (`output_central_only=True`,
+    `return_label_rank=True`, `incomplete_last_batch_mode=0`).
+    Otherwise it returns full-frame outputs for model training.
+    """
+    from distnet_2d.data import DistnetIterator
+    from dataset_iterator.image_data_generator import get_image_data_generator
+    from dataset_iterator import extract_tile_random_zoom_function
+
+    data_gen = get_image_data_generator()
+    mask_gen = get_image_data_generator()
+    H, W = 32, 32
+    tile_shape = (Z, H, W) if tridim else (H, W)
+    it = DistnetIterator(
+        dataset=ds_io,
+        extract_tile_function=extract_tile_random_zoom_function(tile_shape=tile_shape, n_tiles=1, perform_augmentation=False),
+        frame_window=2,
+        aug_frame_subsampling=None,
+        erase_edge_cell_size=0,
+        return_label_rank=metrics,
+        return_link_multiplicity=True,
+        segmentation=True,
+        tracking=tracking,
+        image_data_generators=[data_gen, mask_gen],
+        batch_size=1,
+        step_number=0,
+        tridimensional_mode=tridim,
+        verbose=False,
+        shuffle=False,
+    )
+    it.disable_random_transforms(True, True)
+    if metrics:
+        it.output_central_only = True
+        it.return_label_rank = True
+        it.incomplete_last_batch_mode = 0
+    else:
+        it.output_central_only = False
+        it.return_label_rank = False
+    return it
+
+
+class TestIteratorTrainingStep(unittest.TestCase):
+    """Run a model train_step on real DistnetIterator output (full-frame mode)."""
+
+    @staticmethod
+    def _iter_train_inputs(tridim, tracking):
+        """Build iterator in full-frame mode and return (x, y) ready for train_step."""
+        ds_io = _build_synth_dataset(tridim=tridim, Z=4)
+        it = _make_iterator(ds_io, tridim=tridim, tracking=tracking, metrics=False)
+        x, y = it[0]
+        y_train = [tf.constant(yy, dtype=tf.float32) for yy in y]
+        # x: iterator returns numpy without explicit batch dim — wrap into [batch=1] tensor
+        x_train = [tf.constant(xx, dtype=tf.float32)[tf.newaxis] if xx.ndim == 3 + int(tridim)
+                   else tf.constant(xx, dtype=tf.float32) for xx in x]
+        return x_train, y_train
+
+    def _run(self, tridim, tracking):
+        with tf.device('/CPU:0'):
+            x, y = self._iter_train_inputs(tridim=tridim, tracking=tracking)
+            spa_dims = tuple(int(d) for d in y[0].shape[1:-1])
+            model, _ = TestTrainingStep._build_model(spa_dims, tridim=tridim, tracking=tracking)
+
+            @tf.function
+            def step_fn(data):
+                return model.train_step(data)
+            metrics = step_fn((x, y))
+        self.assertIn("loss", metrics)
+        loss_val = metrics["loss"].numpy()
+        self.assertFalse(np.isnan(loss_val), f"loss is NaN on iterator data (tridim={tridim}, tracking={tracking})")
+
+    def test_iterator_train_2d_seg_only(self):
+        self._run(tridim=False, tracking=False)
+
+    def test_iterator_train_2d_tracking(self):
+        self._run(tridim=False, tracking=True)
+
+    def test_iterator_train_3d_seg_only(self):
+        self._run(tridim=True, tracking=False)
+
+    def test_iterator_train_3d_tracking(self):
+        self._run(tridim=True, tracking=True)
+
+
+class TestMetricsFunWithIterator(unittest.TestCase):
+    """End-to-end metric tests: synthetic in-memory dataset → DistnetIterator → metrics_fun."""
+
+    def _run_metrics(self, tridim, tracking, n_label_max_override=None):
+        from distnet_2d.utils.metrics_tf import get_metrics_fun
+        ds_io = _build_synth_dataset(tridim=tridim, Z=4)
+        it = _make_iterator(ds_io, tridim=tridim, tracking=tracking, metrics=True)
+        if n_label_max_override is not None:
+            it.n_label_max = n_label_max_override
+
+        x, y = it[0]
+        # y order with seg + tracking: EDM, CDM, dY, dX, LM, labels, prev_labels, centerArr
+        # In 3D iterator there should also be dZ — check by counting elements
+        # 2D tracking expects 8 outputs; 3D tracking expects 9 (extra dZ)
+        # Seg-only (tracking=False): EDM, CDM, labels, centerArr → 4 outputs
+        if tracking:
+            if tridim:
+                self.assertEqual(len(y), 9, f"3D+tracking should yield 9 outputs, got {len(y)}")
+                true_edm, true_cdm, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, centerArr = y
+            else:
+                self.assertEqual(len(y), 8, f"2D+tracking should yield 8 outputs, got {len(y)}")
+                true_edm, true_cdm, true_dY, true_dX, true_lm, labels, prev_labels, centerArr = y
+                true_dZ = tf.zeros_like(true_dY)  # unused in 2D
+        else:
+            self.assertEqual(len(y), 4, f"seg-only should yield 4 outputs, got {len(y)}")
+            true_edm, true_cdm, labels, centerArr = y
+
+        # Build "perfect-ish" predictions from ground truth where possible
+        edm_pred = tf.constant(true_edm, dtype=tf.float32)
+        gdcm_pred = tf.constant(true_cdm, dtype=tf.float32)
+        # cat: not used (category=False) but signature requires it
+        n_frames = int(true_edm.shape[-1])
+        cat_shape = list(true_edm.shape[:-1]) + [3]  # 3 classes
+        cat_pred = tf.zeros(cat_shape, dtype=tf.float32)
+        true_cat = tf.zeros(list(true_edm.shape), dtype=tf.float32)
+
+        metric_fn = get_metrics_fun(
+            scale=4.0,
+            max_objects_number=it.n_label_max,
+            category=False,
+            segmentation=True,
+            tracking=tracking,
+            tridimensional_mode=tridim,
+        )
+        if tracking:
+            # LM prediction: convert categorical ground truth (n_pair_chans channels with values in {1,2,3})
+            # to one-hot (n_pair_chans * 3 channels) for "perfect" prediction
+            n_pair = int(true_lm.shape[-1])
+            lm_categorical = tf.cast(tf.clip_by_value(true_lm - 1, 0, 2), tf.int32)  # values 0..2
+            lm_onehot = tf.one_hot(lm_categorical, depth=3, dtype=tf.float32)  # (..., n_pair, 3)
+            # Flatten last two dims into (..., n_pair * 3)
+            lm_shape = list(true_lm.shape) + [3]
+            lm_pred = tf.reshape(lm_onehot, list(true_lm.shape[:-1]) + [n_pair * 3])
+
+            dY_pred = tf.constant(true_dY, dtype=tf.float32)
+            dX_pred = tf.constant(true_dX, dtype=tf.float32)
+            dZ_pred = tf.constant(true_dZ, dtype=tf.float32)
+            out = metric_fn(edm_pred, gdcm_pred, cat_pred,
+                            dZ_pred, dY_pred, dX_pred, lm_pred,
+                            tf.cast(true_edm, tf.float32), true_cat,
+                            tf.cast(true_dZ, tf.float32), tf.cast(true_dY, tf.float32), tf.cast(true_dX, tf.float32),
+                            tf.cast(true_lm, tf.float32),
+                            tf.cast(labels, tf.int32), tf.cast(prev_labels, tf.int32),
+                            tf.cast(centerArr, tf.float32))
+        else:
+            out = metric_fn(edm_pred, gdcm_pred, cat_pred,
+                            tf.cast(true_edm, tf.float32), true_cat,
+                            tf.cast(labels, tf.int32),
+                            tf.cast(centerArr, tf.float32))
+        result = out.numpy()
+        self.assertTrue(np.all(np.isfinite(result)), f"metrics produced non-finite values: {result}")
+        return result
+
+    def test_iterator_metrics_2d_seg_only(self):
+        self._run_metrics(tridim=False, tracking=False)
+
+    def test_iterator_metrics_2d_tracking(self):
+        self._run_metrics(tridim=False, tracking=True)
+
+    def test_iterator_metrics_3d_seg_only(self):
+        self._run_metrics(tridim=True, tracking=False)
+
+    def test_iterator_metrics_3d_tracking(self):
+        self._run_metrics(tridim=True, tracking=True)
+
+
 if __name__ == '__main__':
     unittest.main()
