@@ -585,13 +585,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         no_residual_layer = []
         last_input_filters = arch.n_inputs
         for l_idx, param_list in enumerate(arch.encoder_settings):
-            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window) if l_idx in skip_connections else None, downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, activation=arch.default_activation, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx, task_with_skip_prop=task_with_skip_prop, tridimensional_mode=arch.tridimensional_mode)
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window) if l_idx in skip_connections else None, downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, activation=arch.default_activation, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx, task_with_skip_prop=task_with_skip_prop, tridimensional_mode=arch.tridimensional_mode, window_norm_size=arch.window_norm_size)
             last_input_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
             no_residual_layer.append(residual_filters==0)
         # define feature operations
-        feature_convs, _, _, feature_filters, _ = parse_param_list(arch.feature_settings, "FeatureSequence", attention_positional_encoding=arch.attention_positional_encoding, activation=arch.default_activation, l2_reg=arch.l2_reg, last_input_filters=out_filters)
+        feature_convs, _, _, feature_filters, _ = parse_param_list(arch.feature_settings, "FeatureSequence", attention_positional_encoding=arch.attention_positional_encoding, activation=arch.default_activation, l2_reg=arch.l2_reg, last_input_filters=out_filters, window_norm_size=arch.window_norm_size)
         pair_combine_op = Combine(filters=feature_filters, kernel_size = arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairCombine")
         if len(arch.encoder_settings) in skip_connections:
             feature_skip_op = Combine(filters=feature_filters, l2_reg=arch.l2_reg, name="FeatureSkip")
@@ -599,7 +599,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # define decoder operations
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
-        decoder_feature_op={n: get_seq_and_filters(parse_param_list(arch.feature_decoder_settings, f"Features{n}", attention_positional_encoding=arch.attention_positional_encoding, activation=arch.default_activation, l2_reg=arch.l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
+        decoder_feature_op={n: get_seq_and_filters(parse_param_list(arch.feature_decoder_settings, f"Features{n}", attention_positional_encoding=arch.attention_positional_encoding, activation=arch.default_activation, l2_reg=arch.l2_reg, last_input_filters=feature_filters, window_norm_size=arch.window_norm_size)) for n in decoder_layers.keys()}
         decoder_out={name:{} for name in decoder_layers.keys()}
         oidx = 0
         output_per_decoder={}
@@ -672,24 +672,24 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                             param_list_seg["ops"] = ops
                         else:
                             param_list_seg = param_list
-                        decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
+                        decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
                     for dCenterName in output_per_decoder["Center"].keys():
                         output_name = None if arch.frame_window > 0 or predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
-                        decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
+                        decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
                 if arch.category_number > 1:
                     for dCatName in output_per_decoder["Cat"].keys():
                         if dCatName == "Category":
                             output_name = None if arch.frame_window > 0 or len(output_per_decoder["Cat"])>1 else decoder_output_names["Cat"][dCatName]
-                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
                         elif dCatName == "FgBg":
-                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None)
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None)
                         else:
                             raise ValueError(f"Unknown category name: {dCatName}")
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
-                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
+                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     if isinstance(arch, TemPy) and (arch.wsa_edm and decoder_name == "Seg" or arch.wsa_cdm and decoder_name == "Center") and l_idx == len( arch.decoder_settings) - 1:
@@ -700,7 +700,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                                           skip_connection=True)
                     else:
                         wsa_kwargs = None
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
         if arch.n_inputs == 1:
@@ -767,7 +767,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 blend_op = TemporalPyramid(wsa_kwargs, layer_normalization=True, filter_increase_factor=1, l2_reg=arch.l2_reg, temporal_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
                 fi = frame_index[:, 0, 0, 0] if arch.tridimensional_mode else frame_index[:, 0, 0]
                 blended_features, blended_features_level1_r = blend_op([features_batch_r, fi - fi[:, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
-                feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg, activation=arch.default_activation)
+                feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg, activation=arch.default_activation, window_norm_size=arch.window_norm_size)
                 for op in feature_blending_convs:
                     blended_features = op(blended_features)
                 features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True, l2_reg=arch.l2_reg)([features_batch_r, blended_features])
@@ -797,7 +797,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             for f in arch.feature_blending_settings:
                 if "filters" not in f or f["filters"] < 0:
                     f["filters"] = combine_filters
-            feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings, "FeatureBlendingSequence", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, activation=arch.default_activation, last_input_filters=combine_filters)
+            feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings, "FeatureBlendingSequence", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, activation=arch.default_activation, last_input_filters=combine_filters, window_norm_size=arch.window_norm_size)
 
             # include operations in graph
             combined_features = combine_features_op(features_list) # combine individual features
@@ -870,11 +870,11 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if arch.requires_input_spatial_dim() else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=arch.category_number, tridimensional_mode=arch.tridimensional_mode, **kwargs)
 
 
-def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, activation:str="relu", last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, task_with_skip_prop:float=1., tridimensional_mode:bool=False):
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, activation:str="relu", last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, task_with_skip_prop:float=1., tridimensional_mode:bool=False, window_norm_size=None):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
-    sequence, down_sequence, total_contraction, residual_filters, out_filters = parse_param_list(param_list, name, attention_positional_encoding=attention_positional_encoding, ignore_stride=maxpool, l2_reg=l2_reg, activation=activation, last_input_filters = last_input_filters if maxpool_and_stride else 0)
+    sequence, down_sequence, total_contraction, residual_filters, out_filters = parse_param_list(param_list, name, attention_positional_encoding=attention_positional_encoding, ignore_stride=maxpool, l2_reg=l2_reg, activation=activation, last_input_filters = last_input_filters if maxpool_and_stride else 0, window_norm_size=window_norm_size)
     tc_check = total_contraction if isinstance(total_contraction, int) else max(total_contraction)
     assert tc_check > 1, "invalid parameters: no contraction specified"
     if maxpool:
@@ -920,9 +920,13 @@ def decoder_op(
             window_self_attention_kwargs = None,
             batch_norm:bool = False,
             layer_norm:bool = False,
+            window_norm:bool = False,
+            window_norm_size=32,
             dropout_rate:float=0,
             batch_norm_up:bool = False,
             layer_norm_up:bool = False,
+            window_norm_up:bool = False,
+            window_norm_size_up=32,
             dropout_rate_up:float=0,
             activation: str="relu",
             activation_out : str = None,
@@ -945,8 +949,9 @@ def decoder_op(
         if n_ops > 0:
             batch_norm = ensure_multiplicity(n_ops, batch_norm)
             layer_norm = ensure_multiplicity(n_ops, layer_norm)
-        up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, layer_norm=layer_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, name=f"{name}_tConv{ker_size_to_string(conv_kernel_size)}{suffix}")
-        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation_out, batch_norm=batch_norm_up, layer_norm=layer_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None)
+            window_norm = ensure_multiplicity(n_ops, window_norm)
+        up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, layer_norm=layer_norm_up, window_norm=window_norm_up, window_norm_size=window_norm_size_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, name=f"{name}_tConv{ker_size_to_string(conv_kernel_size)}{suffix}")
+        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation_out, batch_norm=batch_norm_up, layer_norm=layer_norm_up, window_norm=window_norm_up, window_norm_size=window_norm_size_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None)
         if skip_combine_mode.lower()=="conv":
             combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_ops==0 else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_ops == 0 else None, filters=filters if filters_out is None or n_ops > 0 else filters_out, activation=activation_out if n_ops==0 else activation, kernel_size = combine_kernel_size, l2_reg=l2_reg)
         else:
@@ -958,11 +963,11 @@ def decoder_op(
                 raise NotImplementedError("ResConv1D are not implemented")
             elif op_name == "res" or op_name=="resconv":
                 if filters_out == filters or i < n_ops - 1:
-                    return ResConv(kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}")
+                    return ResConv(kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}")
                 else:
-                    return ConvBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix)
+                    return ConvBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix)
             else:
-                return ConvBNDrop(filters=filters_out if i == n_ops - 1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix)
+                return ConvBNDrop(filters=filters_out if i == n_ops - 1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix)
         convs = lambda suffix : [create_op(suffix, i) for i in range(n_ops)]
         wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
 
@@ -994,6 +999,8 @@ def upsampling_op(
             activation: str="relu",
             batch_norm:bool = False,
             layer_norm:bool = False,
+            window_norm:bool = False,
+            window_norm_size=32,
             dropout_rate:float = 0,
             l2_reg:float = 0,
             output_dtype=None,
@@ -1003,12 +1010,12 @@ def upsampling_op(
         if kernel_size<size_factor:
             kernel_size = size_factor
         if mode=="tconv":
-            upsample = ConvTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, layer_norm=layer_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
+            upsample = ConvTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
             upsample = UpSamplingWithDtype(size=size_factor, interpolation=interpolation, name = f"{parent_name}_Upsample{size_factor}x{size_factor}_{interpolation}" if parent_name is not None else name)
-            conv = ConvBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, layer_norm=layer_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation)
+            conv = ConvBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation)
 
         def op(input):
             x = upsample(input)
@@ -1023,7 +1030,7 @@ def stop_gradient(input, parent_name:str, name:str="StopGradient"):
     sg = StopGradient(name=name)
     return sg(input)
 
-def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stride:bool = False, activation:str="relu", attention_positional_encoding="2D", l2_reg:float=0):
+def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stride:bool = False, activation:str="relu", attention_positional_encoding="2D", l2_reg:float=0, window_norm_size=None):
     if param_list is None or len(param_list)==0:
         return [], None, 1, 0, 0
     total_contraction = 1
@@ -1047,6 +1054,8 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                 param_list[i]["l2_reg"] = l2_reg
             if "activation" not in param_list[i]:
                 param_list[i]["activation"] = activation
+            if window_norm_size is not None and "window_norm_size" not in param_list[i]:
+                param_list[i]["window_norm_size"] = window_norm_size
             sequence.append(parse_params(**param_list[i], attention_positional_encoding=attention_positional_encoding, name = f"{name}_Op{i}"))
             i+=1
     else:
@@ -1060,6 +1069,8 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                 param_list[i]["l2_reg"] = l2_reg
             if "activation" not in param_list[i]:
                 param_list[i]["activation"] = activation
+            if window_norm_size is not None and "window_norm_size" not in params:
+                params["window_norm_size"] = window_norm_size
             out_filters = filters
             if last_input_filters>0: # case of stride + maxpool -> out filters -= input filters
                 if residual_filters>0:
@@ -1074,12 +1085,12 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="1D", attention_filters:int=None, dropout_rate:float=0, batch_norm:bool=False, layer_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, num_attention_heads:int=1, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="1D", attention_filters:int=None, dropout_rate:float=0, batch_norm:bool=False, layer_norm:bool=False, window_norm:bool=False, window_norm_size=32, weighted_sum:bool=False, l2_reg:float=0, num_attention_heads:int=1, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
         raise NotImplementedError("ResConv1D is not implemented")
     elif op =="res" or op == "resconv":
-        return ResConv(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
+        return ResConv(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
         self_attention_op = SpatialAttention(num_heads=num_attention_heads, attention_filters=attention_filters, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
@@ -1088,4 +1099,4 @@ def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation
             sa = self_attention_op([x, x])
             return self_attention_skip_op([x, sa])
         return op
-    return ConvBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
+    return ConvBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")

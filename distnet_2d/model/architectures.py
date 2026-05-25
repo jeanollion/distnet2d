@@ -44,7 +44,7 @@ class ArchBase:
                  next: bool = True,
                  early_downsampling:bool = True,
                  scale_edm:bool = False,
-                 layer_norm_dec:bool = False, batch_norm:bool = True, dropout:float=0.2,
+                 layer_norm_dec:bool = False, layer_norm_feature_dec:bool = True, batch_norm:bool = True, dropout:float=0.2,
                  l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",
                  attention_filters:int = 0, attention_positional_encoding:str="2d",
@@ -79,6 +79,7 @@ class ArchBase:
         self.filters = filters
         self.early_downsampling = early_downsampling
         self.layer_norm_dec = layer_norm_dec
+        self.layer_norm_feature_dec = layer_norm_feature_dec
         self.batch_norm = batch_norm
         self.dropout = dropout
         self.l2_reg=l2_reg
@@ -94,6 +95,9 @@ class ArchBase:
         self.kernel_size_fd = None
         self.blend_combine_kernel_size = None
         self.pair_combine_kernel_size = None
+        self.feature_spatial_dimensions = None
+        # window size for WindowGroupNormalization; overridden by Blend / TemPy subclasses
+        self.window_norm_size = 32
 
     def requires_input_spatial_dim(self):
         return self.self_attention > 0
@@ -119,7 +123,8 @@ class D2(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
-        print(f"spatial dimension at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down2))]}")
+        self.feature_spatial_dimensions = [sd // d if sd is not None and sd > 0 else None for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down2))]
+        print(f"spatial dimension at feature layer: {self.feature_spatial_dimensions}")
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -161,7 +166,7 @@ class D2(ArchDepth):
             {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
              "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": self.batch_norm}
+             "batch_norm": False, "layer_norm":self.layer_norm_feature_dec}
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
@@ -190,7 +195,8 @@ class D3(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
-        print(f"spatial dimension at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down3))]}")
+        self.feature_spatial_dimensions = [sd // d if sd is not None and sd > 0 else None for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down3))]
+        print(f"spatial dimension at feature layer: {self.feature_spatial_dimensions}")
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -236,7 +242,7 @@ class D3(ArchDepth):
             {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
              "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": self.batch_norm}
+             "batch_norm": False, "layer_norm":self.layer_norm_feature_dec}
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
@@ -272,7 +278,8 @@ class D4(ArchDepth):
         self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
         self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
         self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
-        print(f"spatial dimension at feature layer: {[sd // d for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down4))]}")
+        self.feature_spatial_dimensions = [sd // d if sd is not None and sd > 0 else None for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down4))]
+        print(f"spatial dimension at feature layer: {self.feature_spatial_dimensions}")
         self.encoder_settings = [
             [
                 {"filters": 16, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
@@ -325,7 +332,7 @@ class D4(ArchDepth):
             {"op": "resconv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
              "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": self.batch_norm}
+             "batch_norm": False, "layer_norm":self.layer_norm_feature_dec }
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
@@ -347,6 +354,15 @@ class Blend(ArchBase):
         self.attention = attention
         self.self_attention = self_attention
         self.blending_filter_factor = blending_filter_factor
+        # window_norm_size = feature-layer spatial dim if known, else 32
+        fsd = self.feature_spatial_dimensions
+        if fsd is not None and any(d is not None and d > 0 for d in fsd):
+            if all(d == fsd[0] for d in fsd):
+                self.window_norm_size = fsd[0]
+            else:
+                self.window_norm_size = [s if s is not None and s>0 else 32 for s in list(fsd)]
+        else:
+            self.window_norm_size = 32
         self.feature_blending_settings = [
             {"op": "resconv", "weighted_sum": False, "dropout_rate": self.dropout,
              "batch_norm": False},
@@ -405,16 +421,19 @@ class TemPyD2(TemPy, D2):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2, message="Temporal Attention")
+        self.window_norm_size = self.attention_spatial_radius
 
 class TemPyD3(TemPy, D3):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3, message="Temporal Attention")
+        self.window_norm_size = self.attention_spatial_radius
 
 class TemPyD4(TemPy, D4):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4, message="Temporal Attention")
+        self.window_norm_size = self.attention_spatial_radius
 
 def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, downsampling, tridimensional_mode:bool=False):
     ndims = 2 if not tridimensional_mode else 3

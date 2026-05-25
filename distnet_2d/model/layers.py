@@ -6,6 +6,255 @@ import tensorflow as tf
 import numpy as np
 
 
+def get_group_norm_groups(num_channels:int, target:int=32, min_per_group:int=4, warn_on_degenerate:bool=True):
+    """Heuristic to pick number of channel groups for group-style normalization.
+
+    Aim for `target` groups (32 per GN paper), constrained by:
+      - groups must divide num_channels exactly,
+      - each group must contain at least `min_per_group` channels.
+
+    Examples (target=32, min_per_group=4):
+      C=16  -> 4    (16/4 = 4 ch/group)
+      C=32  -> 8    (32/8 = 4)
+      C=64  -> 16   (64/16 = 4)
+      C=96  -> 24   (96/24 = 4)
+      C=128 -> 32   (128/32 = 4)
+      C=192 -> 32   (192/32 = 6)
+      C=256 -> 32   (256/32 = 8)
+      C=512 -> 32   (512/32 = 16)
+    For C <= min_per_group, returns 1.
+    For prime / non-decomposable C > min_per_group, also returns 1; in that case
+    a UserWarning is emitted (silenceable via warn_on_degenerate=False).
+    """
+    if num_channels <= min_per_group:
+        return 1
+    max_groups = num_channels // min_per_group
+    ideal = min(target, max_groups)
+    # Largest divisor of num_channels in [2, ideal] (G=1 is the fallback below).
+    for g in range(ideal, 1, -1):
+        if num_channels % g == 0:
+            return g
+    # Fallback: G=1 (LN). Only warn when ideal>=2 — i.e. there *should* have been
+    # room for a non-trivial divisor, but num_channels is prime / awkward.
+    if warn_on_degenerate and ideal >= 2:
+        import warnings
+        warnings.warn(
+            f"WindowGroupNormalization group heuristic degenerated to G=1 (LayerNorm) for "
+            f"num_channels={num_channels}: no divisor in [2, {ideal}] satisfies "
+            f"min_per_group={min_per_group}. Consider using a composite channel "
+            f"count (e.g. a multiple of 8 or 16) if you actually want GN behavior.",
+            stacklevel=2,
+        )
+    return 1
+
+
+class WindowGroupNormalization(tf.keras.layers.Layer):
+    """Per-(sample, group) normalization with locally-pooled stats over a fixed
+    spatial window. Size-invariant at inference: a 1024x1024 image is normalized
+    identically to a 256x256 tile because the window slides across the spatial
+    dims and each pixel sees only its own local context.
+
+    Supports both 2D (input rank 4: B, Y, X, C) and 3D (input rank 5: B, Z, Y, X, C)
+    seamlessly: the spatial pooling op is selected at build time from the
+    static input rank.
+
+    Args:
+        groups: number of channel groups (must divide C). If None or 0, the
+            heuristic `get_group_norm_groups` is applied to pick a sensible G.
+        window_size: int OR tuple/list. Spatial window for local stat pooling.
+            - int: expanded to all spatial dims (e.g. 32 -> (32, 32) in 2D,
+              (32, 32, 32) in 3D).
+            - tuple/list: must match number of spatial dims. For 3D anisotropic
+              data, pass e.g. (1, 32, 32) for per-Z-slice normalization.
+        epsilon: numerical stabilizer.
+        center, scale: include affine beta/gamma.
+        padding_mode: 'REFLECT' (default), 'SYMMETRIC', or 'CONSTANT'. REFLECT
+            mirrors content at borders without duplicating edge — best default
+            for natural images.
+    """
+    def __init__(self, groups=None, window_size=32, epsilon=1e-3,
+                 center=True, scale=True, padding_mode='REFLECT',
+                 name="WindowGroupNormalization", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.groups = groups
+        self.window_size = window_size  # validated in build
+        self.epsilon = epsilon
+        self.center = center
+        self.scale = scale
+        self.padding_mode = padding_mode
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "groups": self.groups,
+            "window_size": self.window_size,
+            "epsilon": self.epsilon,
+            "center": self.center,
+            "scale": self.scale,
+            "padding_mode": self.padding_mode,
+        })
+        return config
+
+    def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except AttributeError:
+            pass
+        ndim = len(input_shape)
+        if ndim not in (4, 5):
+            raise ValueError(
+                f"WindowGroupNormalization expects rank 4 (B,Y,X,C) or 5 (B,Z,Y,X,C) input, "
+                f"got rank {ndim}"
+            )
+        self._tridim = (ndim == 5)
+        C = int(input_shape[-1])
+        # Pick groups via heuristic if not provided
+        if self.groups is None or self.groups == 0:
+            self.groups = get_group_norm_groups(C)
+        if C % self.groups != 0:
+            raise ValueError(f"groups={self.groups} must divide channels={C}")
+        self._channels_per_group = C // self.groups
+
+        # Expand window_size to match spatial dims
+        n_spatial = ndim - 2  # 2 for 2D, 3 for 3D
+        if isinstance(self.window_size, int):
+            ws = [self.window_size] * n_spatial
+        else:
+            ws = list(self.window_size)
+            if len(ws) != n_spatial:
+                raise ValueError(
+                    f"window_size has {len(ws)} elements but input rank {ndim} "
+                    f"expects {n_spatial} spatial dimensions"
+                )
+        # Clamp window per dim to at most the size of that spatial axis if known
+        for i in range(n_spatial):
+            dim = input_shape[1 + i]
+            if dim is not None and ws[i] > dim:
+                ws[i] = dim
+        self._window = ws
+
+        if self.scale:
+            self.gamma = self.add_weight("gamma", shape=(C,), initializer="ones")
+        if self.center:
+            self.beta = self.add_weight("beta", shape=(C,), initializer="zeros")
+        super().build(input_shape)
+
+    def call(self, inputs):
+        x = tf.cast(inputs, self.compute_dtype)
+        static_shape = inputs.shape.as_list()
+        n_spatial = len(self._window)
+
+        # For each spatial axis, decide whether the window covers the whole extent.
+        # When dim is unknown (None) we conservatively treat it as local.
+        is_global = []
+        for i in range(n_spatial):
+            dim = static_shape[1 + i]
+            is_global.append(dim is not None and self._window[i] >= dim)
+
+        x_shape = tf.shape(x)
+        if self._tridim:
+            new_shape = tf.concat([x_shape[:4], [self.groups, self._channels_per_group]], axis=0)
+        else:
+            new_shape = tf.concat([x_shape[:3], [self.groups, self._channels_per_group]], axis=0)
+
+        if all(is_global):
+            # Fast global path: behaves exactly like standard GroupNormalization.
+            # No padding, no avg_pool: just reduce over all spatial axes + Cg.
+            x_g = tf.reshape(x, new_shape)
+            if self._tridim:
+                reduce_axes = [1, 2, 3, -1]  # Z, Y, X, Cg
+            else:
+                reduce_axes = [1, 2, -1]     # Y, X, Cg
+            m  = tf.reduce_mean(x_g,         axis=reduce_axes, keepdims=True)
+            ms = tf.reduce_mean(x_g * x_g,   axis=reduce_axes, keepdims=True)
+            var = tf.maximum(ms - m * m, tf.cast(0.0, m.dtype))
+            x_g = (x_g - m) * tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
+            out = tf.reshape(x_g, x_shape)
+        else:
+            # Local / mixed path: avg_pool spatially with REFLECT padding.
+            # For axes where window >= dim we set the effective pool window to 1
+            # (no-op along that axis) and reduce_mean over them afterwards — this
+            # avoids the reflect-padding artifact when window matches dim.
+            effective_window = [
+                1 if is_global[i] else self._window[i] for i in range(n_spatial)
+            ]
+            # Asymmetric symmetric pad (so output spatial size matches input for any w).
+            pad_widths = [[0, 0]]
+            need_pad = False
+            for w in effective_window:
+                half = w // 2
+                pad_widths.append([half, w - half - 1])
+                if w > 1:
+                    need_pad = True
+            pad_widths.append([0, 0])
+            if need_pad:
+                x_pad  = tf.pad(x,       pad_widths, mode=self.padding_mode)
+                x2_pad = tf.pad(x * x,   pad_widths, mode=self.padding_mode)
+            else:
+                # No local axis: effectively a no-op pool. Still cast for consistency.
+                x_pad, x2_pad = x, x * x
+
+            if self._tridim:
+                m_ch  = tf.nn.avg_pool3d(x_pad,  ksize=effective_window, strides=[1, 1, 1], padding='VALID')
+                ms_ch = tf.nn.avg_pool3d(x2_pad, ksize=effective_window, strides=[1, 1, 1], padding='VALID')
+            else:
+                m_ch  = tf.nn.avg_pool2d(x_pad,  ksize=effective_window, strides=[1, 1], padding='VALID')
+                ms_ch = tf.nn.avg_pool2d(x2_pad, ksize=effective_window, strides=[1, 1], padding='VALID')
+
+            # Reduce_mean over global axes (broadcast back via keepdims=True).
+            global_axes = [1 + i for i in range(n_spatial) if is_global[i]]
+            if global_axes:
+                m_ch  = tf.reduce_mean(m_ch,  axis=global_axes, keepdims=True)
+                ms_ch = tf.reduce_mean(ms_ch, axis=global_axes, keepdims=True)
+
+            # Reshape pooled tensors to (..., G, Cg) (some spatial axes may be 1).
+            m_ch_shape = tf.shape(m_ch)
+            if self._tridim:
+                stat_shape = tf.concat([m_ch_shape[:4], [self.groups, self._channels_per_group]], axis=0)
+            else:
+                stat_shape = tf.concat([m_ch_shape[:3], [self.groups, self._channels_per_group]], axis=0)
+            m  = tf.reduce_mean(tf.reshape(m_ch,  stat_shape), axis=-1, keepdims=True)
+            ms = tf.reduce_mean(tf.reshape(ms_ch, stat_shape), axis=-1, keepdims=True)
+            var = tf.maximum(ms - m * m, tf.cast(0.0, m.dtype))
+
+            x_g = tf.reshape(x, new_shape)
+            x_g = (x_g - m) * tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
+            out = tf.reshape(x_g, x_shape)
+
+        if self.scale:
+            out = out * tf.cast(self.gamma, out.dtype)
+        if self.center:
+            out = out + tf.cast(self.beta, out.dtype)
+        return tf.cast(out, inputs.dtype)
+
+
+def _make_norm(batch_norm:bool, layer_norm:bool, window_norm:bool, compute_dtype:str, window_norm_size:int=32, name:str=None):
+    """Instantiate the chosen normalization layer, or return None if none requested.
+
+    Options:
+      - batch_norm: standard BN (running stats; safe under mixed_precision).
+      - layer_norm: standard LN (per-pixel, axis=-1).
+      - window_norm: WindowGroupNormalization (per-sample, per-group, locally pooled
+                     stats over a fixed-size spatial window). Size-invariant at
+                     inference. Groups picked automatically via get_group_norm_groups.
+    """
+    #if batch_norm or layer_norm or window_norm:
+    #    print(f"make norm: BN={batch_norm} LN={layer_norm} WN={window_norm} ({window_norm_size})")
+    dtype = 'mixed_float16' if compute_dtype == 'float16' else 'float32'
+    if batch_norm:
+        return tf.keras.layers.BatchNormalization(dtype=dtype, name=name)
+    if layer_norm:
+        return tf.keras.layers.LayerNormalization(dtype=dtype, name=name)
+    if window_norm:
+        return WindowGroupNormalization(
+            groups=None,  # heuristic at build time
+            window_size=window_norm_size,
+            dtype=dtype,
+            name=name if name is not None else "WindowGroupNormalization",
+        )
+    return None
+
+
 class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, inference_idx, name: str= "SelectFeature", **kwargs):
         self.inference_idx=inference_idx
@@ -339,6 +588,8 @@ class ResConv(tf.keras.layers.Layer):
             dropout_rate : float = 0,
             batch_norm : bool = False,
             layer_norm: bool = False,
+            window_norm: bool = False,
+            window_norm_size=32,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
@@ -346,19 +597,23 @@ class ResConv(tf.keras.layers.Layer):
             **kwargs
     ):
         super().__init__(name=name, **kwargs)
+        if sum(map(bool, (batch_norm, layer_norm, window_norm))) > 1:
+            raise ValueError("Choose at most one of batch_norm / layer_norm / window_norm")
         self.kernel_size = kernel_size
         self.dilation = dilation
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
+        self.window_norm = window_norm
+        self.window_norm_size = window_norm_size
         self.weighted_sum = weighted_sum
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -398,24 +653,20 @@ class ResConv(tf.keras.layers.Layer):
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
-        if self.batch_norm:
-            self.bn1 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-            self.bn2 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-        elif self.layer_norm:
-            self.bn1 = tf.keras.layers.LayerNormalization(  dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
-            self.bn2 = tf.keras.layers.LayerNormalization( dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+        self.norm1 = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
+        self.norm2 = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
         if self.weighted_sum:
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
 
     def call(self, input, training=None):
         x = self.conv1(input)
-        if self.batch_norm:
-            x = self.bn1(x, training = training)
+        if self.norm1 is not None:
+            x = self.norm1(x, training = training)
         x = self.activation_layer(x)
         x = self.conv2(x)
-        if self.batch_norm:
-            x = self.bn2(x, training = training)
+        if self.norm2 is not None:
+            x = self.norm2(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         if self.output_dtype is not None:
@@ -439,6 +690,8 @@ class ConvBNDrop(tf.keras.layers.Layer):
             dropout_rate:float = 0,
             batch_norm : bool = False,
             layer_norm: bool = False,
+            window_norm: bool = False,
+            window_norm_size=32,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
@@ -446,6 +699,8 @@ class ConvBNDrop(tf.keras.layers.Layer):
             **kwargs
     ):
         super().__init__(name=name, **kwargs)
+        if sum(map(bool, (batch_norm, layer_norm, window_norm))) > 1:
+            raise ValueError("Choose at most one of batch_norm / layer_norm / window_norm")
         self.filters = filters
         self.kernel_size = kernel_size
         self.dilation = dilation
@@ -453,13 +708,15 @@ class ConvBNDrop(tf.keras.layers.Layer):
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
+        self.window_norm = window_norm
+        self.window_norm_size = window_norm_size
         self.strides=strides
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -485,16 +742,13 @@ class ConvBNDrop(tf.keras.layers.Layer):
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
-        if self.batch_norm:
-            self.bn = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-        if self.layer_norm:
-            self.bn = tf.keras.layers.LayerNormalization( dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+        self.norm = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
         super().build(input_shape)
 
     def call(self, input, training=None):
         x = self.conv(input)
-        if self.batch_norm:
-            x = self.bn(x, training = training)
+        if self.norm is not None:
+            x = self.norm(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         if self.output_dtype is not None:
@@ -512,6 +766,8 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
             dropout_rate:float = 0,
             batch_norm : bool = False,
             layer_norm: bool = False,
+            window_norm: bool = False,
+            window_norm_size=32,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
@@ -519,19 +775,23 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
             **kwargs
     ):
         super().__init__(name=name, **kwargs)
+        if sum(map(bool, (batch_norm, layer_norm, window_norm))) > 1:
+            raise ValueError("Choose at most one of batch_norm / layer_norm / window_norm")
         self.filters = filters
         self.kernel_size = kernel_size
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
+        self.window_norm = window_norm
+        self.window_norm_size = window_norm_size
         self.strides=strides
         self.l2_reg=l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -552,16 +812,13 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
-        if self.batch_norm:
-            self.bn = tf.keras.layers.BatchNormalization(name = f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-        elif self.layer_norm:
-            self.bn = tf.keras.layers.LayerNormalization(name=f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+        self.norm = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
         super().build(input_shape)
 
     def call(self, input, training=None):
         x = self.conv(input)
-        if self.batch_norm:
-            x = self.bn(x, training = training)
+        if self.norm is not None:
+            x = self.norm(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         if self.output_dtype is not None:
