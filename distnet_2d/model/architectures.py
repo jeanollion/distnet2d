@@ -3,6 +3,41 @@ import copy
 
 from ..utils.helpers import ensure_multiplicity
 
+
+# Norm type aliases accepted by norm_features / norm_feature_dec / norm_decoder.
+# None / False / "" mean "no normalization at this position".
+_NORM_ALIASES = {
+    None: (False, False, False),
+    False: (False, False, False),
+    "":   (False, False, False),
+    "bn": (True,  False, False),
+    "ln": (False, True,  False),
+    "wn": (False, False, True),
+    "wgn":(False, False, True),
+}
+
+
+def _norm_flags(norm_choice):
+    """Map a norm type ('bn' / 'ln' / 'wn' / None) to (batch_norm, layer_norm, window_norm) booleans."""
+    key = norm_choice.lower() if isinstance(norm_choice, str) else norm_choice
+    if key not in _NORM_ALIASES:
+        raise ValueError(f"unknown norm choice: {norm_choice!r} (expected one of: 'bn', 'ln', 'wn', None)")
+    return _NORM_ALIASES[key]
+
+
+def _norm_kwargs(norm_choice):
+    """Returns a dict {batch_norm, layer_norm, window_norm} for splat into a parse_params dict."""
+    bn, ln, wn = _norm_flags(norm_choice)
+    return {"batch_norm": bn, "layer_norm": ln, "window_norm": wn}
+
+
+def _norm_kwargs_list(norm_choice, n_ops, position=0):
+    """List form for multi-op layers (decoder_op with ops=[...]). Norm active only at `position`."""
+    bn, ln, wn = _norm_flags(norm_choice)
+    def _one(active):
+        return [active if i == position else False for i in range(n_ops)]
+    return {"batch_norm": _one(bn), "layer_norm": _one(ln), "window_norm": _one(wn)}
+
 def get_architecture(architecture_type:str, **kwargs):
     kwargs = copy.deepcopy(kwargs)
     if architecture_type.lower()=="blend":
@@ -44,7 +79,12 @@ class ArchBase:
                  next: bool = True,
                  early_downsampling:bool = True,
                  scale_edm:bool = False,
-                 layer_norm_dec:bool = False, layer_norm_feature_dec:bool = True, batch_norm:bool = True, dropout:float=0.2,
+                 # Normalization at three key positions. Each accepts 'bn', 'ln', 'wn', or None.
+                 # - norm_features:    features[-1]                       (deep, shared across heads)
+                 # - norm_feature_dec: feature_decoder_settings[-1]       (per-head, deep, just before decoder upsampling chain)
+                 # - norm_decoder:     decoder_settings[-1] first op      (per-head, post-upsample at deepest decoder level)
+                 norm_features='bn', norm_feature_dec='bn', norm_decoder='bn',
+                 dropout:float=0.2,
                  l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",
                  attention_filters:int = 0, attention_positional_encoding:str="2d",
@@ -78,9 +118,13 @@ class ArchBase:
         self.frame_max_distance = frame_max_distance
         self.filters = filters
         self.early_downsampling = early_downsampling
-        self.layer_norm_dec = layer_norm_dec
-        self.layer_norm_feature_dec = layer_norm_feature_dec
-        self.batch_norm = batch_norm
+        # Validate each norm choice early (raises if a typo slips through).
+        _norm_flags(norm_features)
+        _norm_flags(norm_feature_dec)
+        _norm_flags(norm_decoder)
+        self.norm_features = norm_features
+        self.norm_feature_dec = norm_feature_dec
+        self.norm_decoder = norm_decoder
         self.dropout = dropout
         self.l2_reg=l2_reg
         self.position_encoding_l2_reg=position_encoding_l2_reg
@@ -158,21 +202,18 @@ class D2(ArchDepth):
              "kernel_size": ker2 if self.self_attention > 0 else ker2_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size": ker2, "weighted_sum": False,
-             "dropout_rate": 0, "batch_norm": self.batch_norm},
+             "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": False, "layer_norm":self.layer_norm_feature_dec}
+            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0, **_norm_kwargs(self.norm_feature_dec)}
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
               "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 32, "ops": ["conv", "resconv"], "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
-              "layer_norm": [self.layer_norm_dec, False], "dropout_rate": 0}
+              **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
 
@@ -234,15 +275,12 @@ class D3(ArchDepth):
              "kernel_size": ker3 if self.self_attention > 0 else ker3_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size": ker3, "weighted_sum": False,
-             "dropout_rate": 0, "batch_norm": self.batch_norm},
+             "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": False, "layer_norm":self.layer_norm_feature_dec}
+            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0, **_norm_kwargs(self.norm_feature_dec)}
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
@@ -250,7 +288,7 @@ class D3(ArchDepth):
             {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size" : ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
               "batch_norm": False, "dropout_rate": 0},
             {"filters": 64, "ops": ["conv", "resconv"], "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
-              "layer_norm": [self.layer_norm_dec, False], "dropout_rate": 0}
+              **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
 
@@ -324,15 +362,12 @@ class D4(ArchDepth):
              "kernel_size": ker4 if self.self_attention > 0 else ker4_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size": ker4, "weighted_sum": False,
-             "dropout_rate": 0, "batch_norm": self.batch_norm},
+             "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"op": "resconv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": False, "layer_norm":self.layer_norm_feature_dec }
+            {"filters": 0.5, "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"op": "resconv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 1., "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0, **_norm_kwargs(self.norm_feature_dec)}
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
@@ -342,13 +377,13 @@ class D4(ArchDepth):
             {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size": ker2_1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
               "batch_norm": False, "dropout_rate": 0},
             {"filters": 64, "ops": ["conv", "resconv"], "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker3, 2),
-              "layer_norm": [self.layer_norm_dec, False], "dropout_rate": 0}
+              **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
 
 class Blend(ArchBase):
     def __init__(self, frame_aware:bool, attention:int=0, self_attention:int=0, blending_filter_factor:float=0.5, **kwargs):
-        super().__init__(frame_aware=frame_aware, batch_norm=True, layer_norm_dec=False, **kwargs)
+        super().__init__(frame_aware=frame_aware, **kwargs)
         if attention > 0 or self_attention:
             assert self.spatial_dimensions is not None and min( self.spatial_dimensions) > 0, f"for attention mechanism, spatial dim must be provided. Got {self.spatial_dimensions}"
         self.attention = attention
@@ -400,7 +435,7 @@ class BlendD4(Blend, D4):
 
 class TemPy(ArchBase):
     def __init__(self, window_attention:int, wsa_edm:bool=False, wsa_cdm:bool=False, frame_aware:bool=True, **kwargs):
-        super().__init__(frame_aware=frame_aware, batch_norm=True, layer_norm_dec=False, **kwargs)
+        super().__init__(frame_aware=frame_aware, **kwargs)
         self.window_attention = window_attention
         if self.frame_window > 0:
             assert window_attention > 0

@@ -134,13 +134,18 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
         self._window = ws
 
         if self.scale:
-            self.gamma = self.add_weight("gamma", shape=(C,), initializer="ones")
+            self.gamma = self.add_weight("gamma", shape=(C,), initializer="ones", dtype="float32", autocast=False)
         if self.center:
-            self.beta = self.add_weight("beta", shape=(C,), initializer="zeros")
+            self.beta = self.add_weight("beta", shape=(C,), initializer="zeros", dtype="float32", autocast=False)
+        # Broadcast shape for gamma/beta against (B, [Z,] Y, X, G, Cg) — built once.
+        self._vars_shape = [1] * (n_spatial + 1) + [self.groups, self._channels_per_group]
         super().build(input_shape)
 
     def call(self, inputs):
-        x = tf.cast(inputs, self.compute_dtype)
+        # Stats (mean, variance) are computed in fp32 for numerical stability
+        # under mixed_float16 — matches what BN / LN do internally. Cast back to
+        # the input dtype (typically fp16) just before returning.
+        x = tf.cast(inputs, tf.float32)
         static_shape = inputs.shape.as_list()
         n_spatial = len(self._window)
 
@@ -168,7 +173,13 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
             m  = tf.reduce_mean(x_g,         axis=reduce_axes, keepdims=True)
             ms = tf.reduce_mean(x_g * x_g,   axis=reduce_axes, keepdims=True)
             var = tf.maximum(ms - m * m, tf.cast(0.0, m.dtype))
-            x_g = (x_g - m) * tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
+            inv = tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
+            if self.scale:
+                inv = inv * tf.reshape(self.gamma, self._vars_shape)
+            res = -m * inv
+            if self.center:
+                res = res + tf.reshape(self.beta, self._vars_shape)
+            x_g = x_g * inv + res
             out = tf.reshape(x_g, x_shape)
         else:
             # Local / mixed path: avg_pool spatially with REFLECT padding.
@@ -188,11 +199,13 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
                     need_pad = True
             pad_widths.append([0, 0])
             if need_pad:
-                x_pad  = tf.pad(x,       pad_widths, mode=self.padding_mode)
-                x2_pad = tf.pad(x * x,   pad_widths, mode=self.padding_mode)
+                # Single pad on x; square afterwards. Valid for REFLECT/SYMMETRIC
+                # (pad reorders elements -> pad(x)*pad(x) == pad(x*x)) and for
+                # CONSTANT=0 (the default).
+                x_pad  = tf.pad(x, pad_widths, mode=self.padding_mode)
             else:
-                # No local axis: effectively a no-op pool. Still cast for consistency.
-                x_pad, x2_pad = x, x * x
+                x_pad = x
+            x2_pad = x_pad * x_pad
 
             if self._tridim:
                 m_ch  = tf.nn.avg_pool3d(x_pad,  ksize=effective_window, strides=[1, 1, 1], padding='VALID')
@@ -216,15 +229,15 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
             m  = tf.reduce_mean(tf.reshape(m_ch,  stat_shape), axis=-1, keepdims=True)
             ms = tf.reduce_mean(tf.reshape(ms_ch, stat_shape), axis=-1, keepdims=True)
             var = tf.maximum(ms - m * m, tf.cast(0.0, m.dtype))
-
             x_g = tf.reshape(x, new_shape)
-            x_g = (x_g - m) * tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
+            inv = tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
+            if self.scale:
+                inv = inv * tf.reshape(self.gamma, self._vars_shape)
+            res = -m * inv
+            if self.center:
+                res = res + tf.reshape(self.beta, self._vars_shape)
+            x_g = x_g * inv + res
             out = tf.reshape(x_g, x_shape)
-
-        if self.scale:
-            out = out * tf.cast(self.gamma, out.dtype)
-        if self.center:
-            out = out + tf.cast(self.beta, out.dtype)
         return tf.cast(out, inputs.dtype)
 
 
@@ -238,8 +251,8 @@ def _make_norm(batch_norm:bool, layer_norm:bool, window_norm:bool, compute_dtype
                      stats over a fixed-size spatial window). Size-invariant at
                      inference. Groups picked automatically via get_group_norm_groups.
     """
-    #if batch_norm or layer_norm or window_norm:
-    #    print(f"make norm: BN={batch_norm} LN={layer_norm} WN={window_norm} ({window_norm_size})")
+    if batch_norm or layer_norm or window_norm:
+        print(f"make norm: BN={batch_norm} LN={layer_norm} WN={window_norm} ({window_norm_size})")
     dtype = 'mixed_float16' if compute_dtype == 'float16' else 'float32'
     if batch_norm:
         return tf.keras.layers.BatchNormalization(dtype=dtype, name=name)
