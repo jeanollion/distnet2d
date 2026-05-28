@@ -29,16 +29,23 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
     conv_mode = CONV_2D
 
     def fun(args):
+        dZ = true_dZ = None  # only set in tridimensional_mode (excluded from args otherwise)
         if category:
             if tracking:
-                edm, gdcm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+                if tridimensional_mode:
+                    edm, gdcm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+                else:
+                    edm, gdcm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
             elif segmentation:
                 edm, gdcm, cat, true_edm, true_cat, labels, true_center_ob = args
             else:
                 cat, labels, true_center_ob = args
         else:
             if tracking:
-                edm, gdcm, dZ, dY, dX, lm, true_edm, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+                if tridimensional_mode:
+                    edm, gdcm, dZ, dY, dX, lm, true_edm, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
+                else:
+                    edm, gdcm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_ob = args
             else:
                 edm, gdcm, true_edm, labels, true_center_ob = args
         perm3 = [3, 0, 1, 2] if tridimensional_mode else [2, 0, 1]
@@ -127,7 +134,11 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
     if category:
         if tracking:
             def metrics_fun(edm, gcdm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
-                return tf.map_fn(fun, (edm, gcdm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
+                if tridimensional_mode:
+                    elems = (edm, gcdm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array)
+                else:
+                    elems = (edm, gcdm, cat, dY, dX, lm, true_edm, true_cat, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array)
+                return tf.map_fn(fun, elems, fn_output_signature=tf.float32)
         elif segmentation:
             def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
                 return tf.map_fn(fun, (edm, gcdm, cat, true_edm, true_cat, labels, true_center_array), fn_output_signature=tf.float32)
@@ -137,7 +148,11 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
     else:
         if tracking:
             def metrics_fun(edm, gcdm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
-                return tf.map_fn(fun, (edm, gcdm, dZ, dY, dX, lm, true_edm, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array), fn_output_signature=tf.float32)
+                if tridimensional_mode:
+                    elems = (edm, gcdm, dZ, dY, dX, lm, true_edm, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array)
+                else:
+                    elems = (edm, gcdm, dY, dX, lm, true_edm, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array)
+                return tf.map_fn(fun, elems, fn_output_signature=tf.float32)
         else:
             def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
                 return tf.map_fn(fun, (edm, gcdm, true_edm, labels, true_center_array), fn_output_signature=tf.float32)
