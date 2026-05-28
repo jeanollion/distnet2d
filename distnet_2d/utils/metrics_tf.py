@@ -39,7 +39,7 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
             elif segmentation:
                 edm, gdcm, cat, true_edm, true_cat, labels, true_center_ob = args
             else:
-                cat, labels, true_center_ob = args
+                cat, true_cat, labels, true_center_ob = args
         else:
             if tracking:
                 if tridimensional_mode:
@@ -106,6 +106,8 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
 
         # CATEGORY
         if category:
+            if not segmentation:  # in segmentation mode labels was already squeezed to (Y, X) above
+                labels = labels[0]
             true_cat = tf.cast(objectwise_compute(true_cat[..., 0], mean_fun_true_lm, labels, ids, sizes), tf.int32) - tf.cast(1, tf.int32)
             cat = objectwise_compute(cat, mean_fun_lm, labels, ids, sizes)
             cat = tf.math.argmax(cat, axis=-1, output_type=tf.int32)
@@ -143,8 +145,8 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
             def metrics_fun(edm, gcdm, cat, true_edm, true_cat, labels, true_center_array):
                 return tf.map_fn(fun, (edm, gcdm, cat, true_edm, true_cat, labels, true_center_array), fn_output_signature=tf.float32)
         else:
-            def metrics_fun(cat, labels, true_center_array):
-                return tf.map_fn(fun, (cat, labels, true_center_array), fn_output_signature=tf.float32)
+            def metrics_fun(cat, true_cat, labels, true_center_array):
+                return tf.map_fn(fun, (cat, true_cat, labels, true_center_array), fn_output_signature=tf.float32)
     else:
         if tracking:
             def metrics_fun(edm, gcdm, cat, dZ, dY, dX, lm, true_edm, true_cat, true_dZ, true_dY, true_dX, true_lm, labels, prev_labels, true_center_array):
