@@ -83,7 +83,7 @@ class ArchBase:
                  # - norm_features:    features[-1]                       (deep, shared across heads)
                  # - norm_feature_dec: feature_decoder_settings[-1]       (per-head, deep, just before decoder upsampling chain)
                  # - norm_decoder:     decoder_settings[-1] first op      (per-head, post-upsample at deepest decoder level)
-                 norm_features='bn', norm_feature_dec='bn', norm_decoder='bn',
+                 norm_features='wn', norm_feature_dec='wn', norm_decoder=None,
                  dropout:float=0.2,
                  l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",
@@ -212,7 +212,7 @@ class D2(ArchDepth):
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
               "batch_norm_up": False, "dropout_rate": 0},
-            {"filters": 32, "ops": ["conv", "resconv"], "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
+            {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
@@ -287,7 +287,7 @@ class D3(ArchDepth):
               "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size" : ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 64, "ops": ["conv", "resconv"], "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
+            {"filters": 64, "ops": ["resconv"]*2, "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
@@ -376,7 +376,7 @@ class D4(ArchDepth):
               "batch_norm": False, "dropout_rate": 0},
             {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size": ker2_1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 64, "ops": ["conv", "resconv"], "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker3, 2),
+            {"filters": 64, "ops": ["resconv"]*2, "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker3, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
