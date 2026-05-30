@@ -68,12 +68,9 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
               data, pass e.g. (1, 32, 32) for per-Z-slice normalization.
         epsilon: numerical stabilizer.
         center, scale: include affine beta/gamma.
-        padding_mode: 'REFLECT' (default), 'SYMMETRIC', or 'CONSTANT'. REFLECT
-            mirrors content at borders without duplicating edge — best default
-            for natural images.
     """
     def __init__(self, groups=None, window_size=32, epsilon=1e-3,
-                 center=True, scale=True, padding_mode='REFLECT',
+                 center=True, scale=True,
                  name="WindowGroupNormalization", **kwargs):
         super().__init__(name=name, **kwargs)
         self.groups = groups
@@ -81,7 +78,6 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
         self.epsilon = epsilon
         self.center = center
         self.scale = scale
-        self.padding_mode = padding_mode
 
     def get_config(self):
         config = super().get_config().copy()
@@ -90,8 +86,7 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
             "window_size": self.window_size,
             "epsilon": self.epsilon,
             "center": self.center,
-            "scale": self.scale,
-            "padding_mode": self.padding_mode,
+            "scale": self.scale
         })
         return config
 
@@ -182,37 +177,22 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
             x_g = x_g * inv + res
             out = tf.reshape(x_g, x_shape)
         else:
-            # Local / mixed path: avg_pool spatially with REFLECT padding.
-            # For axes where window >= dim we set the effective pool window to 1
-            # (no-op along that axis) and reduce_mean over them afterwards — this
-            # avoids the reflect-padding artifact when window matches dim.
+            # Local / mixed path: locally-pooled stats via SAME avg_pool. SAME slides the
+            # fixed window and at borders averages only the in-bounds elements (divides by
+            # the valid count), i.e. the window is clamped at the edges. No manual padding:
+            # works for any input size (including smaller than the window) and preserves
+            # spatial shape. For axes where window >= dim we pool with size 1 (no-op) and
+            # reduce_mean over them afterwards so they behave globally.
             effective_window = [
                 1 if is_global[i] else self._window[i] for i in range(n_spatial)
             ]
-            # Asymmetric symmetric pad (so output spatial size matches input for any w).
-            pad_widths = [[0, 0]]
-            need_pad = False
-            for w in effective_window:
-                half = w // 2
-                pad_widths.append([half, w - half - 1])
-                if w > 1:
-                    need_pad = True
-            pad_widths.append([0, 0])
-            if need_pad:
-                # Single pad on x; square afterwards. Valid for REFLECT/SYMMETRIC
-                # (pad reorders elements -> pad(x)*pad(x) == pad(x*x)) and for
-                # CONSTANT=0 (the default).
-                x_pad  = tf.pad(x, pad_widths, mode=self.padding_mode)
-            else:
-                x_pad = x
-            x2_pad = x_pad * x_pad
-
+            x2 = x * x
             if self._tridim:
-                m_ch  = tf.nn.avg_pool3d(x_pad,  ksize=effective_window, strides=[1, 1, 1], padding='VALID')
-                ms_ch = tf.nn.avg_pool3d(x2_pad, ksize=effective_window, strides=[1, 1, 1], padding='VALID')
+                m_ch  = tf.nn.avg_pool3d(x,  ksize=effective_window, strides=[1, 1, 1], padding='SAME')
+                ms_ch = tf.nn.avg_pool3d(x2, ksize=effective_window, strides=[1, 1, 1], padding='SAME')
             else:
-                m_ch  = tf.nn.avg_pool2d(x_pad,  ksize=effective_window, strides=[1, 1], padding='VALID')
-                ms_ch = tf.nn.avg_pool2d(x2_pad, ksize=effective_window, strides=[1, 1], padding='VALID')
+                m_ch  = tf.nn.avg_pool2d(x,  ksize=effective_window, strides=[1, 1], padding='SAME')
+                ms_ch = tf.nn.avg_pool2d(x2, ksize=effective_window, strides=[1, 1], padding='SAME')
 
             # Reduce_mean over global axes (broadcast back via keepdims=True).
             global_axes = [1 + i for i in range(n_spatial) if is_global[i]]
