@@ -42,17 +42,17 @@ class FocalCrossEntropy(tf.keras.losses.Loss):
                    γ=2.0 → standard focal (recommended start)
                    γ=5.0 → extreme focus (for very imbalanced data)
 
-            temperature: Tempering parameter (1 > t ≥ 0). Replaces log(p) with the tempered
-                   logarithm log_t(p) = (p^(t) - 1) / t, whose gradient is
-                   p^(t-1) instead of 1/p. This bounds the loss (and gradient) on
-                   confident-wrong / hard pixels, so a few ambiguous or mislabeled
-                   examples can no longer emit the huge gradients that destabilize
-                   mixed-precision training. Higher t = tighter bound (loss → 1/t,
-                   i.e. → 1 as t → ∞) and more robustness to label noise, but may slow
-                   learning of confident decisions.
+            temperature: Tempering parameter (0 ≤ t < 1). Replaces log(p) with the tempered
+                   logarithm log_t(p) = (p^t - 1) / t, whose gradient p^(t-1) decays
+                   instead of blowing up like 1/p. This bounds the per-pixel loss on
+                   confident-wrong / hard pixels (loss ≤ 1/t for p→0), so a few ambiguous
+                   or mislabeled examples can no longer emit the huge gradients that
+                   destabilize mixed-precision training. Higher t = tighter bound (1/t → 1
+                   as t → 1) and more robustness to label noise, but may slow learning of
+                   confident decisions.
                    t=0.0 → standard cross entropy (log, unbounded gradient)
-                   t=0.1 → moderate bounding (loss capped at 10 for p→0)
-                   t=0.5+ → strong bounding (very stable, may slow learning)
+                   t=0.1 → mild bounding (loss capped at -10 for p→0)
+                   t=0.5 → strong bounding (loss capped at -2, very stable, may slow learning)
 
             label_smoothing: Smoothing parameter (0 ≤ ε < 1). Regularization strength.
                             ε=0.0 → no smoothing (hard labels)
@@ -87,14 +87,14 @@ class FocalCrossEntropy(tf.keras.losses.Loss):
         assert self.focal_weight is None or np.all(self.focal_weight >= 0), f"gamma must be >=0, got {focal_weight}"
         assert 1 > self.temperature >= 0, f"temperature must be >=0 and <1, got {temperature}"
         assert 0 <= label_smoothing < 1, f"label_smoothing must be in [0,1), got {label_smoothing}"
-        # Exponent of the tempered log: log_t(p) = (p^temperature - 1)/_temper_exp, with
-        # gradient p^(_temper_exp-1) = p^(-1/t). t=0 -> standard log (handled separately).
+        # Tempered log: log_t(p) = (p^t - 1)/t, gradient p^(t-1). t=0 is the 0/0 limit
+        # = standard log (handled separately below).
 
         super().__init__(**kwargs)
 
     def _tempered_log(self, p):
-        # t=1: standard natural log (unbounded). t>1: bounded tempered log.
-        if self.temperature == 1.:
+        # t=0: standard natural log (unbounded gradient). 0<t<1: bounded tempered log (loss <= 1/t).
+        if self.temperature == 0.:
             return tf.math.log(p)
         e = tf.cast(self.temperature, p.dtype)
         return (tf.pow(p, e) - 1.) / e
