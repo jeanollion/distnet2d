@@ -673,6 +673,38 @@ class ResConv(tf.keras.layers.Layer):
             return self.activation_layer(input + x)
 
 
+# Pre-softmax logit clip (absolute bound). Logits beyond ~|16| already saturate
+# softmax (p indistinguishable from 0/1 even in fp16), so clamping at 30 is
+# information-free yet maps any fp16 overflow (+/-inf) to a finite value,
+# preventing softmax(inf)=NaN. It is a safety rail, not a regularizer: healthy
+# logits never reach it, so no gradient is lost in normal training. Set to None
+# to disable. To also *regularize* over-confidence, lower this AND add label
+# smoothing on the loss (clip alone, if logits keep being pushed past the bound,
+# zeroes their gradient -> can drive the degenerate uniform prediction).
+DEFAULT_LOGIT_CLIP = 30.
+
+def _is_softmax_activation(activation, activation_layer):
+    if isinstance(activation, str):
+        return activation.lower() == "softmax"
+    return getattr(activation_layer, "__name__", None) == "softmax"
+
+def finalize_output(x, activation_layer, is_softmax, logit_clip, output_dtype):
+    """Output cast + activation for a conv / conv-transpose head.
+
+    Softmax heads clamp the pre-activation logits in fp32 and compute the softmax
+    in fp32 regardless of output_dtype, so the head is NaN-proof without forcing
+    the whole conv to fp32 (only the activation runs in fp32). tf.clip_by_value
+    maps +/-inf to the finite bound, so an upstream fp16 overflow becomes a
+    saturated (not NaN) prediction. Non-softmax heads keep the original behavior.
+    """
+    if is_softmax and logit_clip is not None:
+        x = tf.clip_by_value(tf.cast(x, tf.float32), -logit_clip, logit_clip)
+        return activation_layer(x)
+    if output_dtype is not None:
+        x = tf.cast(x, dtype=output_dtype)
+    return activation_layer(x)
+
+
 class ConvBNDrop(tf.keras.layers.Layer):
     def __init__(
             self,
@@ -686,6 +718,7 @@ class ConvBNDrop(tf.keras.layers.Layer):
             window_norm: bool = False,
             window_norm_size=32,
             activation:str = "relu",
+            logit_clip:float = DEFAULT_LOGIT_CLIP,
             l2_reg:float = 0,
             output_dtype=None,
             name: str="ConvBNDrop",
@@ -698,6 +731,7 @@ class ConvBNDrop(tf.keras.layers.Layer):
         self.kernel_size = kernel_size
         self.dilation = dilation
         self.activation=activation
+        self.logit_clip=logit_clip
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
@@ -709,7 +743,7 @@ class ConvBNDrop(tf.keras.layers.Layer):
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "logit_clip":self.logit_clip, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -733,6 +767,7 @@ class ConvBNDrop(tf.keras.layers.Layer):
             bias_constraint = ClipMaxValue()
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
+        self._is_softmax = _is_softmax_activation(self.activation, self.activation_layer)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         self.norm = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
@@ -744,9 +779,7 @@ class ConvBNDrop(tf.keras.layers.Layer):
             x = self.norm(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
-        if self.output_dtype is not None:
-            x = tf.cast(x, dtype=self.output_dtype)
-        return self.activation_layer(x)
+        return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.output_dtype)
 
 
 class ConvTransposeBNDrop(tf.keras.layers.Layer):
@@ -762,6 +795,7 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
             window_norm: bool = False,
             window_norm_size=32,
             activation:str = "relu",
+            logit_clip:float = DEFAULT_LOGIT_CLIP,
             l2_reg:float = 0,
             output_dtype=None,
             name: str="ConvTransposeBNDrop",
@@ -773,6 +807,7 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
         self.filters = filters
         self.kernel_size = kernel_size
         self.activation=activation
+        self.logit_clip=logit_clip
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
@@ -784,7 +819,7 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "logit_clip":self.logit_clip, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -803,6 +838,7 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
             name=f"tConv{ker_size_to_string(self.kernel_size)}",
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
+        self._is_softmax = _is_softmax_activation(self.activation, self.activation_layer)
         if self.dropout_rate>0:
             self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
         self.norm = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
@@ -814,9 +850,7 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
             x = self.norm(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
-        if self.output_dtype is not None:
-            x = tf.cast(x, dtype=self.output_dtype)
-        return self.activation_layer(x)
+        return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.output_dtype)
 
 
 class UpSamplingWithDtype(tf.keras.layers.Layer):
