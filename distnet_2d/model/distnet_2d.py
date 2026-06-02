@@ -37,13 +37,14 @@ class DiSTNetModel(tf.keras.Model):
                  link_multiplicity_class_weights=None,  # array of weights: [single, multiple, null] or None = auto
                  link_multiplicity_max_class_weight=50,
                  link_multiplicity_focal_weight:float = 2,
-                 link_multiplicity_temperature:float = 1,
+                 link_multiplicity_temperature:float = 0, link_multiplicity_label_smoothing:float =0,
                  frame_window=3,
                  future_frames: bool = True,
                  long_term:bool=True,
                  predict_fw:bool=True,
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
                  category_number:int=0, category_class_weights = None, category_focal_weight = 2.0, category_max_class_weight=10,
+                 category_temperature:float = 0, category_label_smoothing:float = 0,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  gradient_accumulation_steps:int=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False, scale_losses:bool = True,
@@ -77,15 +78,15 @@ class DiSTNetModel(tf.keras.Model):
         self.predict_edm_derivatives = predict_edm_derivatives
         if link_multiplicity_class_weights is not None:
             assert len(link_multiplicity_class_weights) == 3, "3 link multiplicity class weights should be provided: normal cell, dividing/merging cells, cell with no previous cell"
-            self.link_multiplicity_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight, temperature=link_multiplicity_temperature), link_multiplicity_class_weights, remove_background=True)
+            self.link_multiplicity_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight, temperature=link_multiplicity_temperature, label_smoothing=link_multiplicity_label_smoothing), link_multiplicity_class_weights, remove_background=True)
         else:
-            self.link_multiplicity_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight, temperature=link_multiplicity_temperature), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
+            self.link_multiplicity_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight, temperature=link_multiplicity_temperature, label_smoothing=link_multiplicity_label_smoothing), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
         if category_number > 1:
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
-                self.category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight), category_class_weights, remove_background=True)
+                self.category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight, temperature=category_temperature, label_smoothing=category_label_smoothing), category_class_weights, remove_background=True)
             else:
-                self.category_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
+                self.category_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight, temperature=category_temperature, label_smoothing=category_label_smoothing), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
             if edm_loss_weight == 0 and cdm_loss_weight == 0 and displacement_loss_weight == 0 and link_multiplicity_loss_weight == 0:
                 self.fgbg_category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=0), [1., 1.], remove_background=False)
             else :

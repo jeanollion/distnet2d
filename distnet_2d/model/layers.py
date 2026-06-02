@@ -154,6 +154,7 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
         # under mixed_float16 — matches what BN / LN do internally. Cast back to
         # the input dtype (typically fp16) just before returning.
         x = tf.cast(inputs, tf.float32)
+        x = numerics_probe(x, f"{self.name}/wn_in")  # debug: catches an upstream overflow BEFORE the firebreak below
         static_shape = inputs.shape.as_list()
         n_spatial = len(self._window)
 
@@ -681,9 +682,10 @@ class ResConv(tf.keras.layers.Layer):
         else:
             input = tf.cast(input, dtype=x.dtype)
         if self.weighted_sum:
-            return self.activation_layer(self.ws([input, x]))
+            out = self.activation_layer(self.ws([input, x]))
         else:
-            return self.activation_layer(input + x)
+            out = self.activation_layer(input + x)
+        return numerics_probe(out, f"{self.name}/resconv_out")
 
 
 # Pre-softmax logit clip (absolute bound). Logits beyond ~|16| already saturate
