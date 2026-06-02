@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from .layers import InferenceLayer, HybridThresholdL2Regularizer, ClipMaxValue
+from .layers import InferenceLayer, HybridThresholdL2Regularizer, ClipMaxValue, numerics_probe
 
 
 class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
@@ -27,10 +27,12 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
                  add_distance_embedding:bool=True,
                  window_processing:str="auto", # "batch", "row", "col", "sequential", "auto"="batch" at train and "sequential" otherwise
                  overlap_reduction: str = 'geometrical',  # 'mean', 'attention_weighted', 'geometrical'
+                 fp32_attention: bool = True, # compute Q.K scores + softmax in fp32 (avoids fp16 overflow -> NaN under mixed precision); attn_probs are cast back so downstream is unchanged
                  l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention", **kwargs):
         super().__init__(name=name, **kwargs)
         self.num_heads = num_heads
         self.attention_filters = attention_filters
+        self.fp32_attention = fp32_attention
         # Support both int and tuple for window_size
         if isinstance(window_size, int):
             self.window_size = (window_size, window_size)
@@ -66,6 +68,7 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
             "layer_normalization": self.layer_normalization,
             "window_processing":self.window_processing,
             "overlap_reduction": self.overlap_reduction,
+            "fp32_attention": self.fp32_attention,
             "add_distance_embedding": self.add_distance_embedding
         })
         return config
@@ -1036,11 +1039,14 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
             v = tf.transpose(v, [0, 2, 1, 3])  # (B_win, H, N, F)
             k = tf.transpose(k, [0, 2, 3, 1])  # (B_win, H, F, N)
 
-            scale = tf.math.rsqrt(tf.cast(F, q.dtype))
-            attn = tf.matmul(q, k) * scale  # (B_win, H, N, N)
-            attn = attn + rpb[None, :, :, :]
+            score_dtype = tf.float32 if self.fp32_attention else q.dtype
+            scale = tf.math.rsqrt(tf.cast(F, score_dtype))
+            attn = tf.matmul(tf.cast(q, score_dtype), tf.cast(k, score_dtype)) * scale  # (B_win, H, N, N)
+            attn = attn + tf.cast(rpb[None, :, :, :], score_dtype)
+            attn = numerics_probe(attn, f"{self.name}/attn_scores")
 
-            attn_probs = tf.nn.softmax(attn, axis=-1)
+            # softmax in score_dtype; probs are in [0,1] so casting back to compute dtype is safe
+            attn_probs = tf.cast(tf.nn.softmax(attn, axis=-1), q.dtype)
             if self.dropout > 0 and training:
                 attn_probs = self.dropout_layer(attn_probs, training=training)
 
@@ -1076,11 +1082,14 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
             k = tf.reshape(k_windows, [num_windows, -1, N, H, F])  # (W,    B, N, H, F)
             v = tf.reshape(v_windows, [num_windows, -1, N, H, F])  # (W,    B, N, H, F)
 
-            scale = tf.math.rsqrt(tf.cast(F, q.dtype))
-            attn = tf.einsum('mqbihf,mbkhf->mqbhik', q, k, optimize='optimal') * scale  # (W,Q,B,H,N,N)
-            attn = attn + rpb[None, None, None, :, :, :]
+            score_dtype = tf.float32 if self.fp32_attention else q.dtype
+            scale = tf.math.rsqrt(tf.cast(F, score_dtype))
+            attn = tf.einsum('mqbihf,mbkhf->mqbhik', tf.cast(q, score_dtype), tf.cast(k, score_dtype), optimize='optimal') * scale  # (W,Q,B,H,N,N)
+            attn = attn + tf.cast(rpb[None, None, None, :, :, :], score_dtype)
+            attn = numerics_probe(attn, f"{self.name}/attn_scores")
 
-            attn_probs = tf.nn.softmax(attn, axis=-1)
+            # softmax in score_dtype; probs are in [0,1] so casting back to compute dtype is safe
+            attn_probs = tf.cast(tf.nn.softmax(attn, axis=-1), q.dtype)
             if self.dropout > 0 and training:
                 attn_probs = self.dropout_layer(attn_probs, training=training)
 

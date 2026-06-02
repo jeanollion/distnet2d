@@ -1,3 +1,4 @@
+import os
 import contextlib
 import copy
 from collections import defaultdict
@@ -108,7 +109,6 @@ class DiSTNetModel(tf.keras.Model):
             agc_kw.extend(["DecoderTrackZ0_", "DecoderCenterCDMdZ0_", "DecoderSegEDMdZ0_"])
         self.agc_exclude_keywords = agc_kw if agc_exclude_output else None
         self.print_gradients=print_gradients
-        self.check_numerics=False # set to True to localize first NaN/Inf source (per-output forward check)
 
         # override losses reduction to None for tf.distribute.MirroredStrategy and MultiWorkerStrategy
 
@@ -213,7 +213,7 @@ class DiSTNetModel(tf.keras.Model):
         cat_idx = lm_idx + int(link_multiplicity_weight > 0)
         with self.maybe_gradient_tape(training) as tape:
             y_pred = self(x, training=training)  # Forward pass
-            if self.check_numerics: # localize first NaN/Inf: fires on the output index that overflows (lm_idx => LM forward overflow)
+            if os.environ.get("DISTNET_DEBUG_NUMERICS", "0") == "1": # localize first NaN/Inf: fires on the output index that overflows (lm_idx => LM forward overflow)
                 if isinstance(y_pred, (list, tuple)):
                     y_pred = [tf.debugging.check_numerics(p, f"y_pred[{i}]") for i, p in enumerate(y_pred)]
                 else:

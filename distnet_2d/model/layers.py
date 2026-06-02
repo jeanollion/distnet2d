@@ -4,6 +4,19 @@ from dataset_iterator.keras_layers import InferenceLayer
 from ..utils.helpers import ensure_multiplicity
 import tensorflow as tf
 import numpy as np
+import os
+os.environ["DISTNET_DEBUG_NUMERICS"] = "1"
+
+def numerics_probe(x, name):
+    """Block-level NaN/Inf localizer (graph-safe). Disabled unless the env var
+    DISTNET_DEBUG_NUMERICS=1 is set *before the model is built*. When enabled it
+    inserts a tf.debugging.check_numerics op so the FIRST non-finite tensor in
+    the forward pass raises an error naming `name` -> pinpoints the block where
+    an overflow first appears (conv pre-activation, WN output, attention scores).
+    Off by default => zero overhead in normal training."""
+    if x is None or os.environ.get("DISTNET_DEBUG_NUMERICS", "0") != "1":
+        return x
+    return tf.debugging.check_numerics(x, name)
 
 
 def get_group_norm_groups(num_channels:int, target:int=32, min_per_group:int=4, warn_on_degenerate:bool=True):
@@ -218,7 +231,7 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
                 res = res + tf.reshape(self.beta, self._vars_shape)
             x_g = x_g * inv + res
             out = tf.reshape(x_g, x_shape)
-        return tf.cast(out, inputs.dtype)
+        return numerics_probe(tf.cast(out, inputs.dtype), f"{self.name}/wn_out")
 
 
 def _make_norm(batch_norm:bool, layer_norm:bool, window_norm:bool, compute_dtype:str, window_norm_size:int=32, name:str=None):
@@ -779,6 +792,7 @@ class ConvBNDrop(tf.keras.layers.Layer):
             x = self.norm(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
+        x = numerics_probe(x, f"{self.name}/pre_act")
         return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.output_dtype)
 
 
@@ -850,6 +864,7 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
             x = self.norm(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
+        x = numerics_probe(x, f"{self.name}/pre_act")
         return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.output_dtype)
 
 
