@@ -27,7 +27,7 @@ class WindowSpatialAttention(InferenceLayer, tf.keras.layers.Layer):
                  add_distance_embedding:bool=True,
                  window_processing:str="auto", # "batch", "row", "col", "sequential", "auto"="batch" at train and "sequential" otherwise
                  overlap_reduction: str = 'geometrical',  # 'mean', 'attention_weighted', 'geometrical'
-                 fp32_attention: bool = True, # compute Q.K scores + softmax in fp32 (avoids fp16 overflow -> NaN under mixed precision); attn_probs are cast back so downstream is unchanged
+                 fp32_attention: bool = False, # compute Q.K scores + softmax in fp32 (avoids fp16 overflow -> NaN under mixed precision); attn_probs are cast back so downstream is unchanged
                  l2_reg: float = 0., position_encoding_l2_reg: float = 1e-5, name="WindowSpatialAttention", **kwargs):
         super().__init__(name=name, **kwargs)
         self.num_heads = num_heads

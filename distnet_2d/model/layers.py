@@ -473,6 +473,8 @@ class Combine(tf.keras.layers.Layer):
             compensate_gradient:bool = False,
             l2_reg: float=0,
             output_dtype:str = None,
+            logit_softcap:float = None,
+            z_loss_weight:float = 0.,
             name: str="Combine",
             **kwargs
         ):
@@ -482,11 +484,13 @@ class Combine(tf.keras.layers.Layer):
         self.compensate_gradient = compensate_gradient
         self.l2_reg=l2_reg
         self.output_dtype=output_dtype
+        self.logit_softcap=logit_softcap
+        self.z_loss_weight=z_loss_weight
         super().__init__(name=name, **kwargs)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype, "logit_softcap":self.logit_softcap, "z_loss_weight":self.z_loss_weight})
       return config
 
     def build(self, input_shape):
@@ -504,6 +508,8 @@ class Combine(tf.keras.layers.Layer):
             dropout_rate=0,
             l2_reg=self.l2_reg,
             output_dtype=self.output_dtype,
+            logit_softcap=self.logit_softcap,
+            z_loss_weight=self.z_loss_weight,
             name=self.name+"_conv1x1")
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./len(input_shape))
@@ -697,23 +703,51 @@ class ResConv(tf.keras.layers.Layer):
 # smoothing on the loss (clip alone, if logits keep being pushed past the bound,
 # zeroes their gradient -> can drive the degenerate uniform prediction).
 DEFAULT_LOGIT_CLIP = 30.
+# Soft logit cap (Gemma-2 style): logits <- c*tanh(logits/c). A *smooth*,
+# gradient-preserving bound (no dead-zone like the hard clip) that also maps
+# +/-inf -> +/-c, so it subsumes the NaN safety rail. c is chosen so the
+# reachable confidence is ample while the logit scale stays small enough that
+# upstream features are never driven to fp16 overflow: for a K-class softmax the
+# max confidence is 1/(1+(K-1)e^{-2c}) (= 0.9993 for K=3 at c=4) and the allowed
+# logit gap (<=2c=8) exceeds the optimum a label-smoothed loss converges to
+# (~ln(K/eps)~5.7 at eps=1e-2). Saturating the gradient beyond +/-c removes the
+# pressure that inflates the feature decoder. Set to None to fall back to the
+# hard clip. Active by default on every softmax head.
+DEFAULT_LOGIT_SOFTCAP = 4.
+# z-loss weight (PaLM / ST-MoE). Adds weight * mean(logsumexp(logits)^2) on the
+# pre-cap logits via add_loss: a quadratic penalty on the logit *scale* that
+# counters logit drift. Being a loss term it back-propagates and pulls down the
+# whole upstream path (the LM feature decoder). 0 = off; ~1e-4 is the usual value.
+DEFAULT_Z_LOSS_WEIGHT = 0.
 
 def _is_softmax_activation(activation, activation_layer):
     if isinstance(activation, str):
         return activation.lower() == "softmax"
     return getattr(activation_layer, "__name__", None) == "softmax"
 
-def finalize_output(x, activation_layer, is_softmax, logit_clip, output_dtype):
+def softmax_z_loss(logits, weight):
+    """PaLM/ST-MoE z-loss: weight * mean(logsumexp(logits, axis=-1)^2), in fp32 on
+    the pre-cap logits. Penalizes the softmax partition function (logit scale),
+    countering the logit/activation drift that overflows fp16. Returns a scalar."""
+    z = tf.reduce_logsumexp(tf.cast(logits, tf.float32), axis=-1)
+    return tf.cast(weight, tf.float32) * tf.reduce_mean(tf.square(z))
+
+def finalize_output(x, activation_layer, is_softmax, logit_clip, logit_softcap, output_dtype):
     """Output cast + activation for a conv / conv-transpose head.
 
-    Softmax heads clamp the pre-activation logits in fp32 and compute the softmax
+    Softmax heads bound the pre-activation logits in fp32 and compute the softmax
     in fp32 regardless of output_dtype, so the head is NaN-proof without forcing
-    the whole conv to fp32 (only the activation runs in fp32). tf.clip_by_value
-    maps +/-inf to the finite bound, so an upstream fp16 overflow becomes a
-    saturated (not NaN) prediction. Non-softmax heads keep the original behavior.
+    the whole conv to fp32 (only the activation runs in fp32). Preferred bound is
+    the smooth soft-cap c*tanh(x/c) (also maps +/-inf -> +/-c); falls back to the
+    hard clip when logit_softcap is None. Non-softmax heads keep original behavior.
     """
-    if is_softmax and logit_clip is not None:
-        x = tf.clip_by_value(tf.cast(x, tf.float32), -logit_clip, logit_clip)
+    if is_softmax:
+        x = tf.cast(x, tf.float32)
+        if logit_softcap is not None and logit_softcap > 0:
+            c = tf.cast(logit_softcap, tf.float32)
+            x = c * tf.math.tanh(x / c)
+        elif logit_clip is not None:
+            x = tf.clip_by_value(x, -logit_clip, logit_clip)
         return activation_layer(x)
     if output_dtype is not None:
         x = tf.cast(x, dtype=output_dtype)
@@ -734,6 +768,8 @@ class ConvBNDrop(tf.keras.layers.Layer):
             window_norm_size=32,
             activation:str = "relu",
             logit_clip:float = DEFAULT_LOGIT_CLIP,
+            logit_softcap:float = None,  # None: no cap (preserves pre-softcap serialized models); arch/decoder_op pass DEFAULT_LOGIT_SOFTCAP for new heads
+            z_loss_weight:float = DEFAULT_Z_LOSS_WEIGHT,
             l2_reg:float = 0,
             output_dtype=None,
             name: str="ConvBNDrop",
@@ -747,6 +783,8 @@ class ConvBNDrop(tf.keras.layers.Layer):
         self.dilation = dilation
         self.activation=activation
         self.logit_clip=logit_clip
+        self.logit_softcap=logit_softcap
+        self.z_loss_weight=z_loss_weight
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
@@ -758,7 +796,7 @@ class ConvBNDrop(tf.keras.layers.Layer):
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "logit_clip":self.logit_clip, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "logit_clip":self.logit_clip, "logit_softcap":self.logit_softcap, "z_loss_weight":self.z_loss_weight, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -795,7 +833,9 @@ class ConvBNDrop(tf.keras.layers.Layer):
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         x = numerics_probe(x, f"{self.name}/pre_act")
-        return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.output_dtype)
+        if self._is_softmax and self.z_loss_weight and self.z_loss_weight > 0:
+            self.add_loss(softmax_z_loss(x, self.z_loss_weight))  # z-loss on pre-cap logits
+        return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.logit_softcap, self.output_dtype)
 
 
 class ConvTransposeBNDrop(tf.keras.layers.Layer):
@@ -812,6 +852,8 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
             window_norm_size=32,
             activation:str = "relu",
             logit_clip:float = DEFAULT_LOGIT_CLIP,
+            logit_softcap:float = None,  # None: no cap (preserves pre-softcap serialized models); arch/decoder_op pass DEFAULT_LOGIT_SOFTCAP for new heads
+            z_loss_weight:float = DEFAULT_Z_LOSS_WEIGHT,
             l2_reg:float = 0,
             output_dtype=None,
             name: str="ConvTransposeBNDrop",
@@ -824,6 +866,8 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
         self.kernel_size = kernel_size
         self.activation=activation
         self.logit_clip=logit_clip
+        self.logit_softcap=logit_softcap
+        self.z_loss_weight=z_loss_weight
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
@@ -835,7 +879,7 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "logit_clip":self.logit_clip, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "logit_clip":self.logit_clip, "logit_softcap":self.logit_softcap, "z_loss_weight":self.z_loss_weight, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
@@ -867,7 +911,9 @@ class ConvTransposeBNDrop(tf.keras.layers.Layer):
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         x = numerics_probe(x, f"{self.name}/pre_act")
-        return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.output_dtype)
+        if self._is_softmax and self.z_loss_weight and self.z_loss_weight > 0:
+            self.add_loss(softmax_z_loss(x, self.z_loss_weight))  # z-loss on pre-cap logits
+        return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.logit_softcap, self.output_dtype)
 
 
 class UpSamplingWithDtype(tf.keras.layers.Layer):

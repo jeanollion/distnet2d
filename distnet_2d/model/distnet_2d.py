@@ -10,7 +10,7 @@ from .layers import ker_size_to_string, Combine, ResConv, ConvBNDrop, ConvTransp
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch, InferenceAwareSelector, StopGradient, Stack, \
     HideVariableWrapper, FrameDistanceEmbedding, \
     HybridThresholdL2Regularizer, ResidualGradientLimiter, LogGradientMagnitude, \
-    ConcatenateWithDtype, ClipMaxValue, UpSamplingWithDtype
+    ConcatenateWithDtype, ClipMaxValue, UpSamplingWithDtype, DEFAULT_LOGIT_SOFTCAP, DEFAULT_Z_LOSS_WEIGHT
 from dataset_iterator.keras_layers import InferenceLayer
 import numpy as np
 
@@ -688,16 +688,16 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                     for dCatName in output_per_decoder["Cat"].keys():
                         if dCatName == "Category":
                             output_name = None if arch.frame_window > 0 or len(output_per_decoder["Cat"])>1 else decoder_output_names["Cat"][dCatName]
-                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name, logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
                         elif dCatName == "FgBg":
-                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None)
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None, logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
                         else:
                             raise ValueError(f"Unknown category name: {dCatName}")
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
                         decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower(), logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     if isinstance(arch, TemPy) and (arch.wsa_edm and decoder_name == "Seg" or arch.wsa_cdm and decoder_name == "Center") and l_idx == len( arch.decoder_settings) - 1:
@@ -943,7 +943,9 @@ def decoder_op(
             l2_reg:float=0,
             name: str="DecoderLayer",
             output_name: str = None,
-            layer_idx:int=1
+            layer_idx:int=1,
+            logit_softcap:float = DEFAULT_LOGIT_SOFTCAP, # soft tanh cap on softmax-head logits
+            z_loss_weight:float = DEFAULT_Z_LOSS_WEIGHT, # PaLM/ST-MoE z-loss weight on softmax-head logits (0=off)
         ):
         if layer_idx > 0:
             name=f"{name}{layer_idx}"
@@ -951,17 +953,24 @@ def decoder_op(
             name = name.lower()
         if activation_out is None:
             activation_out = activation
+        softmax_head_kw = {"logit_softcap": logit_softcap, "z_loss_weight": z_loss_weight}
         n_ops = len(ops)
         if n_ops>0 and filters_out is None:
             filters_out = filters
+        # logit_softcap / z_loss act on pre-softmax logits; they cannot be applied to a
+        # ResConv output op (it sums its input into the output, so the residual sum has no
+        # well-defined "logits"). The final op stays a ResConv only when filters_out==filters.
+        if activation_out == "softmax" and (logit_softcap is not None or z_loss_weight) and n_ops > 0 \
+                and ops[n_ops - 1].lower().replace("_", "") in ("res", "resconv") and filters_out == filters:
+            raise ValueError(f"decoder_op '{name}': the softmax output op resolves to a ResConv (last op '{ops[n_ops-1]}' with filters_out==filters=={filters}). A ResConv sums its input into the output, so logit_softcap / z_loss_weight on its pre-softmax logits is ill-defined. Make the final op a plain conv (ops[-1]='conv', or use filters_out != filters), or disable both (logit_softcap=None, z_loss_weight=0).")
         if n_ops > 0:
             batch_norm = ensure_multiplicity(n_ops, batch_norm)
             layer_norm = ensure_multiplicity(n_ops, layer_norm)
             window_norm = ensure_multiplicity(n_ops, window_norm)
         up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, layer_norm=layer_norm_up, window_norm=window_norm_up, window_norm_size=window_norm_size_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, name=f"{name}_tConv{ker_size_to_string(conv_kernel_size)}{suffix}")
-        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation_out, batch_norm=batch_norm_up, layer_norm=layer_norm_up, window_norm=window_norm_up, window_norm_size=window_norm_size_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None)
+        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation_out, batch_norm=batch_norm_up, layer_norm=layer_norm_up, window_norm=window_norm_up, window_norm_size=window_norm_size_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None, softmax_head_kw=softmax_head_kw)
         if skip_combine_mode.lower()=="conv":
-            combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_ops==0 else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_ops == 0 else None, filters=filters if filters_out is None or n_ops > 0 else filters_out, activation=activation_out if n_ops==0 else activation, kernel_size = combine_kernel_size, l2_reg=l2_reg)
+            combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_ops==0 else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_ops == 0 else None, filters=filters if filters_out is None or n_ops > 0 else filters_out, activation=activation_out if n_ops==0 else activation, kernel_size = combine_kernel_size, l2_reg=l2_reg, **(softmax_head_kw if n_ops==0 else {}))
         else:
             combine = None
         def create_op(suffix, i):
@@ -973,9 +982,9 @@ def decoder_op(
                 if filters_out == filters or i < n_ops - 1:
                     return ResConv(kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}")
                 else:
-                    return ConvBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix)
+                    return ConvBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix, **(softmax_head_kw if i == n_ops - 1 else {}))
             else:
-                return ConvBNDrop(filters=filters_out if i == n_ops - 1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix)
+                return ConvBNDrop(filters=filters_out if i == n_ops - 1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix, **(softmax_head_kw if i == n_ops - 1 else {}))
         convs = lambda suffix : [create_op(suffix, i) for i in range(n_ops)]
         wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
 
@@ -1013,19 +1022,21 @@ def upsampling_op(
             l2_reg:float = 0,
             output_dtype=None,
             dtype=None, # set to "float32" to force the op to compute in fp32 (avoids fp16 overflow at output heads)
+            softmax_head_kw=None, # {logit_softcap, z_loss_weight} forwarded to the output op (applied only if it is a softmax head)
             name: str= None,
         ):
         assert mode in ["tconv", "up_nn", "up_bilinear"], "invalid mode"
         if kernel_size<size_factor:
             kernel_size = size_factor
         dtype_kw = {"dtype": dtype} if dtype is not None else {}
+        head_kw = dict(softmax_head_kw) if softmax_head_kw is not None else {}
         if mode=="tconv":
-            upsample = ConvTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, **dtype_kw)
+            upsample = ConvTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, **dtype_kw, **head_kw)
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
             upsample = UpSamplingWithDtype(size=size_factor, interpolation=interpolation, name = f"{parent_name}_Upsample{size_factor}x{size_factor}_{interpolation}" if parent_name is not None else name)
-            conv = ConvBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation, **dtype_kw)
+            conv = ConvBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation, **dtype_kw, **head_kw)
 
         def op(input):
             x = upsample(input)
