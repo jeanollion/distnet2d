@@ -29,7 +29,7 @@ class PseudoHuber(tf.keras.losses.Loss):
 
 
 class FocalCrossEntropy(tf.keras.losses.Loss):
-    def __init__(self, focal_weight = 2.0, temperature: float = 0.0, label_smoothing: float = 0, **kwargs):
+    def __init__(self, focal_weight = 2.0, temperature: float = 0.0, pseudo_huber: float = 0.0, label_smoothing: float = 0, **kwargs):
         """
         Tempered Focal Cross-Entropy with Label Smoothing for multi-class classification.
         Combines hard example mining (focal), gradient bounding (temperature), and
@@ -54,45 +54,81 @@ class FocalCrossEntropy(tf.keras.losses.Loss):
                    t=0.1 → mild bounding (loss capped at -10 for p→0)
                    t=0.5 → strong bounding (loss capped at -2, very stable, may slow learning)
 
-            label_smoothing: Smoothing parameter (0 ≤ ε < 1). Regularization strength.
-                            ε=0.0 → no smoothing (hard labels)
-                            ε=0.1 → typical for ImageNet (recommended start)
-                            ε=0.2 → stronger regularization
-                            Effect: y_smooth = y * (1-ε) + ε/K where K=num_classes
+            pseudo_huber: Pseudo-Huber strength c (0 ≤ c ≤ 1), in units of chance level 1/K.
+                   Internally floors the log by a = c/K (K = #classes): log(p) → log(p + c/K),
+                   the smooth pseudo-Huber analog of cross entropy — CE for p ≫ c/K, linear
+                   (MAE / L1, constant gradient) for p ≪ c/K, so a confident-wrong term's
+                   gradient is bounded by 1/a = K/c instead of CE's unbounded 1/p. c=0 → CE.
 
-                            Benefits:
-                            - Prevents overconfidence (probabilities ≠ 0 or 1)
-                            - Improves calibration (predicted probs match true frequencies)
-                            - Acts as regularization (reduces overfitting)
-                            - Better generalization on test data
+                   Why c and not the raw floor a: 1/K (chance) is the natural probability unit
+                   — the analog of the pixel unit for a regression pseudo-Huber delta — so c
+                   is K-independent and reads directly as "the fraction of chance below which
+                   an example is treated as an outlier". At chance p=1/K the CE gradient is K
+                   and the floor caps it at K/c, so c<1 caps only worse-than-chance preds.
+                     c ≈ 0.1–0.3 → cap only well-below-chance preds (clear mislabels), CE
+                                   elsewhere — recommended
+                     c = 1        → transition exactly at chance (more robust)
+                   Equivalent readings: max gradient = K/c (lower tail; + γ|log(c/K)| with
+                   focal γ), max loss ≈ log(K/c).
 
-                            When useful:
-                            - Models prone to overconfidence
-                            - Limited training data
-                            - Noisy labels
-                            - When calibration matters (e.g., medical, finance)
+                   Applied to the whole probability vector, so WITH label_smoothing>0 the
+                   smoothed wrong-class terms (which diverge as p→0 under over-confidence) are
+                   floored too — capping the OVER-confident end as well; without smoothing only
+                   the confident-wrong (true-class) tail is capped. Keep c ≲ ε (the smoothing
+                   target is ε/K vs the floor c/K) to preserve smoothing's anti-overconfidence
+                   push if overflow is the concern. Alternative robustifier to `temperature`
+                   (temperature bounds the loss *value*, pseudo_huber the *gradient*); use one.
 
-                            Trade-offs:
-                            - May slightly hurt training accuracy
-                            - Improves test accuracy & calibration
-                            - Can conflict with focal loss (both modify targets)
+            label_smoothing: Smoothing parameter (0 ≤ ε < 1). y_smooth = y*(1-ε) + ε/K
+                            (K=num_classes). Prevents over-confidence, improves calibration,
+                            and bounds logit growth (so it also fights the fp16 logit-overflow).
+
+                            Choosing ε — natural anchor: ε ≈ label noise / ambiguity rate ρ
+                            (don't demand more confidence than the labels deserve; analog of
+                            setting a regression Huber delta at the noise level). Three reads
+                            of the same ε:
+                              - confidence ceiling: optimum p_true ≈ 1-ε  (K-independent)
+                              - logit bound: converged logit gap ≈ ln(K/ε); to keep gap ≤ Z
+                                use ε ≥ K·e^{-Z} (logarithmic -> even tiny ε bounds it)
+                              - per-wrong-class floor: ε/K
+                            By purpose:
+                              - overflow / logit control: tiny ε suffices (ε≈0.01 -> gap≈5.7);
+                                use the smallest that bounds, to perturb labels least
+                              - calibration / noise robustness: ε ≈ ρ (typ. 0.01-0.1)
+                              - small K (e.g. 3): ImageNet's 0.1 (tuned for K=1000) is strong;
+                                prefer 0.01-0.05
+                            Match to the logit soft-cap so they cooperate: the soft-cap bounds
+                            each logit to ~±c_softcap, so the max gap is ~2·c_softcap; the
+                            smoothed optimum gap is ln(K/ε), so it stays inside the cap when
+                            ε ≳ K·e^{-2·c_softcap} (c_softcap=4,K=3 -> ε ≳ 1e-3; ε≈0.01 sits
+                            comfortably inside). Much smaller ε -> smoothing wants a gap beyond
+                            2·c_softcap and tanh fights it; much larger -> cap rarely engages.
+                            Practical range ~[0.005, 0.2]; don't stack heavy smoothing with
+                            heavy focal/temperature/pseudo_huber (all damp confidence ->
+                            under-training); too large -> genuinely under-confident (≤ 1-ε).
         """
         if focal_weight is None or (isinstance(focal_weight, (float, int)) and focal_weight == 0):
             self.focal_weight = None
         else:
             self.focal_weight = np.atleast_1d(np.array(focal_weight, dtype=np.float32))
         self.temperature = float(temperature)
+        self.pseudo_huber = float(pseudo_huber)
         self.label_smoothing = float(label_smoothing)
-        print(f"Cat. Loss: focal weight: {self.focal_weight} label smoothing: {self.label_smoothing} temperature: {self.temperature}")
+        print(f"Cat. Loss: focal weight: {self.focal_weight} label smoothing: {self.label_smoothing} temperature: {self.temperature} pseudo_huber: {self.pseudo_huber}")
         assert self.focal_weight is None or np.all(self.focal_weight >= 0), f"gamma must be >=0, got {focal_weight}"
         assert 1 > self.temperature >= 0, f"temperature must be >=0 and <1, got {temperature}"
+        assert 0 <= self.pseudo_huber <= 1, f"pseudo_huber (c, in units of chance 1/K) must be in [0,1], got {pseudo_huber}"
         assert 0 <= label_smoothing < 1, f"label_smoothing must be in [0,1), got {label_smoothing}"
         # Tempered log: log_t(p) = (p^t - 1)/t, gradient p^(t-1). t=0 is the 0/0 limit
-        # = standard log (handled separately below).
+        # = standard log (handled separately below). pseudo_huber floors the log by a=c/K
+        # (c=self.pseudo_huber, K=#classes): log(p+a) -> gradient bounded by 1/a=K/c.
 
         super().__init__(**kwargs)
 
-    def _tempered_log(self, p):
+    def _tempered_log(self, p, floor=0.):
+        # Pseudo-Huber floor a (=c/K): log(p+a) stays CE for p>>a, linear (bounded grad 1/a) for p<<a.
+        if self.pseudo_huber > 0.:
+            p = p + tf.cast(floor, p.dtype)
         # t=0: standard natural log (unbounded gradient). 0<t<1: bounded tempered log (loss <= 1/t).
         if self.temperature == 0.:
             return tf.math.log(p)
@@ -125,14 +161,17 @@ class FocalCrossEntropy(tf.keras.losses.Loss):
         else:
             focal_weight = tf.cast(1, y_true.dtype)
 
-        # Combined loss (tempered log bounds the per-pixel loss/gradient when t>1)
-        loss = - focal_weight * y_true * self._tempered_log(y_pred)
+        # Pseudo-Huber floor a = c/K (K = #classes), in units of chance level; 0 if disabled
+        floor = self.pseudo_huber / tf.cast(tf.shape(y_pred)[-1], y_pred.dtype) if self.pseudo_huber > 0 else 0.
+        # Combined loss (tempered log / pseudo-Huber floor bound the per-pixel loss / gradient)
+        loss = - focal_weight * y_true * self._tempered_log(y_pred, floor)
         return loss
 
     def get_config(self):
         config = super().get_config()
         config.update({
             'temperature': self.temperature,
+            'pseudo_huber': self.pseudo_huber,
             'focal_weight': list(self.focal_weight) if self.focal_weight is not None else None,
             'label_smoothing': self.label_smoothing
         })

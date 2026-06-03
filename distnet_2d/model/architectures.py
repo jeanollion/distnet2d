@@ -208,9 +208,9 @@ class D2(ArchDepth):
              "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout, **_norm_kwargs(self.norm_feature_dec)},
             {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
-            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0, **_norm_kwargs(self.norm_feature_dec)}
+            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0}
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
@@ -281,9 +281,9 @@ class D3(ArchDepth):
              "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout, **_norm_kwargs(self.norm_feature_dec)},
             {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
-            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0, **_norm_kwargs(self.norm_feature_dec)}
+            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0}
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
@@ -368,9 +368,9 @@ class D4(ArchDepth):
              "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 0.5, "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout, **_norm_kwargs(self.norm_feature_dec)},
             {"op": "resconv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
-            {"filters": 1., "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0, **_norm_kwargs(self.norm_feature_dec)}
+            {"filters": 1., "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0}
         ]
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
