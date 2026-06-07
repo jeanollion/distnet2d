@@ -725,6 +725,37 @@ def _is_softmax_activation(activation, activation_layer):
         return activation.lower() == "softmax"
     return getattr(activation_layer, "__name__", None) == "softmax"
 
+@tf.keras.utils.register_keras_serializable(package="distnet_2d")
+class CappedReLU:
+    """ReLU clamped to [0, max_value]:  min(relu(x), max_value). Bounds activation
+    magnitude (low-precision stability / prevents fp16 overflow in deep residual
+    streams) while keeping plain-ReLU behavior below max_value. Callable, so
+    tf.keras.activations.get(instance) returns it unchanged."""
+    def __init__(self, max_value=6.):
+        self.max_value = float(max_value)
+    def __call__(self, x):
+        return tf.keras.activations.relu(x, max_value=tf.cast(self.max_value, x.dtype))
+    def get_config(self):
+        return {"max_value": self.max_value}
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+def get_activation(spec):
+    """Resolve an activation spec to something usable as a layer `activation`.
+      'reluN' (e.g. 'relu6', 'relu30')  -> CappedReLU(N)  (ReLU capped at N)
+      'relu', 'tanh', 'gelu', a callable, None, ... -> returned unchanged
+        (tf.keras.activations.get handles them downstream).
+    """
+    if isinstance(spec, str):
+        s = spec.lower()
+        if s.startswith("relu") and len(s) > 4:
+            try:
+                return CappedReLU(float(s[4:]))
+            except ValueError:
+                pass
+    return spec
+
 def softmax_z_loss(logits, weight):
     """PaLM/ST-MoE z-loss: weight * mean(logsumexp(logits, axis=-1)^2), in fp32 on
     the pre-cap logits. Penalizes the softmax partition function (logit scale),

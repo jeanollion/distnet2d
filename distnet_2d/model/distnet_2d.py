@@ -10,7 +10,7 @@ from .layers import ker_size_to_string, Combine, ResConv, ConvBNDrop, ConvTransp
     BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch, InferenceAwareSelector, StopGradient, Stack, \
     HideVariableWrapper, FrameDistanceEmbedding, \
     HybridThresholdL2Regularizer, ResidualGradientLimiter, LogGradientMagnitude, \
-    ConcatenateWithDtype, ClipMaxValue, UpSamplingWithDtype, DEFAULT_LOGIT_SOFTCAP, DEFAULT_Z_LOSS_WEIGHT
+    ConcatenateWithDtype, ClipMaxValue, UpSamplingWithDtype, DEFAULT_LOGIT_SOFTCAP, DEFAULT_Z_LOSS_WEIGHT, get_activation
 from dataset_iterator.keras_layers import InferenceLayer
 import numpy as np
 
@@ -44,7 +44,7 @@ class DiSTNetModel(tf.keras.Model):
                  predict_fw:bool=True,
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
                  category_number:int=0, category_class_weights = None, category_focal_weight = 2.0, category_max_class_weight=10,
-                 category_temperature:float = 0, category_label_smoothing:float = 0,
+                 category_temperature:float = 0, category_pseudo_huber:float = 0, category_label_smoothing:float = 0,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  gradient_accumulation_steps:int=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False, scale_losses:bool = True,
@@ -84,9 +84,9 @@ class DiSTNetModel(tf.keras.Model):
         if category_number > 1:
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
-                self.category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight, temperature=category_temperature, label_smoothing=category_label_smoothing), category_class_weights, remove_background=True)
+                self.category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight, temperature=category_temperature, pseudo_huber=category_pseudo_huber, label_smoothing=category_label_smoothing), category_class_weights, remove_background=True)
             else:
-                self.category_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight, temperature=category_temperature, label_smoothing=category_label_smoothing), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
+                self.category_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight, temperature=category_temperature, pseudo_huber=category_pseudo_huber, label_smoothing=category_label_smoothing), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
             if edm_loss_weight == 0 and cdm_loss_weight == 0 and displacement_loss_weight == 0 and link_multiplicity_loss_weight == 0:
                 self.fgbg_category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=0), [1., 1.], remove_background=False)
             else :
@@ -697,7 +697,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                     for dTrackName in output_per_decoder["Track"].keys():
                         decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower(), logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
+                        dec_activation = arch.default_activation
+                        if arch.lm_decoder_activation is not None:
+                            spec = arch.lm_decoder_activation
+                            if isinstance(spec, dict):
+                                spec = spec.get(l_idx, arch.default_activation)
+                            dec_activation = get_activation(spec)
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=dec_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower(), logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     if isinstance(arch, TemPy) and (arch.wsa_edm and decoder_name == "Seg" or arch.wsa_cdm and decoder_name == "Center") and l_idx == len( arch.decoder_settings) - 1:
@@ -708,7 +714,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                                           skip_connection=True)
                     else:
                         wsa_kwargs = None
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
+                    dec_activation = arch.default_activation
+                    if decoder_name == "LinkMultiplicity" and arch.lm_decoder_activation is not None:
+                        spec = arch.lm_decoder_activation
+                        if isinstance(spec, dict):
+                            spec = spec.get(l_idx, arch.default_activation)
+                        dec_activation = get_activation(spec)
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=dec_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
         if arch.n_inputs == 1:
@@ -963,6 +975,7 @@ def decoder_op(
         if activation_out == "softmax" and (logit_softcap is not None or z_loss_weight) and n_ops > 0 \
                 and ops[n_ops - 1].lower().replace("_", "") in ("res", "resconv") and filters_out == filters:
             raise ValueError(f"decoder_op '{name}': the softmax output op resolves to a ResConv (last op '{ops[n_ops-1]}' with filters_out==filters=={filters}). A ResConv sums its input into the output, so logit_softcap / z_loss_weight on its pre-softmax logits is ill-defined. Make the final op a plain conv (ops[-1]='conv', or use filters_out != filters), or disable both (logit_softcap=None, z_loss_weight=0).")
+        print(f"decoder: {name}: activation: {activation} activation out: {activation_out}")
         if n_ops > 0:
             batch_norm = ensure_multiplicity(n_ops, batch_norm)
             layer_norm = ensure_multiplicity(n_ops, layer_norm)

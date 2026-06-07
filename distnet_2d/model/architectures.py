@@ -89,6 +89,7 @@ class ArchBase:
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",
                  attention_filters:int = 0, attention_positional_encoding:str="2d",
                  logit_softcap:float=4., z_loss_weight:float=0.,  # softmax-head logit control: smooth tanh cap c (None->hard clip) and PaLM z-loss weight (0=off, ~1e-4 to enable)
+                 lm_decoder_activation=None,  # activation of the LM decoder backbone (decoderlinkmultiplicity{l_idx}). None -> default activation. str -> all levels. dict {l_idx:spec} -> per level. specs: 'relu','tanh','reluN' (capped ReLU at N, e.g. 'relu30'). l_idx: 1=shallowest(near head) ... deepest=largest. Bounded activations (tanh / capped ReLU) cap the un-normalized residual stream to prevent fp16 overflow.
                  activation:str= "relu",
                  skip_connections=True, skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
@@ -112,6 +113,7 @@ class ArchBase:
         self.attention_positional_encoding = attention_positional_encoding
         self.logit_softcap = logit_softcap
         self.z_loss_weight = z_loss_weight
+        self.lm_decoder_activation = lm_decoder_activation
         self.self_attention = 0
         self.default_activation=activation.lower() if isinstance(activation, str) else activation
         self.downsampling_mode = downsampling_mode
