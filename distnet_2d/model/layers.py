@@ -734,7 +734,7 @@ class CappedReLU:
     def __init__(self, max_value=6.):
         self.max_value = float(max_value)
     def __call__(self, x):
-        return tf.keras.activations.relu(x, max_value=tf.cast(self.max_value, x.dtype))
+        return tf.keras.activations.relu(x, max_value=float(self.max_value))
     def get_config(self):
         return {"max_value": self.max_value}
     @classmethod
@@ -777,7 +777,7 @@ def finalize_output(x, activation_layer, is_softmax, logit_clip, logit_softcap, 
         if logit_softcap is not None and logit_softcap > 0:
             c = tf.cast(logit_softcap, tf.float32)
             x = c * tf.math.tanh(x / c)
-        elif logit_clip is not None:
+        elif logit_clip is not None and logit_clip > 0:
             x = tf.clip_by_value(x, -logit_clip, logit_clip)
         return activation_layer(x)
     if output_dtype is not None:
