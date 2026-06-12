@@ -607,7 +607,23 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # define decoder operations
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
-        decoder_feature_op={n: get_seq_and_filters(parse_param_list(arch.feature_decoder_settings, f"Features{n}", attention_positional_encoding=arch.attention_positional_encoding, activation=arch.default_activation, l2_reg=arch.l2_reg, last_input_filters=feature_filters, window_norm_size=arch.window_norm_size)) for n in decoder_layers.keys()}
+        def _feature_decoder_activation(n):  # uniform across a head's feature-decoder ops; None->default, str->all heads, dict{head:spec}->per head
+            spec = arch.feature_decoder_activation
+            if spec is None:
+                return arch.default_activation
+            if isinstance(spec, dict):
+                spec = spec.get(n, arch.default_activation)
+            return get_activation(spec)
+        def _decoder_activation(name, l_idx):  # decoder backbone activation per head/level. arch.decoder_activation: None / str (all) / dict{head:spec}; spec: str (all levels) / dict{l_idx:spec}
+            spec = arch.decoder_activation
+            if isinstance(spec, dict):
+                spec = spec.get(name)            # per-head
+            if spec is None:
+                return arch.default_activation
+            if isinstance(spec, dict):
+                spec = spec.get(l_idx, arch.default_activation)  # per-level
+            return get_activation(spec)
+        decoder_feature_op={n: get_seq_and_filters(parse_param_list(arch.feature_decoder_settings, f"Features{n}", attention_positional_encoding=arch.attention_positional_encoding, activation=_feature_decoder_activation(n), l2_reg=arch.l2_reg, last_input_filters=feature_filters, window_norm_size=arch.window_norm_size)) for n in decoder_layers.keys()}
         decoder_out={name:{} for name in decoder_layers.keys()}
         oidx = 0
         output_per_decoder={}
@@ -680,30 +696,24 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                             param_list_seg["ops"] = ops
                         else:
                             param_list_seg = param_list
-                        decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
+                        decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Seg", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
                     for dCenterName in output_per_decoder["Center"].keys():
                         output_name = None if arch.frame_window > 0 or predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
-                        decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
+                        decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Center", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
                 if arch.category_number > 1:
                     for dCatName in output_per_decoder["Cat"].keys():
                         if dCatName == "Category":
                             output_name = None if arch.frame_window > 0 or len(output_per_decoder["Cat"])>1 else decoder_output_names["Cat"][dCatName]
-                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name, logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Cat", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name, logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
                         elif dCatName == "FgBg":
-                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None, logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Cat", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None, logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
                         else:
                             raise ValueError(f"Unknown category name: {dCatName}")
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
-                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
+                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Track", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        dec_activation = arch.default_activation
-                        if arch.lm_decoder_activation is not None:
-                            spec = arch.lm_decoder_activation
-                            if isinstance(spec, dict):
-                                spec = spec.get(l_idx, arch.default_activation)
-                            dec_activation = get_activation(spec)
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=dec_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower(), logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("LinkMultiplicity", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower(), logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     if isinstance(arch, TemPy) and (arch.wsa_edm and decoder_name == "Seg" or arch.wsa_cdm and decoder_name == "Center") and l_idx == len( arch.decoder_settings) - 1:
@@ -714,13 +724,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                                           skip_connection=True)
                     else:
                         wsa_kwargs = None
-                    dec_activation = arch.default_activation
-                    if decoder_name == "LinkMultiplicity" and arch.lm_decoder_activation is not None:
-                        spec = arch.lm_decoder_activation
-                        if isinstance(spec, dict):
-                            spec = spec.get(l_idx, arch.default_activation)
-                        dec_activation = get_activation(spec)
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=dec_activation, window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation(decoder_name, l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
         if arch.n_inputs == 1:

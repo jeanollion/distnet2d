@@ -702,7 +702,7 @@ class ResConv(tf.keras.layers.Layer):
 # to disable. To also *regularize* over-confidence, lower this AND add label
 # smoothing on the loss (clip alone, if logits keep being pushed past the bound,
 # zeroes their gradient -> can drive the degenerate uniform prediction).
-DEFAULT_LOGIT_CLIP = 30.
+DEFAULT_LOGIT_CLIP = 0.
 # Soft logit cap (Gemma-2 style): logits <- c*tanh(logits/c). A *smooth*,
 # gradient-preserving bound (no dead-zone like the hard clip) that also maps
 # +/-inf -> +/-c, so it subsumes the NaN safety rail. c is chosen so the
@@ -713,7 +713,7 @@ DEFAULT_LOGIT_CLIP = 30.
 # (~ln(K/eps)~5.7 at eps=1e-2). Saturating the gradient beyond +/-c removes the
 # pressure that inflates the feature decoder. Set to None to fall back to the
 # hard clip. Active by default on every softmax head.
-DEFAULT_LOGIT_SOFTCAP = 4.
+DEFAULT_LOGIT_SOFTCAP = 0.
 # z-loss weight (PaLM / ST-MoE). Adds weight * mean(logsumexp(logits)^2) on the
 # pre-cap logits via add_loss: a quadratic penalty on the logit *scale* that
 # counters logit drift. Being a loss term it back-propagates and pulls down the
@@ -741,9 +741,31 @@ class CappedReLU:
     def from_config(cls, config):
         return cls(**config)
 
+@tf.keras.utils.register_keras_serializable(package="distnet_2d")
+class ScaledSoftsign:
+    """c*softsign(x/c) = x / (1 + |x|/c): smooth, zero-centered, bounded to (-c, c)
+    with unit slope at the origin. Polynomial (quadratic) tails -> far less gradient
+    vanishing than tanh, and its zero-centering substitutes for a normalization layer
+    while bounding the residual stream. NOTE: softsign(+/-inf)=nan (unlike tanh/relu6
+    which map +/-inf -> finite), so this bounds the OUTPUT (preventing downstream
+    overflow) but is NOT a hard inf-backstop for its own conv; safe in a fully-bounded
+    stack where no op produces inf. Callable, so tf.keras.activations.get returns it
+    unchanged."""
+    def __init__(self, max_value=1.):
+        self.max_value = float(max_value)
+    def __call__(self, x):
+        c = tf.cast(self.max_value, x.dtype)
+        return c * tf.nn.softsign(x / c)
+    def get_config(self):
+        return {"max_value": self.max_value}
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
 def get_activation(spec):
     """Resolve an activation spec to something usable as a layer `activation`.
-      'reluN' (e.g. 'relu6', 'relu30')  -> CappedReLU(N)  (ReLU capped at N)
+      'reluN'     (e.g. 'relu6', 'relu30')     -> CappedReLU(N)     (ReLU capped at N)
+      'softsignN' (e.g. 'softsign30')          -> ScaledSoftsign(N) (N*softsign(x/N))
       'relu', 'tanh', 'gelu', a callable, None, ... -> returned unchanged
         (tf.keras.activations.get handles them downstream).
     """
@@ -752,6 +774,11 @@ def get_activation(spec):
         if s.startswith("relu") and len(s) > 4:
             try:
                 return CappedReLU(float(s[4:]))
+            except ValueError:
+                pass
+        elif s.startswith("softsign") and len(s) > 8:
+            try:
+                return ScaledSoftsign(float(s[8:]))
             except ValueError:
                 pass
     return spec
