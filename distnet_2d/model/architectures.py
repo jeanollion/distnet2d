@@ -91,12 +91,12 @@ class ArchBase:
                  logit_softcap:float=None, z_loss_weight:float=0.,  # softmax-head logit control: smooth tanh cap c (None->inert hard clip @ DEFAULT_LOGIT_CLIP as final inf-guard) and PaLM z-loss weight (0=off, ~1e-4 to enable). Both default OFF: CappedReLU on the LM decoder bounds the residual stream at the source, so these head-level guards are redundant (and z_loss/softcap raise the LM loss).
                  # decoder backbone activation, per head. dict {head_name: spec} where head_name in {'Seg','Center','Track','LinkMultiplicity','Cat'}.
                  # spec: str -> same activation at every decoder level of that head; dict {l_idx: spec} -> per level (l_idx 0=shallowest/head level ... deepest=largest; a missing l_idx falls back to default_activation). A head absent from the dict uses default_activation everywhere.
-                 # activation specs: 'relu','tanh','reluN' (capped ReLU at N, e.g. 'relu30'), 'softsignN' (N*softsign(x/N)). Bounded activations cap the un-normalized residual stream to prevent fp16 overflow.
-                 # None (default) -> set in each depth variant's __init__ (LinkMultiplicity only: capped ReLU at every level, softsign at the deepest), since the deepest index = len(decoder_settings)-1 varies with depth (D2:1, D3:2, D4:3). Pass a dict to override.
-                 decoder_activation=None,
+                 # activation specs: 'relu','tanh','reluN' (hard capped ReLU at N, e.g. 'relu30'), 'screluN' (smooth capped ReLU at N), 'softsignN' (N*softsign(x/N)). Bounded activations cap the un-normalized residual stream to prevent fp16 overflow.
+                 # Default bounds only the LinkMultiplicity decoder with a hard capped ReLU at every level (depth-independent -> no per-level dict, lives here rather than per depth variant). Other heads keep default_activation. Pass a dict to override.
+                 decoder_activation={"LinkMultiplicity": "relu30"},
                  # feature_decoder activation, per head, same {head_name: spec} convention. The spec is applied uniformly to all of that head's feature_decoder ops (no per-level dict needed). None / absent head -> default_activation.
-                 # Default bounds only the LinkMultiplicity feature-decoder (the historical fp16 overflow site) with softsign; other heads keep default_activation.
-                 feature_decoder_activation={"LinkMultiplicity": "softsign30"},
+                 # Default bounds only the LinkMultiplicity feature-decoder (the historical fp16 overflow site) with a smooth capped ReLU (SmeLU-clamp); other heads keep default_activation.
+                 feature_decoder_activation={"LinkMultiplicity": "screlu30"},
                  activation:str= "relu",
                  skip_connections=True, skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
@@ -228,8 +228,6 @@ class D2(ArchDepth):
             {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
-        if self.decoder_activation is None:  # bound LinkMultiplicity: capped ReLU + softsign at deepest level (2 levels)
-            self.decoder_activation = {"LinkMultiplicity": {0: "relu30", 1: "softsign30"}}
 
 
 class D3(ArchDepth):
@@ -305,8 +303,6 @@ class D3(ArchDepth):
             {"filters": 64, "ops": ["resconv"]*2, "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
-        if self.decoder_activation is None:  # bound LinkMultiplicity: capped ReLU + softsign at deepest level (3 levels)
-            self.decoder_activation = {"LinkMultiplicity": {0: "relu30", 1: "relu30", 2: "softsign30"}}
 
 
 class D4(ArchDepth):
@@ -396,8 +392,6 @@ class D4(ArchDepth):
             {"filters": 64, "ops": ["resconv"]*2, "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker3, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
-        if self.decoder_activation is None:  # bound LinkMultiplicity: capped ReLU + softsign at deepest level (4 levels)
-            self.decoder_activation = {"LinkMultiplicity": {0: "relu30", 1: "relu30", 2: "relu30", 3: "softsign30"}}
 
 
 class Blend(ArchBase):
