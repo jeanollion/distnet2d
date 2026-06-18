@@ -395,7 +395,7 @@ class DistnetIterator(TrackingIterator):
                 o_s = [object_slices[(i, 0)]]
                 _compute_outputs(l_c, labelIms[i][...,0:1], None, o_s, cdmIm=cdm[i,...,0] if self.return_center else None, edmIm = edm[i,...,0] if self.scale_edm else None, scale_edm=self.scale_edm, categoryIm=categoryIm[i,...,0] if self.category_array_idx>=0 else None, categoryArray=cat_array[bidx, :, frame_window] if self.category_array_idx>=0 else None, rankIm=rankIm[i,...,0] if self.return_label_rank else None, centerArr=centerArr[i,0] if self.return_label_rank else None, center_distance_mode=self.center_distance_mode, z_radius=self.z_radius)
 
-        if self.output_central_only: # select only central frame for edm / center and only displacement / link multiplicity related to central frame. frame_window is always 1
+        if self.output_central_only and self.frame_window > 0: # select only central frame for edm / center and only displacement / link multiplicity related to central frame. frame_window is always 1
             edm = edm[..., 1:-1] if edm is not None else None
             cdm = cdm[..., 1:-1] if self.return_center else None
             dyIm = dyIm[..., :1] if self.tracking else None

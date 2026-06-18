@@ -126,7 +126,7 @@ def objectwise_compute(data, fun, labels, ids, sizes): # tensor (Y, X, ...) , fu
         return ta.stack()
 
     def null():
-        return fun(data, tf.zeros_like(labels, dtype=tf.float32), 0)
+        return fun(data, tf.zeros_like(labels, dtype=tf.float32), tf.cast(0, sizes.dtype))
     return tf.cond(tf.math.equal(tf.size(ids), 0), null, non_null)
 
 
