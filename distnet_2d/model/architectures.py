@@ -225,7 +225,7 @@ class D2(ArchDepth):
         self.decoder_settings = [
             {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
               "batch_norm_up": False, "dropout_rate": 0},
-            {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
+            {"filters": 32, "ops": ["conv", "resconv"], "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
@@ -300,7 +300,7 @@ class D3(ArchDepth):
               "batch_norm_up": False, "dropout_rate": 0},
             {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size" : ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 64, "ops": ["resconv"]*2, "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
+            {"filters": 64, "ops": ["conv", "resconv"], "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
@@ -389,7 +389,7 @@ class D4(ArchDepth):
               "batch_norm": False, "dropout_rate": 0},
             {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size": ker2_1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 64, "ops": ["resconv"]*2, "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker3, 2),
+            {"filters": 64, "ops": ["conv", "resconv"], "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker3, 2),
               **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
