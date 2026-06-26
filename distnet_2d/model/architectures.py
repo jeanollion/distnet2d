@@ -83,7 +83,7 @@ class ArchBase:
                  # - norm_features:    features[-1]                       (deep, shared across heads)
                  # - norm_feature_dec: feature_decoder_settings[-1]       (per-head, deep, just before decoder upsampling chain)
                  # - norm_decoder:     decoder_settings[-1] first op      (per-head, post-upsample at deepest decoder level)
-                 norm_features='wn', norm_feature_dec='wn', norm_decoder=None,
+                 norm_features=None, norm_feature_dec=None, norm_decoder=None,
                  dropout:float=0.2,
                  l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",
@@ -93,10 +93,10 @@ class ArchBase:
                  # spec: str -> same activation at every decoder level of that head; dict {l_idx: spec} -> per level (l_idx 0=shallowest/head level ... deepest=largest; a missing l_idx falls back to default_activation). A head absent from the dict uses default_activation everywhere.
                  # activation specs: 'relu','tanh','reluN' (hard capped ReLU at N, e.g. 'relu30'), 'screluN' (smooth capped ReLU at N), 'softsignN' (N*softsign(x/N)). Bounded activations cap the un-normalized residual stream to prevent fp16 overflow.
                  # Default bounds only the LinkMultiplicity decoder with a hard capped ReLU at every level (depth-independent -> no per-level dict, lives here rather than per depth variant). Other heads keep default_activation. Pass a dict to override.
-                 decoder_activation={"LinkMultiplicity": "relu30"},
+                 decoder_activation={"LinkMultiplicity": "relu30", "Cat": "relu30"},
                  # feature_decoder activation, per head, same {head_name: spec} convention. The spec is applied uniformly to all of that head's feature_decoder ops (no per-level dict needed). None / absent head -> default_activation.
                  # Default bounds only the LinkMultiplicity feature-decoder (the historical fp16 overflow site) with a smooth capped ReLU (SmeLU-clamp); other heads keep default_activation.
-                 feature_decoder_activation={"LinkMultiplicity": "screlu30"},
+                 feature_decoder_activation={"LinkMultiplicity": "screlu30", "Cat": "screlu30"},
                  activation:str= "relu",
                  skip_connections=True, skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,

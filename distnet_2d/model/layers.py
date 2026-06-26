@@ -5,7 +5,7 @@ from ..utils.helpers import ensure_multiplicity
 import tensorflow as tf
 import numpy as np
 import os
-os.environ["DISTNET_DEBUG_NUMERICS"] = "1"
+os.environ["DISTNET_DEBUG_NUMERICS"] = "0"
 
 def numerics_probe(x, name):
     """Block-level NaN/Inf localizer (graph-safe). Disabled unless the env var

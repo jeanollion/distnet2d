@@ -22,8 +22,8 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
     spa_max_fun = get_argmax_2d_by_object_fun(tridimensional_mode=tridimensional_mode)
     mean_fun = get_mean_by_object_fun(tridimensional_mode=tridimensional_mode)
     max_fun = get_max_by_object_fun(nan=1., channel_axis=False, tridimensional_mode=tridimensional_mode)
-    mean_fun_true_lm = get_mean_by_object_fun(nan=1., channel_axis=False, tridimensional_mode=tridimensional_mode)
-    mean_fun_lm = get_mean_by_object_fun(nan=0., tridimensional_mode=tridimensional_mode)
+    mean_fun_dense_cat = get_mean_by_object_fun(nan=1., channel_axis=False, tridimensional_mode=tridimensional_mode)
+    mean_fun_sparse_cat = get_mean_by_object_fun(nan=0., tridimensional_mode=tridimensional_mode)
     # 3D data is typically anisotropic — request 2D behavior; _auto_mode
     # escalates CONV_2D to CONV_2D_SLICEWISE for 3D inputs automatically.
     conv_mode = CONV_2D
@@ -108,13 +108,15 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
         if category:
             if not segmentation:  # in segmentation mode labels was already squeezed to (Y, X) above
                 labels = labels[0]
-            true_cat = tf.cast(objectwise_compute(true_cat[..., 0], mean_fun_true_lm, labels, ids, sizes), tf.int32) - tf.cast(1, tf.int32)
-            cat = objectwise_compute(cat, mean_fun_lm, labels, ids, sizes)
+            true_cat = tf.cast(objectwise_compute(true_cat[..., 0], mean_fun_dense_cat, labels, ids, sizes), tf.int32) - tf.cast(1, tf.int32)
+            cat = objectwise_compute(cat, mean_fun_sparse_cat, labels, ids, sizes)
             cat = tf.math.argmax(cat, axis=-1, output_type=tf.int32)
             errors = tf.math.not_equal(cat, true_cat)
             cat_errors = tf.reduce_sum(tf.cast(errors, tf.float32))
             metrics.append(-cat_errors)
             #metrics.append(tf.cast(tf.reduce_sum(true_cat), tf.float32)) # for testing purpose
+            #metrics.append(tf.cast(tf.reduce_sum(cat), tf.float32))  # for testing purpose
+            #metrics.append(tf.cast(tf.size(ids), tf.float32)) # for testing purpose
 
         if tracking:
             # DISPLACEMENT
@@ -125,8 +127,8 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
             metrics.append(-dm_l2)
 
             # Link Multiplicity
-            true_lm = tf.cast(objectwise_compute_channel(true_lm, mean_fun_true_lm, labels, ids, sizes), tf.int32) - tf.cast(1, tf.int32)
-            lm = objectwise_compute_channel(lm, mean_fun_lm, labels, ids, sizes)
+            true_lm = tf.cast(objectwise_compute_channel(true_lm, mean_fun_dense_cat, labels, ids, sizes), tf.int32) - tf.cast(1, tf.int32)
+            lm = objectwise_compute_channel(lm, mean_fun_sparse_cat, labels, ids, sizes)
             lm = tf.math.argmax(lm, axis=-1, output_type=tf.int32)
             errors = tf.math.not_equal(lm, true_lm)
             lm_errors = tf.reduce_sum(tf.cast(errors, tf.float32))
