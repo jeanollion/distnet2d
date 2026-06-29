@@ -2,6 +2,12 @@ from tensorflow import pad
 
 from dataset_iterator.keras_layers import InferenceLayer
 from ..utils.helpers import ensure_multiplicity
+# Custom activations live in activations.py; re-exported here for backward compatibility
+# (existing code imports them from .layers, and the import triggers Keras serialization
+# registration).
+from .activations import (
+    CappedReLU, ScaledSoftsign, SmoothCappedReLU, DoublySmoothCappedReLU, get_activation,
+)
 import tensorflow as tf
 import numpy as np
 import os
@@ -724,104 +730,6 @@ def _is_softmax_activation(activation, activation_layer):
     if isinstance(activation, str):
         return activation.lower() == "softmax"
     return getattr(activation_layer, "__name__", None) == "softmax"
-
-@tf.keras.utils.register_keras_serializable(package="distnet_2d")
-class CappedReLU:
-    """ReLU clamped to [0, max_value]:  min(relu(x), max_value). Bounds activation
-    magnitude (low-precision stability / prevents fp16 overflow in deep residual
-    streams) while keeping plain-ReLU behavior below max_value. Callable, so
-    tf.keras.activations.get(instance) returns it unchanged."""
-    def __init__(self, max_value=6.):
-        self.max_value = float(max_value)
-    def __call__(self, x):
-        return tf.keras.activations.relu(x, max_value=float(self.max_value))
-    def get_config(self):
-        return {"max_value": self.max_value}
-    @classmethod
-    def from_config(cls, config):
-        return cls(**config)
-
-@tf.keras.utils.register_keras_serializable(package="distnet_2d")
-class ScaledSoftsign:
-    """c*softsign(x/c) = x / (1 + |x|/c): smooth, zero-centered, bounded to (-c, c)
-    with unit slope at the origin. Polynomial (quadratic) tails -> far less gradient
-    vanishing than tanh, and its zero-centering substitutes for a normalization layer
-    while bounding the residual stream. NOTE: softsign(+/-inf)=nan (unlike tanh/relu6
-    which map +/-inf -> finite), so this bounds the OUTPUT (preventing downstream
-    overflow) but is NOT a hard inf-backstop for its own conv; safe in a fully-bounded
-    stack where no op produces inf. Callable, so tf.keras.activations.get returns it
-    unchanged."""
-    def __init__(self, max_value=1.):
-        self.max_value = float(max_value)
-    def __call__(self, x):
-        c = tf.cast(self.max_value, x.dtype)
-        return c * tf.nn.softsign(x / c)
-    def get_config(self):
-        return {"max_value": self.max_value}
-    @classmethod
-    def from_config(cls, config):
-        return cls(**config)
-
-@tf.keras.utils.register_keras_serializable(package="distnet_2d")
-class SmoothCappedReLU:
-    """Hard ReLU on the left, smooth saturation to c on the right = relu(x) - SmeLU(x-c).
-    Left tail is EXACT ReLU (x<0 -> 0, kink at 0, keeps gating); the right tail is the only thing
-    smoothed: identity & slope-1 over (0, c-b), a SmeLU shoulder, then saturates to c. Bounds the
-    residual stream for fp16 while keeping plain-ReLU semantics; gradient is exactly 1 in-band
-    (no attenuation until the cap), 0 above it. SmeLU per Shamir et al. 2020. Smoothing half-width
-    b = beta*c (beta dimensionless) -> scale-homogeneous S(x)=c*S0(x/c). Clip-based, no
-    exp/tanh/sqrt; custom gradient recomputes the gate from x -> stores only ONE tensor (x).
-    grad = step(x) - clip((x-c+b)/2b, 0, 1). NOTE: finite inputs (incl. very large) map to [0,c];
-    literal +/-inf -> nan, so use in a bounded stack. Callable -> tf.keras.activations.get returns
-    it unchanged."""
-    def __init__(self, max_value=6., beta=0.05):
-        self.max_value = float(max_value)
-        self.beta = float(beta)
-    def __call__(self, x):
-        c = tf.cast(self.max_value, x.dtype)
-        b = tf.cast(self.beta, x.dtype) * c
-        @tf.custom_gradient
-        def f(x):
-            z = x - c
-            m = tf.clip_by_value((z + b) / (2. * b), 0., 1.)  # hard-sigmoid gate for the right shoulder
-            out = tf.nn.relu(x) - (z * m + b * m * (1. - m))  # = relu(x) - SmeLU(x-c)
-            def grad(dy):  # recompute the gate from x only -> backward stores a single tensor (x)
-                g = tf.cast(x > 0., x.dtype) - tf.clip_by_value((x - c + b) / (2. * b), 0., 1.)
-                return dy * g
-            return out, grad
-        return f(x)
-    def get_config(self):
-        return {"max_value": self.max_value, "beta": self.beta}
-    @classmethod
-    def from_config(cls, config):
-        return cls(**config)
-
-def get_activation(spec):
-    """Resolve an activation spec to something usable as a layer `activation`.
-      'reluN'     (e.g. 'relu6', 'relu30')     -> CappedReLU(N)       (hard ReLU capped at N)
-      'screluN'   (e.g. 'screlu30')            -> SmoothCappedReLU(N) (smooth capped ReLU, SmeLU-clamp)
-      'softsignN' (e.g. 'softsign30')          -> ScaledSoftsign(N)   (N*softsign(x/N), two-sided)
-      'relu', 'tanh', 'gelu', a callable, None, ... -> returned unchanged
-        (tf.keras.activations.get handles them downstream).
-    """
-    if isinstance(spec, str):
-        s = spec.lower()
-        if s.startswith("screlu") and len(s) > 6:
-            try:
-                return SmoothCappedReLU(float(s[6:]))
-            except ValueError:
-                pass
-        elif s.startswith("relu") and len(s) > 4:
-            try:
-                return CappedReLU(float(s[4:]))
-            except ValueError:
-                pass
-        elif s.startswith("softsign") and len(s) > 8:
-            try:
-                return ScaledSoftsign(float(s[8:]))
-            except ValueError:
-                pass
-    return spec
 
 def softmax_z_loss(logits, weight):
     """PaLM/ST-MoE z-loss: weight * mean(logsumexp(logits, axis=-1)^2), in fp32 on
