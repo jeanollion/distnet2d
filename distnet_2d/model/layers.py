@@ -2,8 +2,278 @@ from tensorflow import pad
 
 from dataset_iterator.keras_layers import InferenceLayer
 from ..utils.helpers import ensure_multiplicity
+# Custom activations live in activations.py; re-exported here for backward compatibility
+# (existing code imports them from .layers, and the import triggers Keras serialization
+# registration).
+from .activations import (
+    CappedReLU, ScaledSoftsign, SmoothCappedReLU, DoublySmoothCappedReLU, get_activation,
+)
 import tensorflow as tf
 import numpy as np
+import os
+import inspect
+_LAYER_ADD_WEIGHT_HAS_AUTOCAST_ARG = 'autocast' in inspect.signature( tf.keras.layers.Layer.add_weight ).parameters
+
+os.environ["DISTNET_DEBUG_NUMERICS"] = "0"
+
+def numerics_probe(x, name):
+    """Block-level NaN/Inf localizer (graph-safe). Disabled unless the env var
+    DISTNET_DEBUG_NUMERICS=1 is set *before the model is built*. When enabled it
+    inserts a tf.debugging.check_numerics op so the FIRST non-finite tensor in
+    the forward pass raises an error naming `name` -> pinpoints the block where
+    an overflow first appears (conv pre-activation, WN output, attention scores).
+    Off by default => zero overhead in normal training."""
+    if x is None or os.environ.get("DISTNET_DEBUG_NUMERICS", "0") != "1":
+        return x
+    return tf.debugging.check_numerics(x, name)
+
+
+def get_group_norm_groups(num_channels:int, target:int=32, min_per_group:int=4, warn_on_degenerate:bool=True):
+    """Heuristic to pick number of channel groups for group-style normalization.
+
+    Aim for `target` groups (32 per GN paper), constrained by:
+      - groups must divide num_channels exactly,
+      - each group must contain at least `min_per_group` channels.
+
+    Examples (target=32, min_per_group=4):
+      C=16  -> 4    (16/4 = 4 ch/group)
+      C=32  -> 8    (32/8 = 4)
+      C=64  -> 16   (64/16 = 4)
+      C=96  -> 24   (96/24 = 4)
+      C=128 -> 32   (128/32 = 4)
+      C=192 -> 32   (192/32 = 6)
+      C=256 -> 32   (256/32 = 8)
+      C=512 -> 32   (512/32 = 16)
+    For C <= min_per_group, returns 1.
+    For prime / non-decomposable C > min_per_group, also returns 1; in that case
+    a UserWarning is emitted (silenceable via warn_on_degenerate=False).
+    """
+    if num_channels <= min_per_group:
+        return 1
+    max_groups = num_channels // min_per_group
+    ideal = min(target, max_groups)
+    # Largest divisor of num_channels in [2, ideal] (G=1 is the fallback below).
+    for g in range(ideal, 1, -1):
+        if num_channels % g == 0:
+            return g
+    # Fallback: G=1 (LN). Only warn when ideal>=2 — i.e. there *should* have been
+    # room for a non-trivial divisor, but num_channels is prime / awkward.
+    if warn_on_degenerate and ideal >= 2:
+        import warnings
+        warnings.warn(
+            f"WindowGroupNormalization group heuristic degenerated to G=1 (LayerNorm) for "
+            f"num_channels={num_channels}: no divisor in [2, {ideal}] satisfies "
+            f"min_per_group={min_per_group}. Consider using a composite channel "
+            f"count (e.g. a multiple of 8 or 16) if you actually want GN behavior.",
+            stacklevel=2,
+        )
+    return 1
+
+
+class WindowGroupNormalization(tf.keras.layers.Layer):
+    """Per-(sample, group) normalization with locally-pooled stats over a fixed
+    spatial window. Size-invariant at inference: a 1024x1024 image is normalized
+    identically to a 256x256 tile because the window slides across the spatial
+    dims and each pixel sees only its own local context.
+
+    Supports both 2D (input rank 4: B, Y, X, C) and 3D (input rank 5: B, Z, Y, X, C)
+    seamlessly: the spatial pooling op is selected at build time from the
+    static input rank.
+
+    Args:
+        groups: number of channel groups (must divide C). If None or 0, the
+            heuristic `get_group_norm_groups` is applied to pick a sensible G.
+        window_size: int OR tuple/list. Spatial window for local stat pooling.
+            - int: expanded to all spatial dims (e.g. 32 -> (32, 32) in 2D,
+              (32, 32, 32) in 3D).
+            - tuple/list: must match number of spatial dims. For 3D anisotropic
+              data, pass e.g. (1, 32, 32) for per-Z-slice normalization.
+        epsilon: numerical stabilizer.
+        center, scale: include affine beta/gamma.
+    """
+    def __init__(self, groups=None, window_size=32, epsilon=1e-3,
+                 center=True, scale=True,
+                 name="WindowGroupNormalization", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.groups = groups
+        self.window_size = window_size  # validated in build
+        self.epsilon = epsilon
+        self.center = center
+        self.scale = scale
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "groups": self.groups,
+            "window_size": self.window_size,
+            "epsilon": self.epsilon,
+            "center": self.center,
+            "scale": self.scale
+        })
+        return config
+
+    def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except AttributeError:
+            pass
+        ndim = len(input_shape)
+        if ndim not in (4, 5):
+            raise ValueError(
+                f"WindowGroupNormalization expects rank 4 (B,Y,X,C) or 5 (B,Z,Y,X,C) input, "
+                f"got rank {ndim}"
+            )
+        self._tridim = (ndim == 5)
+        C = int(input_shape[-1])
+        # Pick groups via heuristic if not provided
+        if self.groups is None or self.groups == 0:
+            self.groups = get_group_norm_groups(C)
+        if C % self.groups != 0:
+            raise ValueError(f"groups={self.groups} must divide channels={C}")
+        self._channels_per_group = C // self.groups
+
+        # Expand window_size to match spatial dims
+        n_spatial = ndim - 2  # 2 for 2D, 3 for 3D
+        if isinstance(self.window_size, int):
+            ws = [self.window_size] * n_spatial
+        else:
+            ws = list(self.window_size)
+            if len(ws) != n_spatial:
+                raise ValueError(
+                    f"window_size has {len(ws)} elements but input rank {ndim} "
+                    f"expects {n_spatial} spatial dimensions"
+                )
+        # Clamp window per dim to at most the size of that spatial axis if known
+        for i in range(n_spatial):
+            dim = input_shape[1 + i]
+            if dim is not None and ws[i] > dim:
+                ws[i] = dim
+        self._window = ws
+        kw = dict(autocast=False) if _LAYER_ADD_WEIGHT_HAS_AUTOCAST_ARG else {}
+        if self.scale:
+            self.gamma = self.add_weight("gamma", shape=(C,), initializer="ones", dtype=tf.float32, **kw)
+        if self.center:
+            self.beta = self.add_weight("beta", shape=(C,), initializer="zeros", dtype=tf.float32, **kw)
+        # Broadcast shape for gamma/beta against (B, [Z,] Y, X, G, Cg) — built once.
+        self._vars_shape = [1] * (n_spatial + 1) + [self.groups, self._channels_per_group]
+        super().build(input_shape)
+
+    @staticmethod
+    def _f32(var):
+        """Read the underlying float32 variable, bypassing AutoCastVariable."""
+        return var._variable if hasattr(var, '_variable') else var
+
+    def call(self, inputs):
+        # Stats (mean, variance) are computed in fp32 for numerical stability
+        # under mixed_float16 — matches what BN / LN do internally. Cast back to
+        # the input dtype (typically fp16) just before returning.
+        x = tf.cast(inputs, tf.float32)
+        x = numerics_probe(x, f"{self.name}/wn_in")  # debug: catches an upstream overflow BEFORE the firebreak below
+        static_shape = inputs.shape.as_list()
+        n_spatial = len(self._window)
+
+        # For each spatial axis, decide whether the window covers the whole extent.
+        # When dim is unknown (None) we conservatively treat it as local.
+        is_global = []
+        for i in range(n_spatial):
+            dim = static_shape[1 + i]
+            is_global.append(dim is not None and self._window[i] >= dim)
+
+        x_shape = tf.shape(x)
+        if self._tridim:
+            new_shape = tf.concat([x_shape[:4], [self.groups, self._channels_per_group]], axis=0)
+        else:
+            new_shape = tf.concat([x_shape[:3], [self.groups, self._channels_per_group]], axis=0)
+
+        if all(is_global):
+            # Fast global path: behaves exactly like standard GroupNormalization.
+            # No padding, no avg_pool: just reduce over all spatial axes + Cg.
+            x_g = tf.reshape(x, new_shape)
+            if self._tridim:
+                reduce_axes = [1, 2, 3, -1]  # Z, Y, X, Cg
+            else:
+                reduce_axes = [1, 2, -1]     # Y, X, Cg
+            m  = tf.reduce_mean(x_g,         axis=reduce_axes, keepdims=True)
+            ms = tf.reduce_mean(x_g * x_g,   axis=reduce_axes, keepdims=True)
+            var = tf.maximum(ms - m * m, tf.cast(0.0, m.dtype))
+            inv = tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
+            if self.scale:
+                inv = inv * tf.reshape(self._f32(self.gamma), self._vars_shape)
+            res = -m * inv
+            if self.center:
+                res = res + tf.reshape(self._f32(self.beta), self._vars_shape)
+            x_g = x_g * inv + res
+            out = tf.reshape(x_g, x_shape)
+        else:
+            # Local / mixed path: locally-pooled stats via SAME avg_pool. SAME slides the
+            # fixed window and at borders averages only the in-bounds elements (divides by
+            # the valid count), i.e. the window is clamped at the edges. No manual padding:
+            # works for any input size (including smaller than the window) and preserves
+            # spatial shape. For axes where window >= dim we pool with size 1 (no-op) and
+            # reduce_mean over them afterwards so they behave globally.
+            effective_window = [
+                1 if is_global[i] else self._window[i] for i in range(n_spatial)
+            ]
+            x2 = x * x
+            if self._tridim:
+                m_ch  = tf.nn.avg_pool3d(x,  ksize=effective_window, strides=[1, 1, 1], padding='SAME')
+                ms_ch = tf.nn.avg_pool3d(x2, ksize=effective_window, strides=[1, 1, 1], padding='SAME')
+            else:
+                m_ch  = tf.nn.avg_pool2d(x,  ksize=effective_window, strides=[1, 1], padding='SAME')
+                ms_ch = tf.nn.avg_pool2d(x2, ksize=effective_window, strides=[1, 1], padding='SAME')
+
+            # Reduce_mean over global axes (broadcast back via keepdims=True).
+            global_axes = [1 + i for i in range(n_spatial) if is_global[i]]
+            if global_axes:
+                m_ch  = tf.reduce_mean(m_ch,  axis=global_axes, keepdims=True)
+                ms_ch = tf.reduce_mean(ms_ch, axis=global_axes, keepdims=True)
+
+            # Reshape pooled tensors to (..., G, Cg) (some spatial axes may be 1).
+            m_ch_shape = tf.shape(m_ch)
+            if self._tridim:
+                stat_shape = tf.concat([m_ch_shape[:4], [self.groups, self._channels_per_group]], axis=0)
+            else:
+                stat_shape = tf.concat([m_ch_shape[:3], [self.groups, self._channels_per_group]], axis=0)
+            m  = tf.reduce_mean(tf.reshape(m_ch,  stat_shape), axis=-1, keepdims=True)
+            ms = tf.reduce_mean(tf.reshape(ms_ch, stat_shape), axis=-1, keepdims=True)
+            var = tf.maximum(ms - m * m, tf.cast(0.0, m.dtype))
+            x_g = tf.reshape(x, new_shape)
+            inv = tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
+            if self.scale:
+                inv = inv * tf.reshape(self._f32(self.gamma), self._vars_shape)
+            res = -m * inv
+            if self.center:
+                res = res + tf.reshape(self._f32(self.beta), self._vars_shape)
+            x_g = x_g * inv + res
+            out = tf.reshape(x_g, x_shape)
+        return numerics_probe(tf.cast(out, inputs.dtype), f"{self.name}/wn_out")
+
+
+def _make_norm(batch_norm:bool, layer_norm:bool, window_norm:bool, compute_dtype:str, window_norm_size:int=32, name:str=None):
+    """Instantiate the chosen normalization layer, or return None if none requested.
+
+    Options:
+      - batch_norm: standard BN (running stats; safe under mixed_precision).
+      - layer_norm: standard LN (per-pixel, axis=-1).
+      - window_norm: WindowGroupNormalization (per-sample, per-group, locally pooled
+                     stats over a fixed-size spatial window). Size-invariant at
+                     inference. Groups picked automatically via get_group_norm_groups.
+    """
+    if batch_norm or layer_norm or window_norm:
+        print(f"make norm: BN={batch_norm} LN={layer_norm} WN={window_norm} ({window_norm_size})")
+    dtype = 'mixed_float16' if compute_dtype == 'float16' else 'float32'
+    if batch_norm:
+        return tf.keras.layers.BatchNormalization(dtype=dtype, name=name)
+    if layer_norm:
+        return tf.keras.layers.LayerNormalization(dtype=dtype, name=name)
+    if window_norm:
+        return WindowGroupNormalization(
+            groups=None,  # heuristic at build time
+            window_size=window_norm_size,
+            dtype=dtype,
+            name=name if name is not None else "WindowGroupNormalization",
+        )
+    return None
 
 
 class InferenceAwareSelector(InferenceLayer, tf.keras.layers.Layer):
@@ -217,6 +487,8 @@ class Combine(tf.keras.layers.Layer):
             compensate_gradient:bool = False,
             l2_reg: float=0,
             output_dtype:str = None,
+            logit_softcap:float = None,
+            z_loss_weight:float = 0.,
             name: str="Combine",
             **kwargs
         ):
@@ -226,11 +498,13 @@ class Combine(tf.keras.layers.Layer):
         self.compensate_gradient = compensate_gradient
         self.l2_reg=l2_reg
         self.output_dtype=output_dtype
+        self.logit_softcap=logit_softcap
+        self.z_loss_weight=z_loss_weight
         super().__init__(name=name, **kwargs)
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"activation": self.activation, "filters":self.filters, "kernel_size":self.kernel_size, "compensate_gradient":self.compensate_gradient, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype, "logit_softcap":self.logit_softcap, "z_loss_weight":self.z_loss_weight})
       return config
 
     def build(self, input_shape):
@@ -241,14 +515,15 @@ class Combine(tf.keras.layers.Layer):
         else:
             filters = self.filters
         self.concat = tf.keras.layers.Concatenate(axis=-1, name = self.name+"_concat")
-        self.combine_conv = Conv2DWithDtype(
+        self.combine_conv = ConvBNDrop(
             filters=filters,
             kernel_size=self.kernel_size,
-            dtype=self.dtype_policy,
-            padding='same',
             activation=self.activation,
+            dropout_rate=0,
             l2_reg=self.l2_reg,
             output_dtype=self.output_dtype,
+            logit_softcap=self.logit_softcap,
+            z_loss_weight=self.z_loss_weight,
             name=self.name+"_conv1x1")
         if self.compensate_gradient:
             self.grad_fun = get_grad_weight_fun(1./len(input_shape))
@@ -267,7 +542,7 @@ class Combine(tf.keras.layers.Layer):
 
 
 
-class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
+class NConvToBatch(InferenceLayer, tf.keras.layers.Layer):
     def __init__(self, n_conv:int, inference_idx, filters:int, compensate_gradient:bool = False, activation="relu", name: str= "NConvToBatch2D", l2_reg=None, **kwargs):
         self.n_conv = n_conv
         self.filters = filters
@@ -283,8 +558,13 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         return config
 
     def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        op = tf.keras.layers.Conv3D if len(input_shape) == 5 else tf.keras.layers.Conv2D
         self.convs = [
-            tf.keras.layers.Conv2D(
+            op(
                 filters=self.filters,
                 kernel_size=1,
                 padding='same',
@@ -326,7 +606,7 @@ class NConvToBatch2D(InferenceLayer, tf.keras.layers.Layer):
         return output
 
 
-class ResConv2D(tf.keras.layers.Layer):
+class ResConv(tf.keras.layers.Layer):
     def __init__(
             self,
             kernel_size: int=3,
@@ -335,6 +615,8 @@ class ResConv2D(tf.keras.layers.Layer):
             dropout_rate : float = 0,
             batch_norm : bool = False,
             layer_norm: bool = False,
+            window_norm: bool = False,
+            window_norm_size=32,
             activation:str = "relu",
             l2_reg:float = 0,
             output_dtype=None,
@@ -342,24 +624,33 @@ class ResConv2D(tf.keras.layers.Layer):
             **kwargs
     ):
         super().__init__(name=name, **kwargs)
+        if sum(map(bool, (batch_norm, layer_norm, window_norm))) > 1:
+            raise ValueError("Choose at most one of batch_norm / layer_norm / window_norm")
         self.kernel_size = kernel_size
         self.dilation = dilation
         self.activation=activation
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
+        self.window_norm = window_norm
+        self.window_norm_size = window_norm_size
         self.weighted_sum = weighted_sum
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "weighted_sum":self.weighted_sum, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
         input_channels = int(input_shape[-1])
-        self.conv1 = tf.keras.layers.Conv2D(
+        conv_op = tf.keras.layers.Conv3D if len(input_shape)==5 else tf.keras.layers.Conv2D
+        self.conv1 = conv_op(
             filters=input_channels,
             kernel_size=self.kernel_size,
             strides=1,
@@ -372,7 +663,7 @@ class ResConv2D(tf.keras.layers.Layer):
             kernel_constraint=ClipMaxValue(),
             bias_constraint = ClipMaxValue()
         )
-        self.conv2 = tf.keras.layers.Conv2D(
+        self.conv2 = conv_op(
             filters=input_channels,
             kernel_size=self.kernel_size,
             dilation_rate = self.dilation,
@@ -388,25 +679,21 @@ class ResConv2D(tf.keras.layers.Layer):
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
         if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
-        if self.batch_norm:
-            self.bn1 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-            self.bn2 = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-        elif self.layer_norm:
-            self.bn1 = tf.keras.layers.LayerNormalization(  dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
-            self.bn2 = tf.keras.layers.LayerNormalization( dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+            self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+        self.norm1 = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
+        self.norm2 = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
         if self.weighted_sum:
             self.ws = WeightedSum(per_channel=True)
         super().build(input_shape)
 
     def call(self, input, training=None):
         x = self.conv1(input)
-        if self.batch_norm:
-            x = self.bn1(x, training = training)
+        if self.norm1 is not None:
+            x = self.norm1(x, training = training)
         x = self.activation_layer(x)
         x = self.conv2(x)
-        if self.batch_norm:
-            x = self.bn2(x, training = training)
+        if self.norm2 is not None:
+            x = self.norm2(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
         if self.output_dtype is not None:
@@ -415,46 +702,124 @@ class ResConv2D(tf.keras.layers.Layer):
         else:
             input = tf.cast(input, dtype=x.dtype)
         if self.weighted_sum:
-            return self.activation_layer(self.ws([input, x]))
+            out = self.activation_layer(self.ws([input, x]))
         else:
-            return self.activation_layer(input + x)
+            out = self.activation_layer(input + x)
+        return numerics_probe(out, f"{self.name}/resconv_out")
 
 
-class Conv2DBNDrop(tf.keras.layers.Layer):
+# Pre-softmax logit clip (absolute bound). Logits beyond ~|16| already saturate
+# softmax (p indistinguishable from 0/1 even in fp16), so clamping at 30 is
+# information-free yet maps any fp16 overflow (+/-inf) to a finite value,
+# preventing softmax(inf)=NaN. It is a safety rail, not a regularizer: healthy
+# logits never reach it, so no gradient is lost in normal training. Set to None
+# to disable. To also *regularize* over-confidence, lower this AND add label
+# smoothing on the loss (clip alone, if logits keep being pushed past the bound,
+# zeroes their gradient -> can drive the degenerate uniform prediction).
+DEFAULT_LOGIT_CLIP = 0.
+# Soft logit cap (Gemma-2 style): logits <- c*tanh(logits/c). A *smooth*,
+# gradient-preserving bound (no dead-zone like the hard clip) that also maps
+# +/-inf -> +/-c, so it subsumes the NaN safety rail. c is chosen so the
+# reachable confidence is ample while the logit scale stays small enough that
+# upstream features are never driven to fp16 overflow: for a K-class softmax the
+# max confidence is 1/(1+(K-1)e^{-2c}) (= 0.9993 for K=3 at c=4) and the allowed
+# logit gap (<=2c=8) exceeds the optimum a label-smoothed loss converges to
+# (~ln(K/eps)~5.7 at eps=1e-2). Saturating the gradient beyond +/-c removes the
+# pressure that inflates the feature decoder. Set to None to fall back to the
+# hard clip. Active by default on every softmax head.
+DEFAULT_LOGIT_SOFTCAP = 0.
+# z-loss weight (PaLM / ST-MoE). Adds weight * mean(logsumexp(logits)^2) on the
+# pre-cap logits via add_loss: a quadratic penalty on the logit *scale* that
+# counters logit drift. Being a loss term it back-propagates and pulls down the
+# whole upstream path (the LM feature decoder). 0 = off; ~1e-4 is the usual value.
+DEFAULT_Z_LOSS_WEIGHT = 0.
+
+def _is_softmax_activation(activation, activation_layer):
+    if isinstance(activation, str):
+        return activation.lower() == "softmax"
+    return getattr(activation_layer, "__name__", None) == "softmax"
+
+def softmax_z_loss(logits, weight):
+    """PaLM/ST-MoE z-loss: weight * mean(logsumexp(logits, axis=-1)^2), in fp32 on
+    the pre-cap logits. Penalizes the softmax partition function (logit scale),
+    countering the logit/activation drift that overflows fp16. Returns a scalar."""
+    z = tf.reduce_logsumexp(tf.cast(logits, tf.float32), axis=-1)
+    return tf.cast(weight, tf.float32) * tf.reduce_mean(tf.square(z))
+
+def finalize_output(x, activation_layer, is_softmax, logit_clip, logit_softcap, output_dtype):
+    """Output cast + activation for a conv / conv-transpose head.
+
+    Softmax heads bound the pre-activation logits in fp32 and compute the softmax
+    in fp32 regardless of output_dtype, so the head is NaN-proof without forcing
+    the whole conv to fp32 (only the activation runs in fp32). Preferred bound is
+    the smooth soft-cap c*tanh(x/c) (also maps +/-inf -> +/-c); falls back to the
+    hard clip when logit_softcap is None. Non-softmax heads keep original behavior.
+    """
+    if is_softmax:
+        x = tf.cast(x, tf.float32)
+        if logit_softcap is not None and logit_softcap > 0:
+            c = tf.cast(logit_softcap, tf.float32)
+            x = c * tf.math.tanh(x / c)
+        elif logit_clip is not None and logit_clip > 0:
+            x = tf.clip_by_value(x, -logit_clip, logit_clip)
+        return activation_layer(x)
+    if output_dtype is not None:
+        x = tf.cast(x, dtype=output_dtype)
+    return activation_layer(x)
+
+
+class ConvBNDrop(tf.keras.layers.Layer):
     def __init__(
             self,
             filters:int,
             kernel_size: int=3,
             dilation: int = 1,
             strides: int = 1,
-            dropout_rate:float = 0.2,
+            dropout_rate:float = 0,
             batch_norm : bool = False,
             layer_norm: bool = False,
+            window_norm: bool = False,
+            window_norm_size=32,
             activation:str = "relu",
+            logit_clip:float = DEFAULT_LOGIT_CLIP,
+            logit_softcap:float = None,  # None: no cap (preserves pre-softcap serialized models); arch/decoder_op pass DEFAULT_LOGIT_SOFTCAP for new heads
+            z_loss_weight:float = DEFAULT_Z_LOSS_WEIGHT,
             l2_reg:float = 0,
             output_dtype=None,
             name: str="ConvBNDrop",
             **kwargs
     ):
         super().__init__(name=name, **kwargs)
+        if sum(map(bool, (batch_norm, layer_norm, window_norm))) > 1:
+            raise ValueError("Choose at most one of batch_norm / layer_norm / window_norm")
         self.filters = filters
         self.kernel_size = kernel_size
         self.dilation = dilation
         self.activation=activation
+        self.logit_clip=logit_clip
+        self.logit_softcap=logit_softcap
+        self.z_loss_weight=z_loss_weight
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
+        self.window_norm = window_norm
+        self.window_norm_size = window_norm_size
         self.strides=strides
         self.l2_reg = l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "logit_clip":self.logit_clip, "logit_softcap":self.logit_softcap, "z_loss_weight":self.z_loss_weight, "kernel_size":self.kernel_size, "dilation":self.dilation, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm,  "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
-        self.conv = tf.keras.layers.Conv2D(
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        op = tf.keras.layers.Conv3D if len(input_shape)==5 else tf.keras.layers.Conv2D
+        self.conv = op(
             filters=self.filters,
             kernel_size=self.kernel_size,
             dilation_rate = self.dilation,
@@ -469,97 +834,71 @@ class Conv2DBNDrop(tf.keras.layers.Layer):
             bias_constraint = ClipMaxValue()
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
+        self._is_softmax = _is_softmax_activation(self.activation, self.activation_layer)
         if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate)
-        if self.batch_norm:
-            self.bn = tf.keras.layers.BatchNormalization(dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-        if self.layer_norm:
-            self.bn = tf.keras.layers.LayerNormalization( dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+            self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+        self.norm = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
         super().build(input_shape)
 
     def call(self, input, training=None):
         x = self.conv(input)
-        if self.batch_norm:
-            x = self.bn(x, training = training)
+        if self.norm is not None:
+            x = self.norm(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
-        if self.output_dtype is not None:
-            x = tf.cast(x, dtype=self.output_dtype)
-        return self.activation_layer(x)
+        x = numerics_probe(x, f"{self.name}/pre_act")
+        if self._is_softmax and self.z_loss_weight and self.z_loss_weight > 0:
+            self.add_loss(softmax_z_loss(x, self.z_loss_weight))  # z-loss on pre-cap logits
+        return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.logit_softcap, self.output_dtype)
 
 
-class Conv2DWithDtype(tf.keras.layers.Conv2D):
-    def __init__(self, *args, l2_reg:float=0, output_dtype:str=None, **kwargs):
-        self._activation = kwargs.pop('activation', None)
-        self.l2_reg = l2_reg
-        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
-        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
-        kernel_constraint = ClipMaxValue()
-        bias_constraint = ClipMaxValue()
-        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
-        self.output_dtype = output_dtype
-        self.activation = None  # Will be set in build()
-
-    def build(self, input_shape):
-        super().build(input_shape)
-        if self._activation is not None:
-            self.activation = tf.keras.activations.get(self._activation)
-
-    def call(self, inputs):
-        output = super().call(inputs)
-        if self.output_dtype is not None:
-            output = tf.cast(output, dtype=self.output_dtype)
-        if self.activation is not None:
-            output = self.activation(output)
-        return output
-
-    def get_config(self):
-        config = super().get_config()
-        config.pop("kernel_regularizer", None)
-        config.pop("bias_regularizer", None)
-        config.pop("kernel_constraint", None)
-        config.pop("bias_constraint", None)
-        config.update({
-            'output_dtype': self.output_dtype,
-            'l2_reg':self.l2_reg,
-            'activation': self._activation if isinstance(self._activation, str) else tf.keras.activations.serialize(self._activation)
-        })
-        return config
-
-
-class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
+class ConvTransposeBNDrop(tf.keras.layers.Layer):
     def __init__(
             self,
             filters:int,
             kernel_size: int=4,
             strides: int = 2,
+            tridimensional_mode : bool=False,
             dropout_rate:float = 0,
             batch_norm : bool = False,
             layer_norm: bool = False,
+            window_norm: bool = False,
+            window_norm_size=32,
             activation:str = "relu",
+            logit_clip:float = DEFAULT_LOGIT_CLIP,
+            logit_softcap:float = None,  # None: no cap (preserves pre-softcap serialized models); arch/decoder_op pass DEFAULT_LOGIT_SOFTCAP for new heads
+            z_loss_weight:float = DEFAULT_Z_LOSS_WEIGHT,
             l2_reg:float = 0,
             output_dtype=None,
-            name: str="ResConv2DTransposeBNDrop",
+            name: str="ConvTransposeBNDrop",
             **kwargs
     ):
         super().__init__(name=name, **kwargs)
+        if sum(map(bool, (batch_norm, layer_norm, window_norm))) > 1:
+            raise ValueError("Choose at most one of batch_norm / layer_norm / window_norm")
         self.filters = filters
         self.kernel_size = kernel_size
         self.activation=activation
+        self.logit_clip=logit_clip
+        self.logit_softcap=logit_softcap
+        self.z_loss_weight=z_loss_weight
         self.dropout_rate=dropout_rate
         self.batch_norm=batch_norm
         self.layer_norm = layer_norm
+        self.window_norm = window_norm
+        self.window_norm_size = window_norm_size
         self.strides=strides
         self.l2_reg=l2_reg
         self.output_dtype=output_dtype
 
     def get_config(self):
       config = super().get_config().copy()
-      config.update({"filters":self.filters, "activation": self.activation, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
+      config.update({"filters":self.filters, "activation": self.activation, "logit_clip":self.logit_clip, "logit_softcap":self.logit_softcap, "z_loss_weight":self.z_loss_weight, "kernel_size":self.kernel_size, "dropout_rate":self.dropout_rate, "batch_norm":self.batch_norm, "layer_norm":self.layer_norm, "window_norm":self.window_norm, "window_norm_size":self.window_norm_size, "strides":self.strides, "l2_reg":self.l2_reg, "output_dtype":self.output_dtype})
       return config
 
     def build(self, input_shape):
-        self.conv = tf.keras.layers.Conv2DTranspose(
+        op = tf.keras.layers.Conv3DTranspose if len(input_shape)==5 else tf.keras.layers.Conv2DTranspose
+        self.conv = op(
             filters=self.filters,
             kernel_size=self.kernel_size,
             strides=self.strides,
@@ -573,78 +912,46 @@ class Conv2DTransposeBNDrop(tf.keras.layers.Layer):
             name=f"tConv{ker_size_to_string(self.kernel_size)}",
         )
         self.activation_layer = tf.keras.activations.get(self.activation)
+        self._is_softmax = _is_softmax_activation(self.activation, self.activation_layer)
         if self.dropout_rate>0:
-            self.drop = tf.keras.layers.SpatialDropout2D(self.dropout_rate, name=f"Dropout")
-        if self.batch_norm:
-            self.bn = tf.keras.layers.BatchNormalization(name = f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype=='float16' else 'float32')
-        elif self.layer_norm:
-            self.bn = tf.keras.layers.LayerNormalization(name=f"BatchNormalization", dtype='mixed_float16' if self.compute_dtype == 'float16' else 'float32')
+            self.drop = tf.keras.layers.SpatialDropout3D(self.dropout_rate) if len(input_shape)==5 else tf.keras.layers.SpatialDropout2D(self.dropout_rate)
+        self.norm = _make_norm(self.batch_norm, self.layer_norm, self.window_norm, compute_dtype=self.compute_dtype, window_norm_size=self.window_norm_size)
         super().build(input_shape)
 
     def call(self, input, training=None):
         x = self.conv(input)
-        if self.batch_norm:
-            x = self.bn(x, training = training)
+        if self.norm is not None:
+            x = self.norm(x, training = training)
         if self.dropout_rate>0:
             x = self.drop(x, training = training)
-        if self.output_dtype is not None:
-            x = tf.cast(x, dtype=self.output_dtype)
-        return self.activation_layer(x)
+        x = numerics_probe(x, f"{self.name}/pre_act")
+        if self._is_softmax and self.z_loss_weight and self.z_loss_weight > 0:
+            self.add_loss(softmax_z_loss(x, self.z_loss_weight))  # z-loss on pre-cap logits
+        return finalize_output(x, self.activation_layer, self._is_softmax, self.logit_clip, self.logit_softcap, self.output_dtype)
 
 
-class Conv2DTransposeWithDtype(tf.keras.layers.Conv2DTranspose):
-    def __init__(self, *args, output_dtype=None, l2_reg:float=0, **kwargs):
-        self._activation = kwargs.pop('activation', None)
-        self.l2_reg = l2_reg
-        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=self.l2_reg * 10, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('kernel_regularizer', None)
-        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=self.l2_reg) if self.l2_reg > 0 else kwargs.pop('bias_regularizer', None)
-        kernel_constraint = ClipMaxValue()
-        bias_constraint = ClipMaxValue()
-        super().__init__(*args, activation=None, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
+class UpSamplingWithDtype(tf.keras.layers.Layer):
+    def __init__(self, size, interpolation, output_dtype=None, name=None, **kwargs):
+        super().__init__(name=name, **kwargs)
         self.output_dtype = output_dtype
-        self.activation = None  # Will be set in build()
+        self.size = size
+        self.interpolation = interpolation
 
     def build(self, input_shape):
-        super().build(input_shape)
-        if self._activation is not None:
-            self.activation = tf.keras.activations.get(self._activation)
+        if len(input_shape) == 5:
+            self.up_op = tf.keras.layers.UpSampling3D(size=self.size, name="up_op")
+        else:
+            self.up_op = tf.keras.layers.UpSampling2D(size=self.size, interpolation=self.interpolation, name="up_op")
 
     def call(self, inputs):
-        output = super().call(inputs)
-        if self.output_dtype is not None:
-            output = tf.cast(output, dtype=self.output_dtype)
-        if self.activation is not None:
-            output = self.activation(output)
-        return output
-
-    def get_config(self):
-        config = super().get_config()
-        config.pop("kernel_regularizer", None)
-        config.pop("bias_regularizer", None)
-        config.pop("kernel_constraint", None)
-        config.pop("bias_constraint", None)
-        config.update({
-            'output_dtype': self.output_dtype,
-            'l2_reg':self.l2_reg,
-            'activation': self._activation if isinstance(self._activation, str) else tf.keras.activations.serialize(self._activation)
-        })
-        return config
-
-
-class UpSampling2DWithDtype(tf.keras.layers.UpSampling2D):
-    def __init__(self, *args, output_dtype=None, **kwargs):
-        super(UpSampling2DWithDtype, self).__init__(*args, **kwargs)
-        self.output_dtype = output_dtype
-
-    def call(self, inputs):
-        output = super(UpSampling2DWithDtype, self).call(inputs)
+        output = self.up_op(inputs)
         if self.output_dtype is not None:
             output = tf.cast(output, dtype=self.output_dtype)
         return output
 
     def get_config(self):
-        config = super(UpSampling2DWithDtype, self).get_config()
-        config.update({'output_dtype': self.output_dtype})
+        config = super().get_config().copy()
+        config.update({'output_dtype': self.output_dtype, 'size':self.size, 'interpolation':self.interpolation})
         return config
 
 
@@ -837,6 +1144,7 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
         self.l2_reg=l2_reg
         assert len(frame_prev_idx) == len(frame_next_idx)
         self.embedding=None
+        self.tridim_mode=False
         super().__init__(name=name, **kwargs)
 
     def get_config(self):
@@ -845,6 +1153,11 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
       return config
 
     def build(self, input_shape):
+        try:
+            input_shape = input_shape.as_list()
+        except:
+            pass
+        self.tridim_mode = len(input_shape) == 5
         self.embedding = tf.keras.layers.Embedding(
             input_dim=self.input_dim,
             output_dim=self.output_dim,
@@ -854,12 +1167,16 @@ class FrameDistanceEmbedding(tf.keras.layers.Layer):
         )
         super().build(input_shape)
 
-    def call(self, frame_index): # (B, 1, 1, FW)
+    def call(self, frame_index): # (B, 1, 1, FW) or (B, 1, 1, 1, FW)
         offset = tf.cast(self.offset, tf.int32)
-        frame_distance = tf.cast( tf.gather(frame_index[:, 0, 0], self.frame_next_idx, axis=-1) - tf.gather(frame_index[:, 0, 0], self.frame_prev_idx, axis=-1), tf.int32 ) + offset # (B, N)
+        fi = frame_index[:, 0, 0, 0] if self.tridim_mode else frame_index[:, 0, 0]  # (B, FW)
+        frame_distance = tf.cast( tf.gather(fi, self.frame_next_idx, axis=-1) - tf.gather(fi, self.frame_prev_idx, axis=-1), tf.int32 ) + offset # (B, N)
         frame_distance_emb = self.embedding(frame_distance) # (B, N, C)
         frame_distance_emb = tf.transpose(frame_distance_emb, perm=[1, 0, 2]) # (N, B, C)
-        frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim]) # ( N x B, 1, 1, C )
+        if self.tridim_mode:
+            frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, 1, self.output_dim]) # ( N x B, 1, 1, 1, C )
+        else:
+            frame_distance_emb = tf.reshape(frame_distance_emb, [-1, 1, 1, self.output_dim])
         return frame_distance_emb
 
 

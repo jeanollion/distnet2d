@@ -1,4 +1,3 @@
-import numpy as np
 import tensorflow as tf
 try:
     import tensorflow_probability as tfp
@@ -7,60 +6,35 @@ except:
     tfd = None
 
 
-def der_2d(image, axis:int):
+def der(image, axis: int):
     """
-        Compute the partial derivative (central difference approximation) of source in a particular dimension: d_f( x ) = ( f( x + 1 ) - f( x - 1 ) ) / 2.
-        Output tensors has the same shape as the input: [B, Y, X, C].
+        Compute partial derivative (central difference) along any axis. Works for any tensor rank.
+    """
+    ndim = len(image.shape)
+    pad_widths = [[0, 0]] * ndim
+    pad_widths[axis] = [1, 1]
+    image = tf.pad(image, pad_widths, mode="SYMMETRIC")
+    slc_hi = [slice(None)] * ndim
+    slc_lo = [slice(None)] * ndim
+    slc_hi[axis] = slice(2, None)
+    slc_lo[axis] = slice(None, -2)
+    return tf.math.divide(image[tuple(slc_hi)] - image[tuple(slc_lo)], tf.cast(2, image.dtype))
 
-        Args:
-        image: Tensor with shape [B, Y, X, C].
-        axis: axis to compute gradient on (1 = dy or 2 = dx)
 
-        Returns:
-        tensor dy or dx holding the vertical or horizontal partial derivative
-        gradients (1-step finite difference).
-
-        Raises:
-        ValueError: If `image` is not a 4D tensor.
-        """
-    if isinstance(image, np.ndarray):
-        assert image.ndim == 4, f'image_gradients expects a 4D tensor  [B, Y, X, C], not {image.shape}'
+def laplacian(image=None, derivatives=None):
+    """Compute Laplacian for nD tensors. Supports 4D (B,Y,X,C) and 5D (B,Z,Y,X,C).
+    derivatives: list of first-order spatial derivatives [dz, dy, dx] or [dy, dx]."""
+    if image is not None:
+        ndim = len(image.shape)
+        if ndim == 5:
+            derivatives = [der(image, 1), der(image, 2), der(image, 3)]
+        else:
+            derivatives = [der(image, 1), der(image, 2)]
+    assert derivatives is not None
+    if len(derivatives) == 3:
+        return der(derivatives[0], 1) + der(derivatives[1], 2) + der(derivatives[2], 3)
     else:
-        tf.assert_equal(tf.rank(image), 4, message=f'image_gradients expects a 4D tensor  [B, Y, X, C], not {tf.shape(image)}.')
-    assert axis in [1, 2], "axis must be in [1, 2]"
-    if axis == 1:
-        image = tf.pad(image, tf.constant([[0, 0], [1, 1,], [0, 0], [0, 0]]), mode="SYMMETRIC")
-        return tf.math.divide(image[:, 2:, :, :] - image[:, :-2, :, :], tf.cast(2, image.dtype))
-    else:
-        image = tf.pad(image, tf.constant([[0, 0], [0, 0,], [1, 1], [0, 0]]), mode="SYMMETRIC")
-        return tf.math.divide(image[:, :, 2:, :] - image[:, :, :-2, :], tf.cast(2, image.dtype))
-
-
-def gradient_magnitude_2d(image=None, dy=None, dx=None, sqrt:bool=True):
-    if image is None:
-        assert dy is not None and dx is not None, "provide either image or partial derivatives"
-        tf.assert_equal(tf.shape(dy), tf.shape(dx), message="partial derivatives must have same shape")
-    else:
-        dy = der_2d(image, 1)
-        dx = der_2d(image, 2)
-
-    grad = dx * dx + dy * dy
-    if sqrt:
-        grad = tf.math.sqrt(grad)
-    return grad
-
-
-def laplacian_2d(image=None, dy=None, dx=None):
-    if image is None:
-        assert dy is not None and dx is not None, "provide either image or partial derivatives"
-        tf.assert_equal(tf.shape(dy), tf.shape(dx), message="partial derivatives must have same shape")
-    else:
-        dy = der_2d(image, 1)
-        dx = der_2d(image, 2)
-
-    ddy = der_2d(dy, 1)
-    ddx = der_2d(dx, 2)
-    return ddy + ddx
+        return der(derivatives[0], 1) + der(derivatives[1], 2)
 
 
 def smooth(image, rad:float=1.5):

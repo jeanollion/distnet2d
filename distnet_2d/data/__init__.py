@@ -1,1 +1,1 @@
-from .dydx_iterator import DyDxIterator
+from .distnet_iterator import DistnetIterator

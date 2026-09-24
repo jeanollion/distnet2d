@@ -1,19 +1,20 @@
+import os
 import contextlib
 import copy
 from collections import defaultdict
 import tensorflow as tf
 from .temporal_pyramid import TemporalPyramid, TemporalFeatureReconstructor, TemporalFeaturePairReconstructor
 from .window_spatial_attention import WindowSpatialAttention
-from .architectures import ArchBase, Blend, TemPy
-from .layers import ker_size_to_string, Combine, ResConv2D, Conv2DBNDrop, Conv2DTransposeBNDrop, \
-    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch2D, InferenceAwareSelector, StopGradient, Stack, \
-    HideVariableWrapper, FrameDistanceEmbedding, Conv2DWithDtype, Conv2DTransposeWithDtype, \
+from .architectures import ArchBase, Blend, TemPy, spatial_contraction_product
+from .layers import ker_size_to_string, Combine, ResConv, ConvBNDrop, ConvTransposeBNDrop, \
+    BatchToChannel, SplitBatch, ChannelToBatch, NConvToBatch, InferenceAwareSelector, StopGradient, Stack, \
+    HideVariableWrapper, FrameDistanceEmbedding, \
     HybridThresholdL2Regularizer, ResidualGradientLimiter, LogGradientMagnitude, \
-    ConcatenateWithDtype, ClipMaxValue
+    ConcatenateWithDtype, ClipMaxValue, UpSamplingWithDtype, DEFAULT_LOGIT_SOFTCAP, DEFAULT_Z_LOSS_WEIGHT, get_activation
 from dataset_iterator.keras_layers import InferenceLayer
 import numpy as np
 
-from .spatial_attention import SpatialAttention2D
+from .spatial_attention import SpatialAttention
 from ..utils.helpers import ensure_multiplicity, flatten_list
 from ..utils.losses import weighted_loss_by_category, balanced_category_loss, PseudoHuber, compute_loss_derivatives, \
     FocalCrossEntropy
@@ -36,17 +37,23 @@ class DiSTNetModel(tf.keras.Model):
                  link_multiplicity_class_weights=None,  # array of weights: [single, multiple, null] or None = auto
                  link_multiplicity_max_class_weight=50,
                  link_multiplicity_focal_weight:float = 2,
+                 link_multiplicity_temperature:float = 0, link_multiplicity_pseudo_huber:float = 0, link_multiplicity_label_smoothing:float =0,
                  frame_window=3,
                  future_frames: bool = True,
                  long_term:bool=True,
                  predict_fw:bool=True,
                  predict_cdm_derivatives:bool=False, predict_edm_derivatives:bool=False,
                  category_number:int=0, category_class_weights = None, category_focal_weight = 2.0, category_max_class_weight=10,
+                 category_temperature:float = 0, category_pseudo_huber:float = 0, category_label_smoothing:float = 0,
                  print_gradients:bool=False,  # for optimization, available in eager mode only
                  gradient_accumulation_steps:int=1, use_agc=False, agc_clip_factor=0.05, agc_eps=1e-3, agc_exclude_output=False,  # lower clip factor clips more
                  perform_test_step:bool=False, scale_losses:bool = True,
+                 tridimensional_mode:bool=False,
+                 return_weight_map:bool=False,
                  **kwargs):
         super().__init__(*args, **kwargs)
+        self.tridimensional_mode = tridimensional_mode
+        self.return_weight_map = return_weight_map
         self.edm_weight = edm_loss_weight
         if edm_class_weights is not None:
             assert len(edm_class_weights) == 2 , "edm_class_weights must be a list of len 2"
@@ -71,15 +78,15 @@ class DiSTNetModel(tf.keras.Model):
         self.predict_edm_derivatives = predict_edm_derivatives
         if link_multiplicity_class_weights is not None:
             assert len(link_multiplicity_class_weights) == 3, "3 link multiplicity class weights should be provided: normal cell, dividing/merging cells, cell with no previous cell"
-            self.link_multiplicity_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight), link_multiplicity_class_weights, remove_background=True)
+            self.link_multiplicity_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight, temperature=link_multiplicity_temperature, pseudo_huber=link_multiplicity_pseudo_huber, label_smoothing=link_multiplicity_label_smoothing), link_multiplicity_class_weights, remove_background=True)
         else:
-            self.link_multiplicity_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
+            self.link_multiplicity_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=link_multiplicity_focal_weight, temperature=link_multiplicity_temperature, pseudo_huber=link_multiplicity_pseudo_huber, label_smoothing=link_multiplicity_label_smoothing), 3, max_class_frequency=link_multiplicity_max_class_weight, remove_background=True)
         if category_number > 1:
             if category_class_weights is not None:
                 assert len(category_class_weights) == category_number, f"{category_number} category weights should be provided {len(category_class_weights)} where provided instead ({category_class_weights})"
-                self.category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight), category_class_weights, remove_background=True)
+                self.category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight, temperature=category_temperature, pseudo_huber=category_pseudo_huber, label_smoothing=category_label_smoothing), category_class_weights, remove_background=True)
             else:
-                self.category_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
+                self.category_loss = balanced_category_loss(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=category_focal_weight, temperature=category_temperature, pseudo_huber=category_pseudo_huber, label_smoothing=category_label_smoothing), category_number, max_class_frequency=category_max_class_weight, remove_background=True)
             if edm_loss_weight == 0 and cdm_loss_weight == 0 and displacement_loss_weight == 0 and link_multiplicity_loss_weight == 0:
                 self.fgbg_category_loss = weighted_loss_by_category(FocalCrossEntropy(reduction=tf.keras.losses.Reduction.NONE, focal_weight=0), [1., 1.], remove_background=False)
             else :
@@ -98,7 +105,10 @@ class DiSTNetModel(tf.keras.Model):
         self.agc_eps = agc_eps
         if self.use_agc:
             print(f"AGC: factor: {self.agc_clip_factor} eps: {self.agc_eps}")
-        self.agc_exclude_keywords=["DecoderTrackY0_", "DecoderTrackX0_", "DecoderLinkMultiplicity0_", "DecoderCenterCDM0_", "DecoderCenterCDMdY0_", "DecoderCenterCDMdX0_", "DecoderSegEDM0_", "DecoderSegEDMdY0_", "DecoderSegEDMdX0_"] if agc_exclude_output else None
+        agc_kw = ["DecoderTrackY0_", "DecoderTrackX0_", "DecoderLinkMultiplicity0_", "DecoderCenterCDM0_", "DecoderCenterCDMdY0_", "DecoderCenterCDMdX0_", "DecoderSegEDM0_", "DecoderSegEDMdY0_", "DecoderSegEDMdX0_"]
+        if tridimensional_mode:
+            agc_kw.extend(["DecoderTrackZ0_", "DecoderCenterCDMdZ0_", "DecoderSegEDMdZ0_"])
+        self.agc_exclude_keywords = agc_kw if agc_exclude_output else None
         self.print_gradients=print_gradients
 
         # override losses reduction to None for tf.distribute.MirroredStrategy and MultiWorkerStrategy
@@ -119,6 +129,8 @@ class DiSTNetModel(tf.keras.Model):
         if self.displacement_weight > 0:
             self.dx_loss_metric = tf.keras.metrics.Mean(name="dX")
             self.dy_loss_metric = tf.keras.metrics.Mean(name="dY")
+            if self.tridimensional_mode:
+                self.dz_loss_metric = tf.keras.metrics.Mean(name="dZ")
         if self.link_multiplicity_weight > 0:
             self.link_multiplicity_loss_metric = tf.keras.metrics.Mean(name="link_multiplicity")
 
@@ -134,8 +146,10 @@ class DiSTNetModel(tf.keras.Model):
         if self.center_weight > 0:
             losses.append("CDM")
         if self.displacement_weight > 0:
-            losses.append("dX")
+            if self.tridimensional_mode:
+                losses.append("dZ")
             losses.append("dY")
+            losses.append("dX")
         if self.link_multiplicity_weight > 0:
             losses.append("link_multiplicity")
         if self.category_weight > 0 and self.category_number > 1:
@@ -176,64 +190,100 @@ class DiSTNetModel(tf.keras.Model):
         if self.long_term:
             n_frame_pairs += (fw - 1) * (2 if self.future_frames else 1)
         # TODO : measure gradients and fix norms
-        displacement_weight = self.displacement_weight if fw > 0 else 0 # div was 2 * n_fp_mul
+        displacement_weight = self.displacement_weight if fw > 0 else 0 # div was 2 * n_fp_mul but removed because losses uses mean reduction.
         link_multiplicity_weight = self.link_multiplicity_weight / (n_fp_mul * float(n_frame_pairs)) if fw > 0 else 0 # manual sum at loss computation so no mean reduction
         edm_weight = self.edm_weight #/ was float(n_frames)
         center_weight = self.center_weight #/ was float(n_frames)# divide by channel number ?
         category_weight = self.category_weight / float(n_frames) # manual sum at loss computation so no mean reduction
         fgbg_category_weight = self.category_weight
-        expected_true_outputs = int(edm_weight>0) + int(center_weight>0) + 2*int(displacement_weight>0) + int(link_multiplicity_weight>0) + int(category_weight>0)
-        assert len(y) == expected_true_outputs , f"invalid number of output. Expected: {expected_true_outputs} actual {len(y)}" # 0 = edm, 1 = center, 2 = dY, 3 = dX, 4 = LinkMultiplicity, 5=category
+        n_displacement = 3 if self.tridimensional_mode else 2
+        expected_true_outputs = int(edm_weight>0) + int(center_weight>0) + n_displacement*int(displacement_weight>0) + int(link_multiplicity_weight>0) + int(category_weight>0) + int(self.return_weight_map)
+        assert len(y) == expected_true_outputs , f"invalid number of output. Expected: {expected_true_outputs} actual {len(y)}"
+
+        # extract exclusion weight map if present (last output from iterator)
+        if self.return_weight_map:
+            exclusion_weight_map = y[-1]  # [B, (Z,) Y, X, n_frames]
+            exclusion_weight_map_pairs = self._to_pair_mask(exclusion_weight_map) if fw > 0 else None  # [B, (Z,) Y, X, n_pair_channels]
+            y = y[:-1]
+        else:
+            exclusion_weight_map = None
+            exclusion_weight_map_pairs = None
 
         cdm_idx = int(edm_weight > 0)
-        lm_idx = cdm_idx + int(center_weight > 0) + 2 * int(displacement_weight > 0)
+        lm_idx = cdm_idx + int(center_weight > 0) + n_displacement * int(displacement_weight > 0)
         cat_idx = lm_idx + int(link_multiplicity_weight > 0)
         with self.maybe_gradient_tape(training) as tape:
             y_pred = self(x, training=training)  # Forward pass
+            if os.environ.get("DISTNET_DEBUG_NUMERICS", "0") == "1": # localize first NaN/Inf: fires on the output index that overflows (lm_idx => LM forward overflow)
+                if isinstance(y_pred, (list, tuple)):
+                    y_pred = [tf.debugging.check_numerics(p, f"y_pred[{i}]") for i, p in enumerate(y_pred)]
+                else:
+                    y_pred = tf.debugging.check_numerics(y_pred, "y_pred")
             if training and self.use_grad_acc: # for batch norm handling
                 self.gradient_accumulator.post_forward_step()
-            if edm_weight > 0:
-                if self.predict_edm_derivatives:
-                    edm, edm_dy, edm_dx = tf.split(y_pred[0], num_or_size_splits=3, axis=-1)
-                else:
-                    edm, edm_dy, edm_dx = y_pred[0], None, None
+            n_der = n_displacement  # 3 for 3D (dz,dy,dx), 2 for 2D (dy,dx)
             if self.predict_edm_derivatives or self.edm_derivative_loss:
-                true_edm, true_edm_dy, true_edm_dx = tf.split(y[0], num_or_size_splits=3, axis=-1)
+                true_edm_splits = tf.split(y[0], num_or_size_splits=n_der + 1, axis=-1)
+                true_edm = true_edm_splits[0]
+                true_edm_dz = true_edm_splits[1] if self.tridimensional_mode else None
+                true_edm_dy = true_edm_splits[-2]
+                true_edm_dx = true_edm_splits[-1]
             else:
-                true_edm, true_edm_dy, true_edm_dx = y[0], None, None
-            if center_weight > 0:
-                if self.predict_cdm_derivatives:
-                    cdm, cdm_dy, cdm_dx = tf.split(y_pred[1], num_or_size_splits=3, axis=-1)
-                else:
-                    cdm, cdm_dy, cdm_dx = y_pred[1], None, None
+                true_edm, true_edm_dz, true_edm_dy, true_edm_dx = y[0], None, None, None
 
             # compute loss
             losses = dict()
             loss_weights = dict()
-
             cell_mask = tf.math.greater(true_edm, 0)
             cell_mask_interior = tf.math.greater(true_edm, 1) if self.cdm_derivative_loss or self.predict_cdm_derivatives else None
             # edm
             if edm_weight>0: # TODO: add a "heat map" mode: predict a gaussian
+                if self.predict_edm_derivatives:
+                    edm_splits = tf.split(y_pred[0], num_or_size_splits=n_der + 1, axis=-1)
+                    edm = edm_splits[0]
+                    edm_dz = edm_splits[1] if self.tridimensional_mode else None
+                    edm_dy = edm_splits[-2]
+                    edm_dx = edm_splits[-1]
+                else:
+                    edm, edm_dz, edm_dy, edm_dx = y_pred[0], None, None, None
                 weight_map = tf.where(cell_mask, self.edm_class_weights[1], self.edm_class_weights[0]) if self.edm_class_weights is not None else None
-                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dy=edm_dy, pred_dx=edm_dx, der_mask=None, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
+                if exclusion_weight_map is not None:
+                    weight_map = exclusion_weight_map if weight_map is None else weight_map * exclusion_weight_map
+                edm_loss = compute_loss_derivatives(true_edm, edm, self.edm_loss, true_dz=true_edm_dz, true_dy=true_edm_dy, true_dx=true_edm_dx, pred_dz=edm_dz, pred_dy=edm_dy, pred_dx=edm_dx, der_mask=None, derivative_loss=self.edm_derivative_loss, laplacian_loss=self.edm_derivative_loss, weight_map=weight_map)
                 edm_loss = tf.reduce_mean(edm_loss)
                 losses["EDM"] = edm_loss
                 loss_weights["EDM"] = edm_weight
             # center
             if center_weight>0:
-                cdm_true = y[cdm_idx]
+                if self.predict_cdm_derivatives:
+                    cdm_splits = tf.split(y_pred[cdm_idx], num_or_size_splits=n_der + 1, axis=-1)
+                    cdm = cdm_splits[0]
+                    cdm_dz = cdm_splits[1] if self.tridimensional_mode else None
+                    cdm_dy = cdm_splits[-2]
+                    cdm_dx = cdm_splits[-1]
+                else:
+                    cdm, cdm_dz, cdm_dy, cdm_dx = y_pred[cdm_idx], None, None, None
+                if False and (self.predict_cdm_derivatives or self.cdm_derivative_loss): # CDM derivatives computed on the fly
+                    true_cdm_splits = tf.split(y[1], num_or_size_splits=n_der + 1, axis=-1)
+                    true_cdm = true_cdm_splits[0]
+                    true_cdm_dz = true_cdm_splits[1] if self.tridimensional_mode else None
+                    true_cdm_dy = true_cdm_splits[-2]
+                    true_cdm_dx = true_cdm_splits[-1]
+                else:
+                    true_cdm, true_cdm_dz, true_cdm_dy, true_cdm_dx = y[1], None, None, None
                 if self.cdm_loss_radius <= 0: # GCDM mode : interior of cell
                     cdm_mask = cell_mask # was cell_mask
                     cdm_mask_interior = cell_mask_interior
-                    weight_map = None # tf.where(cell_mask, 1., 0.01) # instead of mask: force predict 0 outside
+                    weight_map = exclusion_weight_map
                 else: # ECDM mode: also exterior of object
-                    cdm_mask = tf.math.less_equal(cdm_true, self.cdm_loss_radius)
-                    half_rad = tf.cast(self.cdm_loss_radius, cdm_true.dtype) / tf.cast(2, cdm_true.dtype)
-                    weight_map = tf.math.exp(- tf.math.square(cdm_true / half_rad ) )
+                    cdm_mask = tf.math.less_equal(true_cdm, self.cdm_loss_radius)
+                    half_rad = tf.cast(self.cdm_loss_radius, true_cdm.dtype) / tf.cast(2, true_cdm.dtype)
+                    weight_map = tf.math.exp(- tf.math.square(true_cdm / half_rad ) )
                     weight_map = tf.where(cdm_mask, weight_map, 0)
+                    if exclusion_weight_map is not None:
+                        weight_map = weight_map * exclusion_weight_map
                     cdm_mask_interior = cdm_mask
-                center_loss = compute_loss_derivatives(cdm_true, cdm, self.cdm_loss, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, der_mask=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
+                center_loss = compute_loss_derivatives(true_cdm, cdm, self.cdm_loss, true_dz=true_cdm_dz, true_dy=true_cdm_dy, true_dx=true_cdm_dx, pred_dz=cdm_dz, pred_dy=cdm_dy, pred_dx=cdm_dx, mask=cdm_mask, der_mask=cdm_mask_interior, derivative_loss=self.cdm_derivative_loss, weight_map=weight_map)
                 center_loss = tf.reduce_mean(center_loss)
                 losses["CDM"] = center_loss
                 loss_weights["CDM"] = center_weight
@@ -243,27 +293,39 @@ class DiSTNetModel(tf.keras.Model):
                     cat_pred = y_pred[..., :-2]
                     fg_bg_pred = y_pred[..., -2:]
                     fg_bg_true = tf.cast(cell_mask, fg_bg_pred.dtype)
-                    losses["FgBg"] = tf.reduce_mean(self.fgbg_category_loss(fg_bg_true, fg_bg_pred))
+                    fg_bg_loss = self.fgbg_category_loss(fg_bg_true, fg_bg_pred)
+                    if exclusion_weight_map is not None:
+                        fg_bg_loss = fg_bg_loss * exclusion_weight_map
+                    losses["FgBg"] = tf.reduce_mean(fg_bg_loss)
                     loss_weights["FgBg"] = fgbg_category_weight
                 else:
                     cat_pred = y_pred[cat_idx]
-                cat_loss = self._compute_category_loss(y[cat_idx], cat_pred, cell_mask, n_frames)
+                cat_loss = self._compute_category_loss(y[cat_idx], cat_pred, cell_mask, n_frames, weight_map=exclusion_weight_map)
                 losses["category"] = tf.reduce_mean(cat_loss)
                 loss_weights["category"] = category_weight
 
             # regression displacement loss
             if displacement_weight > 0:
-                loss_dY, loss_dX = self._compute_displacement_loss(y, y_pred, cell_mask)
-                loss_dY = tf.reduce_mean(loss_dY)
-                losses["dY"] = loss_dY
+                displacement_losses = self._compute_displacement_loss(y, y_pred, cell_mask)
+                if self.tridimensional_mode:
+                    loss_dZ, loss_dY, loss_dX = displacement_losses
+                    if exclusion_weight_map_pairs is not None:
+                        loss_dZ = loss_dZ * exclusion_weight_map_pairs
+                    losses["dZ"] = tf.reduce_mean(loss_dZ)
+                    loss_weights["dZ"] = displacement_weight
+                else:
+                    loss_dY, loss_dX = displacement_losses
+                if exclusion_weight_map_pairs is not None:
+                    loss_dY = loss_dY * exclusion_weight_map_pairs
+                    loss_dX = loss_dX * exclusion_weight_map_pairs
+                losses["dY"] = tf.reduce_mean(loss_dY)
                 loss_weights["dY"] = displacement_weight
-                loss_dX = tf.reduce_mean(loss_dX)
-                losses["dX"] = loss_dX
+                losses["dX"] = tf.reduce_mean(loss_dX)
                 loss_weights["dX"] = displacement_weight
 
             # link_multiplicity loss
             if link_multiplicity_weight>0:
-                link_multiplicity_loss = self._compute_link_multiplicity_loss(y[lm_idx], y_pred[lm_idx], n_frame_pairs, n_fp_mul)
+                link_multiplicity_loss = self._compute_link_multiplicity_loss(y[lm_idx], y_pred[lm_idx], n_frame_pairs, n_fp_mul, weight_map_pairs=exclusion_weight_map_pairs)
                 link_multiplicity_loss = tf.reduce_mean(link_multiplicity_loss)
                 losses["link_multiplicity"] = link_multiplicity_loss
                 loss_weights["link_multiplicity"] = link_multiplicity_weight
@@ -330,10 +392,13 @@ class DiSTNetModel(tf.keras.Model):
             self.center_loss_metric.update_state(losses["CDM"], sample_weight=batch_dim)
             sub_losses.append(losses["CDM"])
         if self.displacement_weight > 0:
-            self.dx_loss_metric.update_state(losses["dX"], sample_weight=batch_dim)
+            if self.tridimensional_mode:
+                self.dz_loss_metric.update_state(losses["dZ"], sample_weight=batch_dim)
+                sub_losses.append(losses["dZ"])
             self.dy_loss_metric.update_state(losses["dY"], sample_weight=batch_dim)
-            sub_losses.append(losses["dX"])
+            self.dx_loss_metric.update_state(losses["dX"], sample_weight=batch_dim)
             sub_losses.append(losses["dY"])
+            sub_losses.append(losses["dX"])
         if self.link_multiplicity_weight > 0:
             self.link_multiplicity_loss_metric.update_state(losses["link_multiplicity"], sample_weight=batch_dim)
             sub_losses.append(losses["link_multiplicity"])
@@ -354,47 +419,64 @@ class DiSTNetModel(tf.keras.Model):
     def _compute_displacement_loss(self, y, y_pred, cell_mask):
         idx = int(self.center_weight > 0) + int(self.edm_weight > 0)
         mask = self._to_pair_mask(cell_mask)
-        dy = tf.where(mask, y_pred[idx], 0)  # do not predict anything outside
-        dx = tf.where(mask, y_pred[idx+1], 0)  # do not predict anything outside
-        return self.displacement_loss(y[idx], dy), self.displacement_loss(y[idx+1], dx)
+        if self.tridimensional_mode:
+            dz = tf.where(mask, y_pred[idx], 0)
+            dy = tf.where(mask, y_pred[idx+1], 0)
+            dx = tf.where(mask, y_pred[idx+2], 0)
+            return self.displacement_loss(y[idx], dz), self.displacement_loss(y[idx+1], dy), self.displacement_loss(y[idx+2], dx)
+        else:
+            dy = tf.where(mask, y_pred[idx], 0)
+            dx = tf.where(mask, y_pred[idx+1], 0)
+            return self.displacement_loss(y[idx], dy), self.displacement_loss(y[idx+1], dx)
 
-    def _to_pair_mask(self, cell_mask):
+
+    def _to_pair_mask(self, frame_mask):
+        """
+            Convert frame-based tensor [B,(Z,)Y,X,n_frames] to pair-based [B,(Z,)Y,X,n_pair_channels].
+        """
         fw = self.frame_window
-        mask = cell_mask[..., 1:]
-        if self.predict_fw:
-            mask_next = cell_mask[..., :-1]
+        mask = frame_mask[..., 1:]
+        mask_next = frame_mask[..., :-1] if self.predict_fw else None
         if self.long_term and fw > 1:
-            mask_center = tf.tile(mask[..., fw - 1:fw], [1, 1, 1, fw - 1])
+            tile_shape = [1] * (len(frame_mask.shape) - 1) + [fw - 1]
+            mask_center = tf.tile(mask[..., fw - 1:fw], tile_shape)
             if self.predict_fw:
                 if self.future_frames:
                     mask = tf.concat(
-                        [mask, mask_center, cell_mask[..., -fw + 1:], mask_next, cell_mask[..., :fw - 1], mask_center],
+                        [mask, mask_center, frame_mask[..., -fw + 1:], mask_next, frame_mask[..., :fw - 1], mask_center],
                         -1)
                 else:
-                    mask = tf.concat([mask, mask_center, mask_next, cell_mask[..., :fw - 1]], -1)
+                    mask = tf.concat([mask, mask_center, mask_next, frame_mask[..., :fw - 1]], -1)
             else:
                 if self.future_frames:
-                    mask = tf.concat([mask, mask_center, cell_mask[..., -fw + 1:]], -1)
+                    mask = tf.concat([mask, mask_center, frame_mask[..., -fw + 1:]], -1)
                 else:
                     mask = tf.concat([mask, mask_center], -1)
         elif self.predict_fw:
             mask = tf.concat([mask, mask_next], -1)
         return mask
 
-    def _compute_category_loss(self, y, y_pred, cell_mask, n_frames): # TODO use split instead of loop
+
+    def _compute_category_loss(self, y, y_pred, cell_mask, n_frames, weight_map=None): # TODO use split instead of loop
         cn = self.category_number
         cat_loss = 0.
         for i in range(n_frames):
             cat_pred_inside = tf.where(cell_mask[..., i:i + 1], y_pred[..., cn * i:cn * i + cn], 1)
-            cat_loss = cat_loss + self.category_loss(y[..., i:i + 1], cat_pred_inside)
+            frame_loss = self.category_loss(y[..., i:i + 1], cat_pred_inside)
+            if weight_map is not None:
+                frame_loss = frame_loss * weight_map[..., i:i + 1]
+            cat_loss = cat_loss + frame_loss
         return cat_loss
 
-    def _compute_link_multiplicity_loss(self, y, y_pred, n_frame_pairs, n_fp_mul): # TODO use split instead of loop
+    def _compute_link_multiplicity_loss(self, y, y_pred, n_frame_pairs, n_fp_mul, weight_map_pairs=None): # TODO use split instead of loop
         lm_loss = 0.
         for i in range(n_frame_pairs * n_fp_mul):
             inside_mask = tf.math.greater(y[..., i:i + 1], 0)
             lm_pred_inside = tf.where(inside_mask, y_pred[..., 3 * i:3 * i + 3], 1)
-            lm_loss = lm_loss + self.link_multiplicity_loss(y[..., i:i + 1], lm_pred_inside)
+            pair_loss = self.link_multiplicity_loss(y[..., i:i + 1], lm_pred_inside)
+            if weight_map_pairs is not None:
+                pair_loss = pair_loss * weight_map_pairs[..., i:i + 1]
+            lm_loss = lm_loss + pair_loss
         return lm_loss
 
     def set_inference(self, inference:bool=True):
@@ -438,23 +520,26 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             kwargs["link_multiplicity_loss_weight"] = 0
 
         #print(f"edm activation: {'tanh' if arch.scale_edm else 'linear'} l2_reg: {arch.l2_reg} l2_reg_emb: {arch.position_encoding_l2_reg}")
-        total_contraction = np.prod([np.prod([params.get("downscale", 1) for params in param_list]) for param_list in arch.encoder_settings])
-        total_contraction = ensure_multiplicity(2, total_contraction)
+        n_spa_dims = 2 if not arch.tridimensional_mode else 3
+        total_contraction = spatial_contraction_product(*[spatial_contraction_product(*[params.get("downscale", 1) for params in param_list]) for param_list in arch.encoder_settings])
+        total_contraction = ensure_multiplicity(n_spa_dims, total_contraction)
         assert len(arch.encoder_settings) == len(arch.decoder_settings), "decoder should have same length as encoder"
         if spatial_dimensions is None:
-            spatial_dimensions = [None, None]
+            spatial_dimensions = [None]*n_spa_dims
         else:
             spatial_dimensions = list(spatial_dimensions)
-            assert len(spatial_dimensions) == 2, "2D input required"
+            assert len(spatial_dimensions) == n_spa_dims, f"{n_spa_dims}D input required"
             for ax, (s, c) in enumerate(zip(spatial_dimensions, total_contraction)):
                 if s is not None and s>0:
                     assert s%c==0, f"Error: axis={ax} size={s} not divisible by contraction factor={c}"
         if arch.requires_input_spatial_dim():
             assert spatial_dimensions[0] is not None and spatial_dimensions[0] > 0, "for attention mechanism, spatial dim must be provided"
             assert spatial_dimensions[1] is not None and spatial_dimensions[1] > 0, "for attention mechanism, spatial dim must be provided"
+            if arch.tridimensional_mode:
+                assert spatial_dimensions[2] is not None and spatial_dimensions[2] > 0, "for attention mechanism, spatial dim must be provided"
             print(f"attention positional encoding mode: {arch.attention_positional_encoding}")
         else:
-            spatial_dimensions = [None, None] # no attention : no need to enforce fixed size
+            spatial_dimensions = [None]*n_spa_dims # no attention : no need to enforce fixed size
         if arch.frame_window<=1:
             long_term = False
         n_frames = arch.frame_window * (2 if arch.future_frames else 1) + 1
@@ -508,13 +593,13 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
         no_residual_layer = []
         last_input_filters = arch.n_inputs
         for l_idx, param_list in enumerate(arch.encoder_settings):
-            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window) if l_idx in skip_connections else None, downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, activation=arch.default_activation, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx, task_with_skip_prop=task_with_skip_prop)
+            op, contraction, residual_filters, out_filters = encoder_op(param_list, skip_parameters=(n_frames, arch.frame_window) if l_idx in skip_connections else None, downsampling_mode=arch.downsampling_mode, attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, activation=arch.default_activation, skip_stop_gradient=arch.skip_stop_gradient, last_input_filters = last_input_filters, layer_idx = l_idx, task_with_skip_prop=task_with_skip_prop, tridimensional_mode=arch.tridimensional_mode, window_norm_size=arch.window_norm_size)
             last_input_filters = out_filters
             encoder_layers.append(op)
             contraction_per_layer.append(contraction)
             no_residual_layer.append(residual_filters==0)
         # define feature operations
-        feature_convs, _, _, feature_filters, _ = parse_param_list(arch.feature_settings, "FeatureSequence", attention_positional_encoding=arch.attention_positional_encoding, activation=arch.default_activation, l2_reg=arch.l2_reg, last_input_filters=out_filters)
+        feature_convs, _, _, feature_filters, _ = parse_param_list(arch.feature_settings, "FeatureSequence", attention_positional_encoding=arch.attention_positional_encoding, activation=arch.default_activation, l2_reg=arch.l2_reg, last_input_filters=out_filters, window_norm_size=arch.window_norm_size)
         pair_combine_op = Combine(filters=feature_filters, kernel_size = arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairCombine")
         if len(arch.encoder_settings) in skip_connections:
             feature_skip_op = Combine(filters=feature_filters, l2_reg=arch.l2_reg, name="FeatureSkip")
@@ -522,7 +607,23 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
 
         # define decoder operations
         get_seq_and_filters = lambda l : [l[i] for i in [0, 3]]
-        decoder_feature_op={n: get_seq_and_filters(parse_param_list(arch.feature_decoder_settings, f"Features{n}", attention_positional_encoding=arch.attention_positional_encoding, activation=arch.default_activation, l2_reg=arch.l2_reg, last_input_filters=feature_filters)) for n in decoder_layers.keys()}
+        def _feature_decoder_activation(n):  # uniform across a head's feature-decoder ops; None->default, str->all heads, dict{head:spec}->per head
+            spec = arch.feature_decoder_activation
+            if spec is None:
+                return arch.default_activation
+            if isinstance(spec, dict):
+                spec = spec.get(n, arch.default_activation)
+            return get_activation(spec)
+        def _decoder_activation(name, l_idx):  # decoder backbone activation per head/level. arch.decoder_activation: None / str (all) / dict{head:spec}; spec: str (all levels) / dict{l_idx:spec}
+            spec = arch.decoder_activation
+            if isinstance(spec, dict):
+                spec = spec.get(name)            # per-head
+            if spec is None:
+                return arch.default_activation
+            if isinstance(spec, dict):
+                spec = spec.get(l_idx, arch.default_activation)  # per-level
+            return get_activation(spec)
+        decoder_feature_op={n: get_seq_and_filters(parse_param_list(arch.feature_decoder_settings, f"Features{n}", attention_positional_encoding=arch.attention_positional_encoding, activation=_feature_decoder_activation(n), l2_reg=arch.l2_reg, last_input_filters=feature_filters, window_norm_size=arch.window_norm_size)) for n in decoder_layers.keys()}
         decoder_out={name:{} for name in decoder_layers.keys()}
         oidx = 0
         output_per_decoder={}
@@ -532,15 +633,25 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             output_per_decoder["Center"] = {"CDM" : oidx}
             oidx += 1
             if predict_edm_derivatives:
+                if arch.tridimensional_mode:
+                    output_per_decoder["Seg"]["EDMdZ"] = output_per_decoder["Seg"]["EDM"]
                 output_per_decoder["Seg"]["EDMdY"] = output_per_decoder["Seg"]["EDM"]
                 output_per_decoder["Seg"]["EDMdX"] = output_per_decoder["Seg"]["EDM"]
             if arch.segmentation and predict_cdm_derivatives:
+                if arch.tridimensional_mode:
+                    output_per_decoder["Center"]["CDMdZ"] = output_per_decoder["Center"]["CDM"]
                 output_per_decoder["Center"]["CDMdY"] = output_per_decoder["Center"]["CDM"]
                 output_per_decoder["Center"]["CDMdX"] = output_per_decoder["Center"]["CDM"]
         if tracking:
-            output_per_decoder["Track"] = {"dYBW" : oidx, "dXBW": oidx+1}
-            oidx += 2
+            if arch.tridimensional_mode:
+                output_per_decoder["Track"] = {"dZBW": oidx, "dYBW": oidx+1, "dXBW": oidx+2}
+                oidx += 3
+            else:
+                output_per_decoder["Track"] = {"dYBW" : oidx, "dXBW": oidx+1}
+                oidx += 2
             if arch.predict_fw:
+                if arch.tridimensional_mode:
+                    output_per_decoder["Track"]["dZFW"] = output_per_decoder["Track"]["dZBW"]
                 output_per_decoder["Track"]["dYFW"] = output_per_decoder["Track"]["dYBW"]
                 output_per_decoder["Track"]["dXFW"] = output_per_decoder["Track"]["dXBW"]
             output_per_decoder["LinkMultiplicity"] = {"LinkMultiplicityBW": oidx}
@@ -585,24 +696,24 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                             param_list_seg["ops"] = ops
                         else:
                             param_list_seg = param_list
-                        decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
+                        decoder_out["Seg"][dSegName] = decoder_op(**param_list_seg, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Seg", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="tanh" if arch.scale_edm else "linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderSeg{dSegName}", output_name=output_name)
                     for dCenterName in output_per_decoder["Center"].keys():
                         output_name = None if arch.frame_window > 0 or predict_cdm_derivatives else decoder_output_names["Center"][dCenterName]
-                        decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
+                        decoder_out["Center"][dCenterName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Center", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderCenter{dCenterName}", output_name=output_name)
                 if arch.category_number > 1:
                     for dCatName in output_per_decoder["Cat"].keys():
                         if dCatName == "Category":
                             output_name = None if arch.frame_window > 0 or len(output_per_decoder["Cat"])>1 else decoder_output_names["Cat"][dCatName]
-                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name)
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Cat", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=arch.category_number, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=output_name, logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
                         elif dCatName == "FgBg":
-                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None)
+                            decoder_out["Cat"][dCatName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Cat", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=2, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dCatName}", output_name=None, logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
                         else:
                             raise ValueError(f"Unknown category name: {dCatName}")
                 if tracking:
                     for dTrackName in output_per_decoder["Track"].keys():
-                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
+                        decoder_out["Track"][dTrackName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("Track", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="linear", filters_out=1, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"DecoderTrack{dTrackName}".lower())
                     for dLinkMultiplicityName in output_per_decoder["LinkMultiplicity"].keys():
-                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower())
+                        decoder_out["LinkMultiplicity"][dLinkMultiplicityName] = decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation("LinkMultiplicity", l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,activation_out="softmax", filters_out=3, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{dLinkMultiplicityName}".lower(), logit_softcap=arch.logit_softcap, z_loss_weight=arch.z_loss_weight)
             else:
                 for decoder_name, d_layers in decoder_layers.items():
                     if isinstance(arch, TemPy) and (arch.wsa_edm and decoder_name == "Seg" or arch.wsa_cdm and decoder_name == "Center") and l_idx == len( arch.decoder_settings) - 1:
@@ -613,16 +724,16 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                                           skip_connection=True)
                     else:
                         wsa_kwargs = None
-                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=arch.default_activation, window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
+                    d_layers.append(decoder_op(**param_list, size_factor=contraction_per_layer[l_idx], mode=arch.upsampling_mode, skip_combine_mode=arch.skip_combine_mode, combine_kernel_size=1, activation=_decoder_activation(decoder_name, l_idx), window_norm_size=arch.window_norm_size, window_norm_size_up=arch.window_norm_size,window_self_attention_kwargs=wsa_kwargs, l2_reg=arch.l2_reg, layer_idx=l_idx, name=f"Decoder{decoder_name}".lower()))
 
         # Create GRAPH
         if arch.n_inputs == 1:
             inputs = [ tf.keras.layers.Input(shape=spatial_dimensions + [n_frames], name="input") ]
             if arch.frame_aware and arch.frame_window > 0:
-                frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name="input2_frameindex")
+                frame_index = tf.keras.layers.Input(shape=[1, 1, 1, n_frames] if arch.tridimensional_mode else [1, 1, n_frames], name="input2_frameindex")
                 inputs.append(frame_index)
             else:
-                frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, n_frames])
+                frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, 1, n_frames] if arch.tridimensional_mode else [1, 1, 1, n_frames])
             input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=True,  name="MergeInputs")(inputs[0]) if arch.frame_window > 0 else inputs[0]
         else:
             if arch.frame_window > 0:
@@ -630,10 +741,10 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 input_stacked = Stack(axis = -2, name="InputStack")(inputs)
                 input_merged = ChannelToBatch(compensate_gradient=False, add_channel_axis=False, name="MergeInputs")(input_stacked)
                 if arch.frame_aware:
-                    frame_index = tf.keras.layers.Input(shape=[1, 1, n_frames], name=f"input{arch.n_inputs}_frameindex")
+                    frame_index = tf.keras.layers.Input(shape=[1, 1, 1, n_frames] if arch.tridimensional_mode else [1, 1, n_frames], name=f"input{arch.n_inputs}_frameindex")
                     inputs.append(frame_index)
                 else:
-                    frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, n_frames])
+                    frame_index = tf.reshape(tf.range(0, n_frames, 1), [1, 1, 1, 1, n_frames] if arch.tridimensional_mode else [1, 1, 1, n_frames])
             else:
                 inputs = [tf.keras.layers.Input(shape=spatial_dimensions + [1], name=f"Input{i}") for i in range(arch.n_inputs)]
                 input_merged = tf.keras.layers.Concatenate(axis=-1, name="MergeInputs")(inputs)
@@ -678,8 +789,9 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             if arch.frame_window > 0:
                 features_batch_r = SplitBatch(n_frames, return_list=False, name="SplitFeatures")( features_batch)  # T, B, Y, X, C
                 blend_op = TemporalPyramid(wsa_kwargs, layer_normalization=True, filter_increase_factor=1, l2_reg=arch.l2_reg, temporal_encoding_l2_reg=arch.position_encoding_l2_reg, verbose=False)
-                blended_features, blended_features_level1_r = blend_op([features_batch_r, frame_index[:, 0, 0] - frame_index[:, 0, 0, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
-                feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg, activation=arch.default_activation)
+                fi = frame_index[:, 0, 0, 0] if arch.tridimensional_mode else frame_index[:, 0, 0]
+                blended_features, blended_features_level1_r = blend_op([features_batch_r, fi - fi[:, arch.frame_window:arch.frame_window+1]]) if arch.frame_aware else blend_op([features_batch_r])
+                feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings,"FeatureBlendingSequence", l2_reg=arch.l2_reg, activation=arch.default_activation, window_norm_size=arch.window_norm_size)
                 for op in feature_blending_convs:
                     blended_features = op(blended_features)
                 features_batch = TemporalFeatureReconstructor(feature_filters, inference_idx=arch.frame_window, compensate_gradient=True, l2_reg=arch.l2_reg)([features_batch_r, blended_features])
@@ -691,7 +803,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             feature_pairs_batch = pair_combine_op([long_term_feature_prev, long_term_feature_next])
             frame_dist_emb = FrameDistanceEmbedding(input_dim = max(arch.frame_window, arch.frame_max_distance), output_dim = feature_filters, frame_prev_idx = fidx_prev, frame_next_idx = fidx_next, l2_reg=arch.position_encoding_l2_reg)(frame_index)
             if arch.attention > 0:
-                attention_op = SpatialAttention2D(num_heads=arch.attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention") #frame_distance_embedding=arch.frame_aware
+                attention_op = SpatialAttention(num_heads=arch.attention, attention_filters=attention_filters, positional_encoding=arch.attention_positional_encoding, frame_distance_embedding=True, dropout=arch.dropout, l2_reg=arch.l2_reg, name="Attention") #frame_distance_embedding=arch.frame_aware
                 pair_attention_skip_op = Combine(filters=feature_filters, kernel_size=arch.pair_combine_kernel_size, l2_reg=arch.l2_reg, name="FeaturePairAttSkip")
                 attention_result = attention_op([long_term_feature_prev + frame_dist_emb, long_term_feature_next + frame_dist_emb,  feature_pairs_batch]) #if arch.frame_aware else attention_op( [long_term_feature_prev, long_term_feature_next, feature_pairs_batch])
                 feature_pairs_batch = pair_attention_skip_op([feature_pairs_batch, attention_result])
@@ -709,7 +821,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
             for f in arch.feature_blending_settings:
                 if "filters" not in f or f["filters"] < 0:
                     f["filters"] = combine_filters
-            feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings, "FeatureBlendingSequence", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, activation=arch.default_activation, last_input_filters=combine_filters)
+            feature_blending_convs, _, _, feature_blending_filters, _ = parse_param_list(arch.feature_blending_settings, "FeatureBlendingSequence", attention_positional_encoding=arch.attention_positional_encoding, l2_reg=arch.l2_reg, activation=arch.default_activation, last_input_filters=combine_filters, window_norm_size=arch.window_norm_size)
 
             # include operations in graph
             combined_features = combine_features_op(features_list) # combine individual features
@@ -719,8 +831,8 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                 for op in feature_blending_convs:
                     combined_features = op(combined_features)
 
-                blended_features_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, l2_reg=arch.l2_reg, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
-                blended_feature_pairs_batch = NConvToBatch2D(compensate_gradient=True, n_conv=n_frame_pairs,  inference_idx=inference_pair_idx, filters=feature_filters, l2_reg=arch.l2_reg,  name=f"TrackingFeatures")( combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
+                blended_features_batch = NConvToBatch(compensate_gradient=True, n_conv=n_frames, inference_idx=arch.frame_window, filters=feature_filters, l2_reg=arch.l2_reg, name=f"SegmentationFeatures")(combined_features)  # (N_CHAN x B, Y, X, F) # was compensate_gradient=True
+                blended_feature_pairs_batch = NConvToBatch(compensate_gradient=True, n_conv=n_frame_pairs, inference_idx=inference_pair_idx, filters=feature_filters, l2_reg=arch.l2_reg, name=f"TrackingFeatures")(combined_features)  # (N_PAIRS x B, Y, X, F) # was compensate_gradient=True
             else:
                 blended_features_batch = combined_features
 
@@ -748,7 +860,7 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                     if output_name in decoder_out[decoder_name]:
                         d_out = decoder_out[decoder_name][output_name]
                         layer_output_name = decoder_output_names[decoder_name][output_name]
-                        if not is_segmentation and arch.predict_fw and not output_name.endswith(("FW", "BW")) or (decoder_name == "Seg" and predict_edm_derivatives or decoder_name == "Center" and predict_cdm_derivatives) and not output_name.endswith(("dX", "dY")):
+                        if not is_segmentation and arch.predict_fw and not output_name.endswith(("FW", "BW")) or (decoder_name == "Seg" and predict_edm_derivatives or decoder_name == "Center" and predict_cdm_derivatives) and not output_name.endswith(("dX", "dY", "dZ")):
                             layer_output_name += "_" # will be concatenated -> output name is used @ concat
                         fw = output_name.endswith("FW")
                         b2c_inference_idx = None if is_segmentation else (inference_pair_sel_fw if fw else inference_pair_sel_bw)
@@ -763,27 +875,37 @@ def get_distnet_2d(arch:ArchBase, name: str="DiSTNet2D", **kwargs): # kwargs are
                             output_per_dec[output_name] = tf.keras.layers.Concatenate(axis = -1, autocast=False, name = output_name.lower())([output_per_dec.pop(output_name_bw), output_per_dec.pop(k)])
                 if decoder_name=="Seg" and predict_edm_derivatives:
                     output_name = "EDM"
-                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("EDMdY"), output_per_dec.pop("EDMdX")])
+                    edm_concat = [output_per_dec[output_name]]
+                    if arch.tridimensional_mode:
+                        edm_concat.append(output_per_dec.pop("EDMdZ"))
+                    edm_concat.extend([output_per_dec.pop("EDMdY"), output_per_dec.pop("EDMdX")])
+                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())(edm_concat)
                 if decoder_name=="Center" and predict_cdm_derivatives:
                     output_name = "CDM"
-                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
+                    cdm_concat = [output_per_dec[output_name]]
+                    if arch.tridimensional_mode:
+                        cdm_concat.append(output_per_dec.pop("CDMdZ"))
+                    cdm_concat.extend([output_per_dec.pop("CDMdY"), output_per_dec.pop("CDMdX")])
+                    output_per_dec[output_name] = tf.keras.layers.Concatenate(axis=-1, autocast=False, name=decoder_output_names[decoder_name][output_name].lower())(cdm_concat)
                 if decoder_name=="Cat" and len(output_per_decoder["Cat"])>1:
                     output_name = "Category"
                     output_per_dec[output_name] = ConcatenateWithDtype(inference_idx=0, name=decoder_output_names[decoder_name][output_name].lower())([output_per_dec[output_name], output_per_dec.pop("FgBg")])
                 outputs.extend(output_per_dec.values())
-        return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if arch.requires_input_spatial_dim() else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=arch.category_number, **kwargs)
+        return DiSTNetModel(inputs, outputs, name=name, frame_window=arch.frame_window, future_frames=arch.future_frames, spatial_dims=spatial_dimensions if arch.requires_input_spatial_dim() else None, long_term=long_term, predict_fw=arch.predict_fw, predict_cdm_derivatives=predict_cdm_derivatives, predict_edm_derivatives=predict_edm_derivatives, category_number=arch.category_number, tridimensional_mode=arch.tridimensional_mode, **kwargs)
 
 
-def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, activation:str="relu", last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, task_with_skip_prop:float=1.):
+def encoder_op(param_list, downsampling_mode, skip_stop_gradient:bool = False, l2_reg:float=0, activation:str="relu", last_input_filters:int=0, attention_positional_encoding="2D", skip_parameters:tuple=None, name: str="EncoderLayer", layer_idx:int=0, task_with_skip_prop:float=1., tridimensional_mode:bool=False, window_norm_size=None):
     name=f"{name}{layer_idx}"
     maxpool = downsampling_mode=="maxpool"
     maxpool_and_stride = downsampling_mode == "maxpool_and_stride"
-    sequence, down_sequence, total_contraction, residual_filters, out_filters = parse_param_list(param_list, name, attention_positional_encoding=attention_positional_encoding, ignore_stride=maxpool, l2_reg=l2_reg, activation=activation, last_input_filters = last_input_filters if maxpool_and_stride else 0)
-    assert total_contraction>1, "invalid parameters: no contraction specified"
+    sequence, down_sequence, total_contraction, residual_filters, out_filters = parse_param_list(param_list, name, attention_positional_encoding=attention_positional_encoding, ignore_stride=maxpool, l2_reg=l2_reg, activation=activation, last_input_filters = last_input_filters if maxpool_and_stride else 0, window_norm_size=window_norm_size)
+    tc_check = total_contraction if isinstance(total_contraction, int) else max(total_contraction)
+    assert tc_check > 1, "invalid parameters: no contraction specified"
     if maxpool:
         down_sequence = []
     if maxpool or maxpool_and_stride:
-        down_sequence = down_sequence+[tf.keras.layers.MaxPool2D(pool_size=total_contraction, name=f"{name}_Maxpool{total_contraction}x{total_contraction}")]
+        mp_op = tf.keras.layers.MaxPool3D if tridimensional_mode else tf.keras.layers.MaxPool2D
+        down_sequence = down_sequence+[mp_op(pool_size=total_contraction, name=f"{name}_Contraction")]
         down_concat = tf.keras.layers.Concatenate(axis=-1, name = f"{name}_DownConcat")
     def op(input):
         x = input
@@ -822,9 +944,13 @@ def decoder_op(
             window_self_attention_kwargs = None,
             batch_norm:bool = False,
             layer_norm:bool = False,
+            window_norm:bool = False,
+            window_norm_size=32,
             dropout_rate:float=0,
             batch_norm_up:bool = False,
             layer_norm_up:bool = False,
+            window_norm_up:bool = False,
+            window_norm_size_up=32,
             dropout_rate_up:float=0,
             activation: str="relu",
             activation_out : str = None,
@@ -834,6 +960,8 @@ def decoder_op(
             name: str="DecoderLayer",
             output_name: str = None,
             layer_idx:int=1,
+            logit_softcap:float = DEFAULT_LOGIT_SOFTCAP, # soft tanh cap on softmax-head logits
+            z_loss_weight:float = DEFAULT_Z_LOSS_WEIGHT, # PaLM/ST-MoE z-loss weight on softmax-head logits (0=off)
         ):
         if layer_idx > 0:
             name=f"{name}{layer_idx}"
@@ -841,16 +969,25 @@ def decoder_op(
             name = name.lower()
         if activation_out is None:
             activation_out = activation
+        softmax_head_kw = {"logit_softcap": logit_softcap, "z_loss_weight": z_loss_weight}
         n_ops = len(ops)
         if n_ops>0 and filters_out is None:
             filters_out = filters
+        # logit_softcap / z_loss act on pre-softmax logits; they cannot be applied to a
+        # ResConv output op (it sums its input into the output, so the residual sum has no
+        # well-defined "logits"). The final op stays a ResConv only when filters_out==filters.
+        if activation_out == "softmax" and (logit_softcap is not None or z_loss_weight) and n_ops > 0 \
+                and ops[n_ops - 1].lower().replace("_", "") in ("res", "resconv") and filters_out == filters:
+            raise ValueError(f"decoder_op '{name}': the softmax output op resolves to a ResConv (last op '{ops[n_ops-1]}' with filters_out==filters=={filters}). A ResConv sums its input into the output, so logit_softcap / z_loss_weight on its pre-softmax logits is ill-defined. Make the final op a plain conv (ops[-1]='conv', or use filters_out != filters), or disable both (logit_softcap=None, z_loss_weight=0).")
+        print(f"decoder: {name}: activation: {activation} activation out: {activation_out}")
         if n_ops > 0:
             batch_norm = ensure_multiplicity(n_ops, batch_norm)
             layer_norm = ensure_multiplicity(n_ops, layer_norm)
-        up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, layer_norm=layer_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, name=f"{name}_tConv{ker_size_to_string(conv_kernel_size)}{suffix}")
-        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation_out, batch_norm=batch_norm_up, layer_norm=layer_norm_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None)
+            window_norm = ensure_multiplicity(n_ops, window_norm)
+        up_op = lambda suffix: upsampling_op(filters=filters, parent_name=name+suffix, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation, batch_norm=batch_norm_up, layer_norm=layer_norm_up, window_norm=window_norm_up, window_norm_size=window_norm_size_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, name=f"{name}_tConv{ker_size_to_string(conv_kernel_size)}{suffix}")
+        up_op_out = lambda suffix: upsampling_op(filters=filters_out, parent_name=None if not output_name is not None else name, name = output_name+suffix if output_name is not None else None, size_factor=size_factor, kernel_size=up_kernel_size, mode=mode, activation=activation_out, batch_norm=batch_norm_up, layer_norm=layer_norm_up, window_norm=window_norm_up, window_norm_size=window_norm_size_up, dropout_rate=dropout_rate_up, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None, softmax_head_kw=softmax_head_kw)
         if skip_combine_mode.lower()=="conv":
-            combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_ops==0 else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_ops == 0 else None, filters=filters if filters_out is None or n_ops > 0 else filters_out, activation=activation_out if n_ops==0 else activation, kernel_size = combine_kernel_size, l2_reg=l2_reg)
+            combine = lambda suffix: Combine(name = output_name+suffix if output_name is not None and n_ops==0 else name + "_combine" + suffix, output_dtype="float32" if layer_idx == 0 and n_ops == 0 else None, filters=filters if filters_out is None or n_ops > 0 else filters_out, activation=activation_out if n_ops==0 else activation, kernel_size = combine_kernel_size, l2_reg=l2_reg, **(softmax_head_kw if n_ops==0 else {}))
         else:
             combine = None
         def create_op(suffix, i):
@@ -858,16 +995,13 @@ def decoder_op(
             op_name = op_name.lower().replace("_", "")
             if op_name == "res1d" or op_name=="resconv1d":
                 raise NotImplementedError("ResConv1D are not implemented")
-            elif op_name == "res2d" or op_name=="resconv2d":
+            elif op_name == "res" or op_name=="resconv":
                 if filters_out == filters or i < n_ops - 1:
-                    return ResConv2D(kernel_size=conv_kernel_size, activation=activation_out if i==n_ops-1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}")
+                    return ResConv(kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, weighted_sum=weighted_sum, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_ResConv2D{i}_{ker_size_to_string(conv_kernel_size)}{suffix}")
                 else:
-                    return Conv2DBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix)
+                    return ConvBNDrop(filters=filters_out, kernel_size=conv_kernel_size, activation=activation_out, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if output_name is None else output_name + suffix, **(softmax_head_kw if i == n_ops - 1 else {}))
             else:
-                if batch_norm[i] or layer_norm[i] or dropout_rate>0:
-                    return Conv2DBNDrop(filters=filters_out if i==n_ops-1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i==n_ops-1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix)
-                else:
-                    return Conv2DWithDtype(filters=filters_out if i==n_ops-1 else filters, kernel_size=conv_kernel_size, padding='same', activation=activation_out if i==n_ops-1 else activation, l2_reg=l2_reg, output_dtype = "float32" if layer_idx==0 and i == n_ops-1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}" if i < n_ops - 1 or output_name is None else output_name + suffix)
+                return ConvBNDrop(filters=filters_out if i == n_ops - 1 else filters, kernel_size=conv_kernel_size, activation=activation_out if i == n_ops - 1 else activation, batch_norm=batch_norm[i], layer_norm=layer_norm[i], window_norm=window_norm[i], window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype ="float32" if layer_idx == 0 and i == n_ops - 1 else None, name=f"{name}_Conv{i}_{ker_size_to_string(conv_kernel_size)}{suffix}"if i < n_ops - 1 or output_name is None else output_name + suffix, **(softmax_head_kw if i == n_ops - 1 else {}))
         convs = lambda suffix : [create_op(suffix, i) for i in range(n_ops)]
         wsa = WindowSpatialAttention(**window_self_attention_kwargs, name = f"{name}_wsa") if window_self_attention_kwargs is not None else None
 
@@ -899,28 +1033,28 @@ def upsampling_op(
             activation: str="relu",
             batch_norm:bool = False,
             layer_norm:bool = False,
+            window_norm:bool = False,
+            window_norm_size=32,
             dropout_rate:float = 0,
-            use_bias:bool = True,
             l2_reg:float = 0,
             output_dtype=None,
+            dtype=None, # set to "float32" to force the op to compute in fp32 (avoids fp16 overflow at output heads)
+            softmax_head_kw=None, # {logit_softcap, z_loss_weight} forwarded to the output op (applied only if it is a softmax head)
             name: str= None,
         ):
         assert mode in ["tconv", "up_nn", "up_bilinear"], "invalid mode"
         if kernel_size<size_factor:
             kernel_size = size_factor
+        dtype_kw = {"dtype": dtype} if dtype is not None else {}
+        head_kw = dict(softmax_head_kw) if softmax_head_kw is not None else {}
         if mode=="tconv":
-            if batch_norm or layer_norm or dropout_rate>0:
-                upsample = Conv2DTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, layer_norm=layer_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
-            else:
-                upsample = Conv2DTransposeWithDtype(filters, kernel_size=kernel_size, strides=size_factor, padding='same', activation=activation, use_bias=use_bias, l2_reg = l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name)
+            upsample = ConvTransposeBNDrop(filters=filters, kernel_size=kernel_size, strides=size_factor, activation=activation, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_tConv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, **dtype_kw, **head_kw)
             conv=None
         else:
             interpolation = "nearest" if mode=="up_nn" else 'bilinear'
-            upsample = tf.keras.layers.UpSampling2D(size=size_factor, interpolation=interpolation, name = f"{parent_name}_Upsample{size_factor}x{size_factor}_{interpolation}" if parent_name is not None else name)
-            if batch_norm or layer_norm:
-                conv = Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, layer_norm=layer_norm, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation )
-            else:
-                conv = Conv2DWithDtype(filters=filters, kernel_size=kernel_size, strides=1, padding='same', output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, use_bias=use_bias, activation=activation, l2_reg=l2_reg )
+            upsample = UpSamplingWithDtype(size=size_factor, interpolation=interpolation, name = f"{parent_name}_Upsample{size_factor}x{size_factor}_{interpolation}" if parent_name is not None else name)
+            conv = ConvBNDrop(filters=filters, kernel_size=kernel_size, strides=1, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, dropout_rate=dropout_rate, l2_reg=l2_reg, output_dtype=output_dtype, name=f"{parent_name}_Conv{ker_size_to_string(kernel_size)}" if parent_name is not None else name, activation=activation, **dtype_kw, **head_kw)
+
         def op(input):
             x = upsample(input)
             if conv is not None:
@@ -934,14 +1068,14 @@ def stop_gradient(input, parent_name:str, name:str="StopGradient"):
     sg = StopGradient(name=name)
     return sg(input)
 
-def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stride:bool = False, activation:str="relu", attention_positional_encoding="2D", l2_reg:float=0):
+def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stride:bool = False, activation:str="relu", attention_positional_encoding="2D", l2_reg:float=0, window_norm_size=None):
     if param_list is None or len(param_list)==0:
         return [], None, 1, 0, 0
     total_contraction = 1
     if ignore_stride:
         param_list = [params.copy() for params in param_list]
         for params in param_list:
-            total_contraction *= params.get("downscale", 1)
+            total_contraction = spatial_contraction_product(total_contraction, params.get("downscale", 1))
             params["downscale"] = 1
     # split into sequence with no stride (for residual) and the rest of the sequence
     i = 0
@@ -958,6 +1092,8 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                 param_list[i]["l2_reg"] = l2_reg
             if "activation" not in param_list[i]:
                 param_list[i]["activation"] = activation
+            if window_norm_size is not None and "window_norm_size" not in param_list[i]:
+                param_list[i]["window_norm_size"] = window_norm_size
             sequence.append(parse_params(**param_list[i], attention_positional_encoding=attention_positional_encoding, name = f"{name}_Op{i}"))
             i+=1
     else:
@@ -971,13 +1107,15 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
                 param_list[i]["l2_reg"] = l2_reg
             if "activation" not in param_list[i]:
                 param_list[i]["activation"] = activation
+            if window_norm_size is not None and "window_norm_size" not in params:
+                params["window_norm_size"] = window_norm_size
             out_filters = filters
             if last_input_filters>0: # case of stride + maxpool -> out filters -= input filters
                 if residual_filters>0:
                     last_input_filters=residual_filters # input of downscaler is the residual
                 filters -= last_input_filters
             down = [parse_params(**params, filters=filters, attention_positional_encoding=attention_positional_encoding, name=f"{name}_DownOp")] if filters > 0 else []
-            total_contraction *= param_list[i].get("downscale", 1)
+            total_contraction = spatial_contraction_product(total_contraction, param_list[i].get("downscale", 1))
         else:
             raise ValueError("Only one downscale operation allowed")
     else:
@@ -985,25 +1123,18 @@ def parse_param_list(param_list, name:str, last_input_filters:int=0, ignore_stri
         out_filters = residual_filters
     return sequence, down, total_contraction, residual_filters, out_filters
 
-def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="2D", attention_filters:int=None, dropout_rate:float=0, batch_norm:bool=False, layer_norm:bool=False, weighted_sum:bool=False, l2_reg:float=0, num_attention_heads:int=1, name:str=""):
+def parse_params(filters:int = 0, kernel_size:int = 3, op:str = "conv", dilation:int=1, activation="relu", downscale:int=1, attention_positional_encoding:str="1D", attention_filters:int=None, dropout_rate:float=0, batch_norm:bool=False, layer_norm:bool=False, window_norm:bool=False, window_norm_size=32, weighted_sum:bool=False, l2_reg:float=0, num_attention_heads:int=1, name:str=""):
     op = op.lower().replace("_", "")
     if op =="res1d" or op=="resconv1d":
         raise NotImplementedError("ResConv1D is not implemented")
-    elif op =="res2d" or op == "resconv2d":
-        return ResConv2D(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
+    elif op =="res" or op == "resconv":
+        return ResConv(kernel_size=kernel_size, dilation=dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, weighted_sum=weighted_sum, l2_reg=l2_reg, name=f"{name}_ResConv2D{ker_size_to_string(kernel_size)}")
     assert filters > 0 , "filters must be > 0"
     if op=="selfattention" or op=="sa":
-        self_attention_op = SpatialAttention2D(num_heads=num_attention_heads, attention_filters=attention_filters, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
+        self_attention_op = SpatialAttention(num_heads=num_attention_heads, attention_filters=attention_filters, positional_encoding=attention_positional_encoding, dropout=dropout_rate, l2_reg=l2_reg, name=f"{name}_SelfAttention")
         self_attention_skip_op = Combine(filters=filters, l2_reg=l2_reg, name=f"{name}_SelfAttentionSkip")
         def op(x):
             sa = self_attention_op([x, x])
             return self_attention_skip_op([x, sa])
         return op
-    if batch_norm or layer_norm or dropout_rate>0:
-        return Conv2DBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
-    else:
-        kernel_regularizer = HybridThresholdL2Regularizer(directional_strength=l2_reg * 10, elementwise_strength=l2_reg) if l2_reg > 0 else None
-        bias_regularizer = HybridThresholdL2Regularizer(directional_strength=0, elementwise_strength=l2_reg) if l2_reg > 0 else None
-        kernel_constraint = ClipMaxValue()
-        bias_constraint = ClipMaxValue()
-        return tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size, strides = downscale, dilation_rate = dilation, padding='same', activation=activation, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")
+    return ConvBNDrop(filters=filters, kernel_size=kernel_size, strides = downscale, dilation = dilation, activation=activation, dropout_rate=dropout_rate, batch_norm=batch_norm, layer_norm=layer_norm, window_norm=window_norm, window_norm_size=window_norm_size, l2_reg=l2_reg, name=f"{name}_Conv{ker_size_to_string(kernel_size)}")

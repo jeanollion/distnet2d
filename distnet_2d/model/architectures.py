@@ -3,6 +3,41 @@ import copy
 
 from ..utils.helpers import ensure_multiplicity
 
+
+# Norm type aliases accepted by norm_features / norm_feature_dec / norm_decoder.
+# None / False / "" mean "no normalization at this position".
+_NORM_ALIASES = {
+    None: (False, False, False),
+    False: (False, False, False),
+    "":   (False, False, False),
+    "bn": (True,  False, False),
+    "ln": (False, True,  False),
+    "wn": (False, False, True),
+    "wgn":(False, False, True),
+}
+
+
+def _norm_flags(norm_choice):
+    """Map a norm type ('bn' / 'ln' / 'wn' / None) to (batch_norm, layer_norm, window_norm) booleans."""
+    key = norm_choice.lower() if isinstance(norm_choice, str) else norm_choice
+    if key not in _NORM_ALIASES:
+        raise ValueError(f"unknown norm choice: {norm_choice!r} (expected one of: 'bn', 'ln', 'wn', None)")
+    return _NORM_ALIASES[key]
+
+
+def _norm_kwargs(norm_choice):
+    """Returns a dict {batch_norm, layer_norm, window_norm} for splat into a parse_params dict."""
+    bn, ln, wn = _norm_flags(norm_choice)
+    return {"batch_norm": bn, "layer_norm": ln, "window_norm": wn}
+
+
+def _norm_kwargs_list(norm_choice, n_ops, position=0):
+    """List form for multi-op layers (decoder_op with ops=[...]). Norm active only at `position`."""
+    bn, ln, wn = _norm_flags(norm_choice)
+    def _one(active):
+        return [active if i == position else False for i in range(n_ops)]
+    return {"batch_norm": _one(bn), "layer_norm": _one(ln), "window_norm": _one(wn)}
+
 def get_architecture(architecture_type:str, **kwargs):
     kwargs = copy.deepcopy(kwargs)
     if architecture_type.lower()=="blend":
@@ -34,7 +69,7 @@ def get_architecture(architecture_type:str, **kwargs):
 class ArchBase:
     def __init__(self, filters:int,
                  n_inputs:int=1,
-                 spatial_dimensions=None,
+                 spatial_dimensions=[None, None],
                  frame_window:int = 3,
                  category_number: int = 0,  # category for each cell instance (segmentation level), <=1 means do not predict category
                  inference_gap_number: int = 0,
@@ -44,16 +79,32 @@ class ArchBase:
                  next: bool = True,
                  early_downsampling:bool = True,
                  scale_edm:bool = False,
-                 layer_norm_dec:bool = False, batch_norm:bool = True, dropout:float=0.2,
+                 # Normalization at three key positions. Each accepts 'bn', 'ln', 'wn', or None.
+                 # - norm_features:    features[-1]                       (deep, shared across heads)
+                 # - norm_feature_dec: feature_decoder_settings[-1]       (per-head, deep, just before decoder upsampling chain)
+                 # - norm_decoder:     decoder_settings[-1] first op      (per-head, post-upsample at deepest decoder level)
+                 norm_features=None, norm_feature_dec=None, norm_decoder=None,
+                 dropout:float=0.2,
                  l2_reg:float=1e-4, position_encoding_l2_reg:float=1e-5,
                  downsampling_mode="maxpool_and_stride", upsampling_mode ="tconv", skip_combine_mode:str="conv",
                  attention_filters:int = 0, attention_positional_encoding:str="2d",
+                 logit_softcap:float=None, z_loss_weight:float=0.,  # softmax-head logit control: smooth tanh cap c (None->inert hard clip @ DEFAULT_LOGIT_CLIP as final inf-guard) and PaLM z-loss weight (0=off, ~1e-4 to enable). Both default OFF: CappedReLU on the LM decoder bounds the residual stream at the source, so these head-level guards are redundant (and z_loss/softcap raise the LM loss).
+                 # decoder backbone activation, per head. dict {head_name: spec} where head_name in {'Seg','Center','Track','LinkMultiplicity','Cat'}.
+                 # spec: str -> same activation at every decoder level of that head; dict {l_idx: spec} -> per level (l_idx 0=shallowest/head level ... deepest=largest; a missing l_idx falls back to default_activation). A head absent from the dict uses default_activation everywhere.
+                 # activation specs: 'relu','tanh','reluN' (hard capped ReLU at N, e.g. 'relu32'), 'screluN' (smooth capped ReLU at N), 'softsignN' (N*softsign(x/N)). Bounded activations cap the un-normalized residual stream to prevent fp16 overflow.
+                 # Default bounds only the LinkMultiplicity decoder with a hard capped ReLU at every level (depth-independent -> no per-level dict, lives here rather than per depth variant). Other heads keep default_activation. Pass a dict to override.
+                 decoder_activation={"LinkMultiplicity": "relu32", "Cat": "relu32"},
+                 # feature_decoder activation, per head, same {head_name: spec} convention. The spec is applied uniformly to all of that head's feature_decoder ops (no per-level dict needed). None / absent head -> default_activation.
+                 # Default bounds only the LinkMultiplicity feature-decoder (the historical fp16 overflow site) with a smooth capped ReLU (SmeLU-clamp); other heads keep default_activation.
+                 feature_decoder_activation={"LinkMultiplicity": "screlu32", "Cat": "screlu32"},
                  activation:str= "relu",
                  skip_connections=True, skip_stop_gradient:bool = False,
                  frame_aware:bool=False, frame_max_distance:int=0,
-                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False
+                 predict_fw: bool = True, predict_edm_derivatives:bool = False, predict_cdm_derivatives:bool = False,
                  ):
+        assert spatial_dimensions is not None and 3 >= len(spatial_dimensions) >= 2, f"invalid spatial dimensions: {spatial_dimensions}"
         self.spatial_dimensions=spatial_dimensions
+        self.tridimensional_mode=len(spatial_dimensions)==3
         self.n_inputs = n_inputs
         self.frame_window = frame_window
         self.segmentation = segmentation
@@ -67,6 +118,10 @@ class ArchBase:
         self.skip_stop_gradient=skip_stop_gradient
         self.attention_filters = attention_filters
         self.attention_positional_encoding = attention_positional_encoding
+        self.logit_softcap = logit_softcap
+        self.z_loss_weight = z_loss_weight
+        self.decoder_activation = decoder_activation
+        self.feature_decoder_activation = feature_decoder_activation
         self.self_attention = 0
         self.default_activation=activation.lower() if isinstance(activation, str) else activation
         self.downsampling_mode = downsampling_mode
@@ -76,8 +131,13 @@ class ArchBase:
         self.frame_max_distance = frame_max_distance
         self.filters = filters
         self.early_downsampling = early_downsampling
-        self.layer_norm_dec = layer_norm_dec
-        self.batch_norm = batch_norm
+        # Validate each norm choice early (raises if a typo slips through).
+        _norm_flags(norm_features)
+        _norm_flags(norm_feature_dec)
+        _norm_flags(norm_decoder)
+        self.norm_features = norm_features
+        self.norm_feature_dec = norm_feature_dec
+        self.norm_decoder = norm_decoder
         self.dropout = dropout
         self.l2_reg=l2_reg
         self.position_encoding_l2_reg=position_encoding_l2_reg
@@ -92,6 +152,9 @@ class ArchBase:
         self.kernel_size_fd = None
         self.blend_combine_kernel_size = None
         self.pair_combine_kernel_size = None
+        self.feature_spatial_dimensions = None
+        # window size for WindowGroupNormalization; overridden by Blend / TemPy subclasses
+        self.window_norm_size = 32
 
     def requires_input_spatial_dim(self):
         return self.self_attention > 0
@@ -104,97 +167,106 @@ class ArchDepth(ArchBase):
 class D2(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
-        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**2} x {self.spatial_dimensions[1] / 2**2}")
-        ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
-        ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2)
-        ker1_2, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, 2)
-        ker2, dil2 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, 2 * 2)
-        ker2_2, dil2_2 = get_kernels_and_dilation(5, min(3, max_dilation), self.spatial_dimensions, 2 * 2)
-        ker2_3, dil2_3 = get_kernels_and_dilation(5, min(4,max_dilation), self.spatial_dimensions, 2 * 2)
-        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 * 2)
-        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 2)
-        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1, self.spatial_dimensions, 2 * 2)
+        down_ker0 = get_downsampling_factor(2, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
+        ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
+        down1 = down_ker0
+        down_ker1 = get_downsampling_factor(2, self.spatial_dimensions, down1, tridimensional_mode=self.tridimensional_mode)
+        ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, down1, tridimensional_mode=self.tridimensional_mode)
+        ker1_2, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, down1, tridimensional_mode=self.tridimensional_mode)
+        down2 = spatial_contraction_product(down_ker0, down_ker1)
+        ker2, dil2 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        ker2_2, dil2_2 = get_kernels_and_dilation(5, min(3, max_dilation), self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        ker2_3, dil2_3 = get_kernels_and_dilation(5, min(4,max_dilation), self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        self.feature_spatial_dimensions = [sd // d if sd is not None and sd > 0 else None for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down2))]
+        print(f"spatial dimension at feature layer: {self.feature_spatial_dimensions}")
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
                  "dropout_rate": 0, "batch_norm": False},
-                {"filters": 32, "kernel_size": ker0, "downscale": 2, "dropout_rate": 0}
+                {"filters": 32, "kernel_size": ker0, "downscale": down_ker0, "dropout_rate": 0}
             ],
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker1, "weighted_sum": False,
                  "dropout_rate": 0, "batch_norm": False},
                 {"filters": 32, "op": "conv", "kernel_size": ker1_2, "weighted_sum": False,
                  "dropout_rate": 0, "batch_norm": False},
-                {"filters": self.filters, "kernel_size": ker1, "downscale": 2, "dropout_rate": 0,
+                {"filters": self.filters, "kernel_size": ker1, "downscale": down_ker1, "dropout_rate": 0,
                  "batch_norm": False}
             ]
         ]
         if self.early_downsampling:
             self.encoder_settings[0].pop(0)
         self.feature_settings = [
-            {"op": "res2d", "dilation": dil2, "kernel_size": ker2, "weighted_sum": False,
+            {"op": "resconv", "dilation": dil2, "kernel_size": ker2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"op": "res2d", "dilation": dil2 if self.self_attention > 0 else dil2_2,
+            {"op": "resconv", "dilation": dil2 if self.self_attention > 0 else dil2_2,
              "kernel_size": ker2 if self.self_attention > 0 else ker2_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"filters": self.filters, "op": "selfattention" if self.self_attention > 0 else "res2d", "attention_filters": self.attention_filters,
+            {"filters": self.filters, "op": "selfattention" if self.self_attention > 0 else "resconv", "attention_filters": self.attention_filters,
              "kernel_size": ker2 if self.self_attention > 0 else ker2_3,
              "dilation": dil2 if self.self_attention > 0 else dil2_3, "dropout_rate": self.dropout,
              "num_attention_heads": self.self_attention},
-            {"op": "res2d", "dilation": dil2, "kernel_size": ker2, "weighted_sum": False,
+            {"op": "resconv", "dilation": dil2, "kernel_size": ker2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"op": "res2d", "dilation": dil2 if self.self_attention > 0 else dil2_2,
+            {"op": "resconv", "dilation": dil2 if self.self_attention > 0 else dil2_2,
              "kernel_size": ker2 if self.self_attention > 0 else ker2_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size": ker2, "weighted_sum": False,
-             "dropout_rate": 0, "batch_norm": self.batch_norm},
+             "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"op": "res2d", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": self.batch_norm}
+            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout, **_norm_kwargs(self.norm_feature_dec)},
+            {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0}
         ]
         self.decoder_settings = [
-            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": 4,
+            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
               "batch_norm_up": False, "dropout_rate": 0},
-            {"filters": 32, "ops": ["conv", "res2d"], "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": 4,
-              "layer_norm": [self.layer_norm_dec, False], "dropout_rate": 0}
+            {"filters": 32, "ops": ["conv", "resconv"], "conv_kernel_size":ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
+              **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
 
 class D3(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
-        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**3} x {self.spatial_dimensions[1] / 2**3}")
-        ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
-        ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2)
-        ker2, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2 * 2)
-        ker3, dil3 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, 2 ** 3)
-        ker3_2, dil3_2 = get_kernels_and_dilation(5, min(3, max_dilation), self.spatial_dimensions, 2 ** 3)
-        ker3_3, dil3_3 = get_kernels_and_dilation(5, min(4, max_dilation), self.spatial_dimensions, 2 ** 3)
-        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 ** 3)
-        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 3)
-        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, 2 * 3)
 
+        down_ker0 = get_downsampling_factor(2, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
+        ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
+        down1 = down_ker0
+        down_ker1 = get_downsampling_factor(2, self.spatial_dimensions, down1, tridimensional_mode=self.tridimensional_mode)
+        ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, down1, tridimensional_mode=self.tridimensional_mode)
+        down2 = spatial_contraction_product(down_ker0, down_ker1)
+        down_ker2 = get_downsampling_factor(2, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        ker2, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        down3 = spatial_contraction_product(down_ker0, down_ker1, down_ker2)
+        ker3, dil3 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        ker3_2, dil3_2 = get_kernels_and_dilation(5, min(3, max_dilation), self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        ker3_3, dil3_3 = get_kernels_and_dilation(5, min(4, max_dilation), self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        self.feature_spatial_dimensions = [sd // d if sd is not None and sd > 0 else None for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down3))]
+        print(f"spatial dimension at feature layer: {self.feature_spatial_dimensions}")
         self.encoder_settings = [
             [
                 {"filters": 32, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
                  "dropout_rate": 0, "batch_norm": False},
-                {"filters": 32, "kernel_size": ker0, "downscale": 2, "dropout_rate": 0}
+                {"filters": 32, "kernel_size": ker0, "downscale": down_ker0, "dropout_rate": 0}
             ],
             [
                 {"filters": 32, "kernel_size": ker1, "dropout_rate": 0},
-                {"filters": 64, "kernel_size": ker1, "downscale": 2, "dropout_rate": 0}
+                {"filters": 64, "kernel_size": ker1, "downscale": down_ker1, "dropout_rate": 0}
             ],
             [
-                {"filters": 64, "op": "res2d", "kernel_size": ker2, "weighted_sum": False,
+                {"filters": 64, "op": "resconv", "kernel_size": ker2, "weighted_sum": False,
                  "dropout_rate": 0},
-                {"filters": 64, "op": "res2d", "kernel_size": ker2, "weighted_sum": False,
+                {"filters": 64, "op": "resconv", "kernel_size": ker2, "weighted_sum": False,
                  "dropout_rate": 0},
-                {"filters": self.filters, "kernel_size": ker2, "downscale": 2, "dropout_rate": 0,
+                {"filters": self.filters, "kernel_size": ker2, "downscale": down_ker2, "dropout_rate": 0,
                  "batch_norm": False}
             ]
         ]
@@ -202,81 +274,86 @@ class D3(ArchDepth):
             self.encoder_settings[0].pop(0)
 
         self.feature_settings = [
-            {"op": "res2d", "dilation": dil3, "kernel_size": ker3, "weighted_sum": False,
+            {"op": "resconv", "dilation": dil3, "kernel_size": ker3, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"op": "res2d", "dilation": dil3 if self.self_attention > 0 else dil3_2,
+            {"op": "resconv", "dilation": dil3 if self.self_attention > 0 else dil3_2,
              "kernel_size": ker3 if self.self_attention > 0 else ker3_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"filters": self.filters, "op": "selfattention" if self.self_attention > 0 else "res2d", "attention_filters": self.attention_filters,
+            {"filters": self.filters, "op": "selfattention" if self.self_attention > 0 else "resconv", "attention_filters": self.attention_filters,
              "kernel_size": ker3 if self.self_attention > 0 else ker3_3,
              "dilation": dil3 if self.self_attention > 0 else dil3_3, "dropout_rate": self.dropout},
-            {"op": "res2d", "dilation": dil3, "kernel_size": ker3, "weighted_sum": False,
+            {"op": "resconv", "dilation": dil3, "kernel_size": ker3, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"op": "res2d", "dilation": dil3 if self.self_attention > 0 else dil3_2,
+            {"op": "resconv", "dilation": dil3 if self.self_attention > 0 else dil3_2,
              "kernel_size": ker3 if self.self_attention > 0 else ker3_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size": ker3, "weighted_sum": False,
-             "dropout_rate": 0, "batch_norm": self.batch_norm},
+             "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"op": "res2d", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": self.batch_norm}
+            {"filters": 0.5, "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout, **_norm_kwargs(self.norm_feature_dec)},
+            {"op": "resconv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 1., "op": "conv", "kernel_size": self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0}
         ]
         self.decoder_settings = [
-            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": 4,
+            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
               "batch_norm_up": False, "dropout_rate": 0},
-            {"filters": 32, "ops": ["res2d"]*2, "conv_kernel_size" : ker1, "weighted_sum": False, "up_kernel_size": 4,
+            {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size" : ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 64, "ops": ["conv", "res2d"], "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": 4,
-              "layer_norm": [self.layer_norm_dec, False], "dropout_rate": 0}
+            {"filters": 64, "ops": ["conv", "resconv"], "conv_kernel_size" : ker2, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
+              **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
 
 class D4(ArchDepth):
     def __init__(self, pair_combine_kernel_size:int, blend_combine_kernel_size:int=1, kernel_size_fd:int=5, max_dilation:int=4, **kwargs):
         super().__init__(**kwargs)
-        print(f"spatial dimension at feature layer: {self.spatial_dimensions[0] / 2**4} x {self.spatial_dimensions[1] / 2**4}")
-        ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1)
-        ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2)
-        ker2, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, 2 ** 2)
-        ker2_1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2 ** 2)
-        ker3, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, 2 ** 3)
-        ker3_2, dil3_2 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, 2 ** 3)
-        ker3_3, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 2 ** 3)
-        ker4, dil4 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, 2 ** 4)
-        ker4_2, dil4_2 = get_kernels_and_dilation(5, min(3,max_dilation), self.spatial_dimensions, 2 ** 4)
-        ker4_3, dil4_3 = get_kernels_and_dilation(5, min(4, max_dilation), self.spatial_dimensions, 2 ** 4)
-        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, 2 ** 4)
-        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, 2 * 4)
-        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, 2 * 4)
-
+        down_ker0 = get_downsampling_factor(2, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
+        ker0, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, 1, tridimensional_mode=self.tridimensional_mode)
+        down1 = down_ker0
+        down_ker1 = get_downsampling_factor(2, self.spatial_dimensions, down1, tridimensional_mode=self.tridimensional_mode)
+        ker1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, down1, tridimensional_mode=self.tridimensional_mode)
+        down2 = spatial_contraction_product(down_ker0, down_ker1)
+        down_ker2 = get_downsampling_factor(2, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        ker2, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        ker2_1, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, down2, tridimensional_mode=self.tridimensional_mode)
+        down3 = spatial_contraction_product(down_ker0, down_ker1, down_ker2)
+        down_ker3 = get_downsampling_factor(2, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        ker3, _ = get_kernels_and_dilation(5, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        ker3_2, dil3_2 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        ker3_3, _ = get_kernels_and_dilation(3, 1, self.spatial_dimensions, down3, tridimensional_mode=self.tridimensional_mode)
+        down4 = spatial_contraction_product(down_ker0, down_ker1, down_ker2, down_ker3)
+        ker4, dil4 = get_kernels_and_dilation(5, min(2, max_dilation), self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
+        ker4_2, dil4_2 = get_kernels_and_dilation(5, min(3,max_dilation), self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
+        ker4_3, dil4_3 = get_kernels_and_dilation(5, min(4, max_dilation), self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
+        self.kernel_size_fd, _ = get_kernels_and_dilation(kernel_size_fd, 1, self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
+        self.blend_combine_kernel_size, _ = get_kernels_and_dilation(blend_combine_kernel_size, 1, self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
+        self.pair_combine_kernel_size, _ = get_kernels_and_dilation(pair_combine_kernel_size, 1,  self.spatial_dimensions, down4, tridimensional_mode=self.tridimensional_mode)
+        self.feature_spatial_dimensions = [sd // d if sd is not None and sd > 0 else None for (sd, d) in zip(self.spatial_dimensions, ensure_multiplicity(len(self.spatial_dimensions), down4))]
+        print(f"spatial dimension at feature layer: {self.feature_spatial_dimensions}")
         self.encoder_settings = [
             [
                 {"filters": 16, "op": "conv", "kernel_size": ker0, "weighted_sum": False,
                  "dropout_rate": 0, "batch_norm": False},
-                {"filters": 16, "kernel_size": ker0, "downscale": 2, "dropout_rate": 0}
+                {"filters": 16, "kernel_size": ker0, "downscale": down_ker0, "dropout_rate": 0}
             ],
             [
                 {"filters": 16, "kernel_size": ker1, "dropout_rate": 0},
-                {"filters": 32, "kernel_size": ker1, "downscale": 2, "dropout_rate": 0}
+                {"filters": 32, "kernel_size": ker1, "downscale": down_ker1, "dropout_rate": 0}
             ],
             [
-                {"filters": 32, "op": "res2d", "kernel_size": ker2, "weighted_sum": False,
+                {"filters": 32, "op": "resconv", "kernel_size": ker2, "weighted_sum": False,
                  "dropout_rate": 0},
-                {"filters": 32, "op": "res2d", "kernel_size": ker2, "weighted_sum": False,
+                {"filters": 32, "op": "resconv", "kernel_size": ker2, "weighted_sum": False,
                  "dropout_rate": 0},
-                {"filters": 64, "kernel_size": ker2, "downscale": 2, "dropout_rate": 0,
+                {"filters": 64, "kernel_size": ker2, "downscale": down_ker2, "dropout_rate": 0,
                  "batch_norm": False}
             ],
             [
-                {"filters": 64, "op": "res2d", "kernel_size": ker3, "weighted_sum": False,
+                {"filters": 64, "op": "resconv", "kernel_size": ker3, "weighted_sum": False,
                  "dropout_rate": 0},
-                {"filters": 64, "op": "res2d", "kernel_size": ker3_2, "dilation": dil3_2, "weighted_sum": False, "dropout_rate": 0},
-                {"filters": self.filters, "kernel_size": ker3, "downscale": 2, "dropout_rate": 0,
+                {"filters": 64, "op": "resconv", "kernel_size": ker3_2, "dilation": dil3_2, "weighted_sum": False, "dropout_rate": 0},
+                {"filters": self.filters, "kernel_size": ker3, "downscale": down_ker3, "dropout_rate": 0,
                  "batch_norm": False}
             ]
         ]
@@ -284,56 +361,62 @@ class D4(ArchDepth):
             self.encoder_settings[0].pop(0)
 
         self.feature_settings = [
-            {"op": "res2d", "dilation": dil4, "kernel_size": ker4, "weighted_sum": False,
+            {"op": "resconv", "dilation": dil4, "kernel_size": ker4, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"op": "res2d", "dilation": dil4 if self.self_attention > 0 else dil4_2,
+            {"op": "resconv", "dilation": dil4 if self.self_attention > 0 else dil4_2,
              "kernel_size": ker4 if self.self_attention > 0 else ker4_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"filters": self.filters, "op": "selfattention" if self.self_attention > 0 else "res2d", "attention_filters": self.attention_filters,
+            {"filters": self.filters, "op": "selfattention" if self.self_attention > 0 else "resconv", "attention_filters": self.attention_filters,
              "kernel_size": ker4 if self.self_attention > 0 else ker4_3,
              "dilation": dil4 if self.self_attention > 0 else dil4_3, "dropout_rate": self.dropout},
-            {"op": "res2d", "dilation": dil4, "kernel_size": ker4, "weighted_sum": False,
+            {"op": "resconv", "dilation": dil4, "kernel_size": ker4, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
-            {"op": "res2d", "dilation": dil4 if self.self_attention > 0 else dil4_2,
+            {"op": "resconv", "dilation": dil4 if self.self_attention > 0 else dil4_2,
              "kernel_size": ker4 if self.self_attention > 0 else ker4_2, "weighted_sum": False,
              "dropout_rate": self.dropout, "batch_norm": False},
             {"filters": 1., "op": "conv", "kernel_size": ker4, "weighted_sum": False,
-             "dropout_rate": 0, "batch_norm": self.batch_norm},
+             "dropout_rate": 0, **_norm_kwargs(self.norm_features)},
         ]
         self.feature_decoder_settings = [
-            {"filters": 0.5, "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"op": "res2d", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout,
-             "batch_norm": False},
-            {"filters": 1., "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0,
-             "batch_norm": self.batch_norm}
+            {"filters": 0.5, "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout, **_norm_kwargs(self.norm_feature_dec)},
+            {"op": "resconv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": self.dropout},
+            {"filters": 1., "op": "conv", "kernel_size":self.kernel_size_fd, "weighted_sum": False, "dropout_rate": 0}
         ]
         self.decoder_settings = [
-            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": 4,
+            {"filters": 16, "ops": [], "conv_kernel_size": ker0, "up_kernel_size": spatial_contraction_product(down_ker0, 2),
               "batch_norm_up": False, "dropout_rate": 0},
-            {"filters": 16, "ops": ["res2d"]*2, "conv_kernel_size": ker1, "weighted_sum": False, "up_kernel_size": 4,
+            {"filters": 16, "ops": ["resconv"]*2, "conv_kernel_size": ker1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker1, 2),
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 32, "ops": ["res2d"]*2, "conv_kernel_size": ker2_1, "weighted_sum": False, "up_kernel_size": 4,
+            {"filters": 32, "ops": ["resconv"]*2, "conv_kernel_size": ker2_1, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker2, 2),
               "batch_norm": False, "dropout_rate": 0},
-            {"filters": 64, "ops": ["conv", "res2d"], "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": 4,
-              "layer_norm": [self.layer_norm_dec, False], "dropout_rate": 0}
+            {"filters": 64, "ops": ["conv", "resconv"], "conv_kernel_size": ker3_3, "weighted_sum": False, "up_kernel_size": spatial_contraction_product(down_ker3, 2),
+              **_norm_kwargs_list(self.norm_decoder, n_ops=2, position=0), "dropout_rate": 0}
         ]
 
 
 class Blend(ArchBase):
     def __init__(self, frame_aware:bool, attention:int=0, self_attention:int=0, blending_filter_factor:float=0.5, **kwargs):
-        super().__init__(frame_aware=frame_aware, batch_norm=True, layer_norm_dec=False, **kwargs)
+        super().__init__(frame_aware=frame_aware, **kwargs)
         if attention > 0 or self_attention:
             assert self.spatial_dimensions is not None and min( self.spatial_dimensions) > 0, f"for attention mechanism, spatial dim must be provided. Got {self.spatial_dimensions}"
         self.attention = attention
         self.self_attention = self_attention
         self.blending_filter_factor = blending_filter_factor
+        # window_norm_size = feature-layer spatial dim if known, else 32
+        fsd = self.feature_spatial_dimensions
+        if fsd is not None and any(d is not None and d > 0 for d in fsd):
+            if all(d == fsd[0] for d in fsd):
+                self.window_norm_size = fsd[0]
+            else:
+                self.window_norm_size = [s if s is not None and s>0 else 32 for s in list(fsd)]
+        else:
+            self.window_norm_size = 32
         self.feature_blending_settings = [
-            {"op": "res2d", "weighted_sum": False, "dropout_rate": self.dropout,
+            {"op": "resconv", "weighted_sum": False, "dropout_rate": self.dropout,
              "batch_norm": False},
-            {"op": "res2d", "weighted_sum": False, "dropout_rate": self.dropout,
+            {"op": "resconv", "weighted_sum": False, "dropout_rate": self.dropout,
              "batch_norm": False},
-            {"op": "res2d", "weighted_sum": False, "dropout_rate": self.dropout,
+            {"op": "resconv", "weighted_sum": False, "dropout_rate": self.dropout,
              "batch_norm": False}
         ]
     def requires_input_spatial_dim(self):
@@ -365,16 +448,16 @@ class BlendD4(Blend, D4):
 
 class TemPy(ArchBase):
     def __init__(self, window_attention:int, wsa_edm:bool=False, wsa_cdm:bool=False, frame_aware:bool=True, **kwargs):
-        super().__init__(frame_aware=frame_aware, batch_norm=True, layer_norm_dec=False, **kwargs)
+        super().__init__(frame_aware=frame_aware, **kwargs)
         self.window_attention = window_attention
         if self.frame_window > 0:
             assert window_attention > 0
         self.wsa_edm = wsa_edm
         self.wsa_cdm = wsa_cdm
         self.feature_blending_settings = [
-            {"op": "res2d", "weighted_sum": False, "dropout_rate": self.dropout, "batch_norm": False},
-            {"op": "res2d", "weighted_sum": False, "dropout_rate": self.dropout, "batch_norm": False},
-            {"op": "res2d", "weighted_sum": False, "dropout_rate": self.dropout, "batch_norm": False}
+            {"op": "resconv", "weighted_sum": False, "dropout_rate": self.dropout, "batch_norm": False},
+            {"op": "resconv", "weighted_sum": False, "dropout_rate": self.dropout, "batch_norm": False},
+            {"op": "resconv", "weighted_sum": False, "dropout_rate": self.dropout, "batch_norm": False}
         ]
         # to be defined:
         self.attention_spatial_radius = None
@@ -386,24 +469,35 @@ class TemPyD2(TemPy, D2):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 2, message="Temporal Attention")
+        self.window_norm_size = self.attention_spatial_radius
 
 class TemPyD3(TemPy, D3):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 3, message="Temporal Attention")
+        self.window_norm_size = self.attention_spatial_radius
 
 class TemPyD4(TemPy, D4):
     def __init__(self, attention_spatial_radius:int, **kwargs):
         super().__init__(pair_combine_kernel_size=1, blend_combine_kernel_size=5, max_dilation=1, **kwargs)
         self.attention_spatial_radius = limit_radius(attention_spatial_radius, self.spatial_dimensions, 2 ** 4, message="Temporal Attention")
+        self.window_norm_size = self.attention_spatial_radius
 
-def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, downsampling):
+def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, downsampling, tridimensional_mode:bool=False):
+    ndims = 2 if not tridimensional_mode else 3
     if spa_dimensions is None:
         return target_kernel, target_dilation
-    spa_dimensions = ensure_multiplicity(2, spa_dimensions)
-    kernel = ensure_multiplicity(2, target_kernel)
-    dilation = ensure_multiplicity(2, target_dilation)
-    spa_dimensions = [d/downsampling if d is not None and d>0 else None for d in spa_dimensions]
+    spa_dimensions = ensure_multiplicity(ndims, spa_dimensions)
+    if isinstance(target_kernel, int):
+        if tridimensional_mode:
+            target_kernel = [min(3, target_kernel), target_kernel, target_kernel] # Z, Y, X
+    kernel = ensure_multiplicity(ndims, target_kernel)
+    if isinstance(target_dilation, int):
+        if tridimensional_mode:
+            target_dilation = [1, target_dilation, target_dilation] # Z, Y, X
+    dilation = ensure_multiplicity(ndims, target_dilation)
+    downsampling = ensure_multiplicity(ndims, downsampling)
+    spa_dimensions = [d/ds if d is not None and d>0 else None for d, ds in zip(spa_dimensions, downsampling)]
     for i in range(len(spa_dimensions)):
         while not test_ker_dil(kernel[i], dilation[i], spa_dimensions[i]):
             if dilation[i] > 1:
@@ -412,10 +506,9 @@ def get_kernels_and_dilation(target_kernel, target_dilation, spa_dimensions, dow
                 kernel[i] = 1 + 2 * ((kernel[i] - 1) // 2 - 1)
             else:
                 raise ValueError(f"Cannot find kernel size that suit dimension: {spa_dimensions[i]}")
-    kernel = kernel[0] if kernel[0] == kernel[1] else kernel
-    dilation = dilation[0] if dilation[0] == dilation[1] else dilation
+    kernel = kernel[0] if ndims==2 and kernel[0] == kernel[1] else kernel
+    dilation = dilation[0] if ndims==2 and dilation[0] == dilation[1] else dilation
     return kernel, dilation
-
 
 def test_ker_dil(ker, dil, dim):
     if ker==0 or ker == 1 and dil == 1 or dim is None or dim <= 0:
@@ -423,14 +516,41 @@ def test_ker_dil(ker, dil, dim):
     size = (ker-1)*dil
     return dim >= size * 2
 
+def get_downsampling_factor(target_downsampling, spa_dimensions, downsampling, tridimensional_mode:bool):
+    ndims = 2 if not tridimensional_mode else 3
+    if spa_dimensions is None:
+        return target_downsampling
+    spa_dimensions = ensure_multiplicity(ndims, spa_dimensions)
+    downsampling = ensure_multiplicity(ndims, downsampling)
+    result_downsampling = ensure_multiplicity(ndims, target_downsampling)
+    spa_dimensions = [dim / ds if dim is not None and dim > 0 else None for dim, ds in zip(spa_dimensions, downsampling)]
+    for i in range(len(spa_dimensions)):
+        while float(spa_dimensions[i])/float(result_downsampling[i]) < 1:
+            result_downsampling[i] -= 1
+    return result_downsampling[0] if ndims == 2 and result_downsampling[0] == result_downsampling[1] else result_downsampling
+
+
+def spatial_contraction_product(*down):
+    dim = [1 if isinstance(d, int) else len(d) for d in down]
+    max_dim = max(dim)
+    if max_dim == 1:
+        return math.prod(down)
+    down = [ensure_multiplicity(max_dim, d) for d in down]
+    res=[]
+    for i in range(max_dim):
+        res.append(math.prod([d[i] for d in down]))
+    return res
+
 def limit_radius(target_radius, spa_dimensions, downsampling, message:str=None):
     if target_radius == 0 or spa_dimensions is None:
         return target_radius
-    spa_dimensions = ensure_multiplicity(2, spa_dimensions)
-    rad = ensure_multiplicity(2, target_radius)
-    spa_dimensions = [d // downsampling if d is not None and d > 0 else None for d in spa_dimensions]
+    ndims = len(spa_dimensions)
+    spa_dimensions = ensure_multiplicity(ndims, spa_dimensions)
+    rad = ensure_multiplicity(ndims, target_radius)
+    downsampling = ensure_multiplicity(ndims, downsampling)
+    spa_dimensions = [max(1, d // ds) if d is not None and d > 0 else None for d, ds in zip(spa_dimensions, downsampling)]
     rad = [min(s, r) for r, s in zip(rad, spa_dimensions)]
-    if rad[0] == rad[1]:
+    if all(r == rad[0] for r in rad):
         rad = rad[0]
     if message is not None:
         print(f"{message} rad: target={target_radius} -> actual={rad} for dim: {spa_dimensions}")
