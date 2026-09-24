@@ -120,20 +120,19 @@ def get_metrics_fun(scale: float, max_objects_number: int = 0, category:bool = F
 
         if tracking:
             # DISPLACEMENT
-            dm = objectwise_compute_channel(dYX, mean_fun, labels, ids, sizes)
+            dm = objectwise_compute_channel(dYX, mean_fun, labels, ids, sizes) # T, Y, X, 2 -> T, N, 2
             true_dm = objectwise_compute_channel(true_dYX, mean_fun, labels, ids, sizes)
-            dm_l2 = coord_distance_function(true_dm, dm)
+            dm_l2 = coord_distance_function(true_dm, dm) # (T, N, 2) -> (,)
             dm_l2 = tf.cond(tf.math.is_nan(dm_l2), lambda: zero, lambda: dm_l2)
             metrics.append(-dm_l2)
 
             # Link Multiplicity
             true_lm = tf.cast(objectwise_compute_channel(true_lm, mean_fun_dense_cat, labels, ids, sizes), tf.int32) - tf.cast(1, tf.int32)
-            lm = objectwise_compute_channel(lm, mean_fun_sparse_cat, labels, ids, sizes)
-            lm = tf.math.argmax(lm, axis=-1, output_type=tf.int32)
-            errors = tf.math.not_equal(lm, true_lm)
+            lm = objectwise_compute_channel(lm, mean_fun_sparse_cat, labels, ids, sizes) # T, Y, X, 3 -> T, N, 3
+            lm = tf.math.argmax(lm, axis=-1, output_type=tf.int32) # T, N, 3 (proba) -> T, N (category)
+            errors = tf.math.not_equal(lm, true_lm) # T, N
             lm_errors = tf.reduce_sum(tf.cast(errors, tf.float32))
             metrics.append(-lm_errors)
-
         return tf.stack(metrics)
     if category:
         if tracking:

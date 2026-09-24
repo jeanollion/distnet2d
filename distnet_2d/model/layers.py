@@ -11,6 +11,9 @@ from .activations import (
 import tensorflow as tf
 import numpy as np
 import os
+import inspect
+_LAYER_ADD_WEIGHT_HAS_AUTOCAST_ARG = 'autocast' in inspect.signature( tf.keras.layers.Layer.add_weight ).parameters
+
 os.environ["DISTNET_DEBUG_NUMERICS"] = "0"
 
 def numerics_probe(x, name):
@@ -146,14 +149,19 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
             if dim is not None and ws[i] > dim:
                 ws[i] = dim
         self._window = ws
-
+        kw = dict(autocast=False) if _LAYER_ADD_WEIGHT_HAS_AUTOCAST_ARG else {}
         if self.scale:
-            self.gamma = self.add_weight("gamma", shape=(C,), initializer="ones", dtype="float32", autocast=False)
+            self.gamma = self.add_weight("gamma", shape=(C,), initializer="ones", dtype=tf.float32, **kw)
         if self.center:
-            self.beta = self.add_weight("beta", shape=(C,), initializer="zeros", dtype="float32", autocast=False)
+            self.beta = self.add_weight("beta", shape=(C,), initializer="zeros", dtype=tf.float32, **kw)
         # Broadcast shape for gamma/beta against (B, [Z,] Y, X, G, Cg) — built once.
         self._vars_shape = [1] * (n_spatial + 1) + [self.groups, self._channels_per_group]
         super().build(input_shape)
+
+    @staticmethod
+    def _f32(var):
+        """Read the underlying float32 variable, bypassing AutoCastVariable."""
+        return var._variable if hasattr(var, '_variable') else var
 
     def call(self, inputs):
         # Stats (mean, variance) are computed in fp32 for numerical stability
@@ -190,10 +198,10 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
             var = tf.maximum(ms - m * m, tf.cast(0.0, m.dtype))
             inv = tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
             if self.scale:
-                inv = inv * tf.reshape(self.gamma, self._vars_shape)
+                inv = inv * tf.reshape(self._f32(self.gamma), self._vars_shape)
             res = -m * inv
             if self.center:
-                res = res + tf.reshape(self.beta, self._vars_shape)
+                res = res + tf.reshape(self._f32(self.beta), self._vars_shape)
             x_g = x_g * inv + res
             out = tf.reshape(x_g, x_shape)
         else:
@@ -232,10 +240,10 @@ class WindowGroupNormalization(tf.keras.layers.Layer):
             x_g = tf.reshape(x, new_shape)
             inv = tf.math.rsqrt(var + tf.cast(self.epsilon, var.dtype))
             if self.scale:
-                inv = inv * tf.reshape(self.gamma, self._vars_shape)
+                inv = inv * tf.reshape(self._f32(self.gamma), self._vars_shape)
             res = -m * inv
             if self.center:
-                res = res + tf.reshape(self.beta, self._vars_shape)
+                res = res + tf.reshape(self._f32(self.beta), self._vars_shape)
             x_g = x_g * inv + res
             out = tf.reshape(x_g, x_shape)
         return numerics_probe(tf.cast(out, inputs.dtype), f"{self.name}/wn_out")
